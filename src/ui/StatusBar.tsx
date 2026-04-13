@@ -1,11 +1,11 @@
-// ============================================================
-// AgentBoard — StatusBar component
-// ============================================================
-
 import React from 'react';
 import { Box, Text } from 'ink';
 import { useAppState } from '../store/index.js';
 import type { AppFocus } from '../types/index.js';
+import { Badge, UI_CHROME, useSpinnerFrame } from './chrome.js';
+import { getHeaderContextTask } from './header-context.js';
+
+export const STATUS_BAR_HEIGHT = 1;
 
 function focusLabel(focus: AppFocus): string {
   switch (focus) {
@@ -14,7 +14,7 @@ function focusLabel(focus: AppFocus): string {
     case 'terminal':
       return 'TERMINAL';
     case 'filterbar':
-      return 'FILTER';
+      return 'FILTERS';
     case 'modal':
       return 'MODAL';
     case 'search':
@@ -27,14 +27,14 @@ function focusLabel(focus: AppFocus): string {
 function kbdHints(focus: AppFocus): string {
   switch (focus) {
     case 'board':
-      return 'n new  f filters  g layout  ,/. repo  i IDE  x workspace  c create-pr  o PR  v checks  m merge  R native-term  P new-pillar  D del-pillar  p assign  Ctrl+D desc  d del  z full-term  [ ]move  Enter shell  s sync  ? help  q quit';
+      return 'move  : commands  Enter shell  n new  f filters  s sync  ? help';
     case 'terminal':
       return 'Ctrl+C interrupt  PgUp/PgDn scroll  Esc board';
     case 'modal':
-      return 'Esc cancel';
+      return 'Enter confirm  Esc cancel';
     case 'filterbar':
     case 'search':
-      return '[f] filter  [/] search  [ESC] clear';
+      return 'f edit  / search  Esc clear';
     default:
       return '';
   }
@@ -42,28 +42,39 @@ function kbdHints(focus: AppFocus): string {
 
 export const StatusBar = React.memo(function StatusBar(): JSX.Element {
   const state = useAppState();
-
-  const label = focusLabel(state.focus);
+  const contextTask = getHeaderContextTask(state);
+  const contextActivity =
+    contextTask != null ? state.sessionActivityByTaskId[contextTask.id] : undefined;
+  const busySpinner = useSpinnerFrame(contextActivity?.isBusy === true);
+  const focus = focusLabel(state.focus);
   const hints = kbdHints(state.focus);
+  const activityLabel =
+    contextActivity?.isBusy === true
+      ? `${busySpinner} ${contextActivity.label ?? contextActivity.command ?? 'Working'}`
+      : undefined;
 
   return (
-    <Box justifyContent="space-between" height={1} overflow="hidden">
-      {/* Left section: mode + status message */}
-      <Box flexDirection="row" gap={1}>
-        <Text backgroundColor="cyan" color="black">
-          {` ${label} `}
-        </Text>
-        {state.statusMessage != null && state.statusMessage.length > 0 && (
-          <Text>{state.statusMessage}</Text>
-        )}
-        {state.syncInProgress && (
-          <Text color="yellow">{'⟳ syncing…'}</Text>
+    <Box justifyContent="space-between" height={STATUS_BAR_HEIGHT} overflow="hidden">
+      <Box flexDirection="row" gap={1} overflow="hidden">
+        <Badge label={focus} tone={state.focus === 'terminal' ? 'accent' : 'neutral'} />
+        {activityLabel && <Badge label={activityLabel} tone="warning" />}
+        {state.statusMessage != null && state.statusMessage.length > 0 ? (
+          <Box flexShrink={1} overflow="hidden">
+            <Text color={UI_CHROME.text} wrap="truncate">
+              {state.statusMessage}
+            </Text>
+          </Box>
+        ) : (
+          <Text color={UI_CHROME.muted}>
+            {contextTask ? `Selected: ${contextTask.title}` : 'Ready'}
+          </Text>
         )}
       </Box>
 
-      {/* Right section: keyboard hints */}
-      <Box>
-        <Text dimColor wrap="truncate">{hints}</Text>
+      <Box flexShrink={0} overflow="hidden">
+        <Text color={UI_CHROME.muted} wrap="truncate">
+          {hints}
+        </Text>
       </Box>
     </Box>
   );

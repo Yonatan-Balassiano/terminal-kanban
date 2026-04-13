@@ -1,8 +1,5 @@
-// ============================================================
-// AgentBoard — HelpOverlay component
-// ============================================================
-
 import { Box, Text } from 'ink';
+import { Badge, UI_CHROME } from './chrome.js';
 
 interface Section {
   title: string;
@@ -13,69 +10,42 @@ const SECTIONS: Section[] = [
   {
     title: 'Navigation',
     items: [
-      'hjkl / arrow keys — move between columns and tasks',
+      'hjkl / arrow keys move between columns and tasks',
+      ': or Ctrl+P opens the command palette',
+      'Enter opens the selected task shell',
+      't focuses the terminal pane',
+      'z expands the terminal workspace',
     ],
   },
   {
-    title: 'Task actions',
+    title: 'Task',
     items: [
-      'n   — create new task',
-      'i   — open selected task workspace in IDE',
-      'x   — open selected task workspace in Finder/File Explorer',
-      'c   — create PR for selected task',
-      'o   — open GitHub PR for selected task',
-      'v   — open GitHub checks for selected task PR',
-      'm   — merge approved PR with passing build',
-      'R   — recreate selected task shell',
-      'P   — create pillar',
-      'D   — delete selected task pillar and its tasks',
-      'Ctrl+D — edit task description',
-      'r   — rename task',
-      'd   — delete task',
-      'z   — open terminal full page',
-      '[   — move task left (previous track)',
-      ']   — move task right (next track)',
-      'p   — assign pillar (c create, d delete inside picker)',
+      'n new task, r rename, Ctrl+D edit description, d delete, a archive',
+      'p assign pillar, P create pillar, D delete pillar and its tasks',
+      '[ and ] move the selected task between tracks',
+      'i opens IDE, x reveals workspace, R recreates the task shell',
     ],
   },
   {
-    title: 'View',
+    title: 'GitHub',
     items: [
-      'f   — open repo/pillar filters',
-      '/   — search',
-      'g   — choose terminal layout (side-by-side / top-bottom)',
-      ',   — switch to previous repo',
-      '.   — switch to next repo',
+      'c create PR, o open PR, v open checks, m merge approved passing PR',
+      's runs a sync for PR, CI, and review status',
     ],
   },
   {
-    title: 'Session',
+    title: 'Views',
     items: [
-      'Enter — open task shell',
-      't     — focus terminal pane',
-      'Ctrl+C — interrupt running terminal command',
-      'PgUp/PgDn — scroll terminal output',
-      'Esc   — return to board from terminal',
-      'a     — pick agent macro',
+      'f opens filters, g changes board / terminal layout',
+      ', and . switch active repo, ? toggles this help',
     ],
   },
   {
-    title: 'Sync',
+    title: 'Terminal',
     items: [
-      's — manual sync (GitHub PR/CI status)',
-    ],
-  },
-  {
-    title: 'Icons',
-    items: [
-      '▶  selected task',
-      '●  session active',
-      '○  no session',
-      '↑  PR open',
-      '⇑  PR merged',
-      '◐  CI pending',
-      '✓  CI pass',
-      '✗  CI fail',
+      'Ctrl+C interrupts the running command inside the terminal',
+      'PgUp/PgDn or Shift+Up/Down scroll terminal history',
+      'Esc returns focus to the board',
     ],
   },
 ];
@@ -84,21 +54,32 @@ export function HelpOverlay(): JSX.Element {
   return (
     <Box
       borderStyle="double"
+      borderColor={UI_CHROME.accent}
       padding={1}
       flexDirection="column"
       alignSelf="center"
+      width={72}
     >
+      <Box flexDirection="row" justifyContent="space-between" marginBottom={1}>
+        <Badge label="KEYBOARD" tone="accent" />
+        <Text color={UI_CHROME.muted}>Esc close</Text>
+      </Box>
+
       <Box marginBottom={1}>
-        <Text bold>{'AgentBoard — Keyboard Reference'}</Text>
+        <Text bold color={UI_CHROME.text}>
+          AgentBoard workspace shortcuts
+        </Text>
       </Box>
 
       {SECTIONS.map((section) => (
         <Box key={section.title} flexDirection="column" marginBottom={1}>
-          <Text bold color="cyan">
-            {section.title}
-          </Text>
+          <Box marginBottom={1}>
+            <Badge label={section.title.toUpperCase()} tone="muted" />
+          </Box>
           {section.items.map((item) => (
-            <Text key={item}>{`  ${item}`}</Text>
+            <Text key={item} color={UI_CHROME.text} wrap="truncate">
+              {`- ${item}`}
+            </Text>
           ))}
         </Box>
       ))}

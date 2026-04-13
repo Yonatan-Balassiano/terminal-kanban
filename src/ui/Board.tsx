@@ -81,6 +81,9 @@ export const Board = React.memo(function Board({
     group.sort((a, b) => a.sortKey - b.sortKey);
   }
 
+  const visibleRepoIds = new Set(visibleTasks.map((task) => task.repoId));
+  const showRepoLabel = visibleRepoIds.size > 1;
+
   return (
     <Box flexDirection="row" gap={1} height={height} overflow="hidden">
       {sortedTracks.map((track, trackIndex) => {
@@ -94,6 +97,7 @@ export const Board = React.memo(function Board({
             isSelected={isSelected}
             selectedTaskIndex={isSelected ? selectedTaskIndex : -1}
             repoLabelsById={repoLabelsById}
+            showRepoLabel={showRepoLabel}
             height={height}
           />
         );

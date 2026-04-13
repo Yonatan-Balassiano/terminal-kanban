@@ -3,7 +3,9 @@ import {
   canShowTerminalPane,
   getTerminalContentWidth,
   getTerminalPaneWidth,
+  getTerminalViewportHeight,
   MIN_TOTAL_TERMINAL_WIDTH,
+  shouldShowTerminalFooter,
 } from '../src/ui/terminal-layout.js';
 
 describe('terminal layout helpers', () => {
@@ -18,7 +20,14 @@ describe('terminal layout helpers', () => {
   });
 
   it('derives the rendered terminal content width from the live pane width', () => {
-    expect(getTerminalContentWidth(MIN_TOTAL_TERMINAL_WIDTH, false)).toBe(38);
-    expect(getTerminalContentWidth(120, true)).toBe(118);
+    expect(getTerminalContentWidth(MIN_TOTAL_TERMINAL_WIDTH, false)).toBe(40);
+    expect(getTerminalContentWidth(120, true)).toBe(120);
+  });
+
+  it('reserves terminal chrome lines for the session header and footer', () => {
+    expect(getTerminalViewportHeight(10)).toBe(8);
+    expect(getTerminalViewportHeight(2)).toBe(1);
+    expect(shouldShowTerminalFooter(3)).toBe(true);
+    expect(shouldShowTerminalFooter(2)).toBe(false);
   });
 });

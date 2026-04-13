@@ -522,6 +522,7 @@ export type AppFocus = 'board' | 'terminal' | 'filterbar' | 'modal' | 'search';
 
 export type ModalType =
   | 'create-task'
+  | 'command-palette'
   | 'rename-task'
   | 'task-description'
   | 'delete-confirm'

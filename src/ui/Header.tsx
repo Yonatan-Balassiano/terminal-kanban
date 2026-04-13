@@ -1,36 +1,34 @@
-// ============================================================
-// AgentBoard — Header component (top bar)
-// ============================================================
-
 import React from 'react';
 import { Box, Text } from 'ink';
 import { useAppState } from '../store/index.js';
+import { Badge, SessionActivityBadge, UI_CHROME, countActiveFilters, useSpinnerFrame } from './chrome.js';
 import { getHeaderContextTask } from './header-context.js';
 
-function InfoBadge({
-  label,
+export const HEADER_HEIGHT = 2;
+
+function truncate(value: string, max: number): string {
+  if (value.length <= max) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function HeaderText({
+  icon,
   value,
-  labelColor,
-  valueColor = 'white',
-  flexGrow = 0,
-  flexShrink = 0,
+  valueColor = UI_CHROME.text,
 }: {
-  label: string;
+  icon: string;
   value: string;
-  labelColor: string;
   valueColor?: string;
-  flexGrow?: number;
-  flexShrink?: number;
 }): JSX.Element {
   return (
-    <Box marginRight={1} flexGrow={flexGrow} flexShrink={flexShrink} overflow="hidden">
-      <Text color="gray">{'['}</Text>
-      <Text color={labelColor}>{label}</Text>
-      <Text color="gray">{':'}</Text>
+    <Box marginRight={1} flexDirection="row" flexShrink={1} overflow="hidden">
+      <Text color={UI_CHROME.muted}>{`${icon} `}</Text>
       <Text color={valueColor} wrap="truncate">
         {value}
       </Text>
-      <Text color="gray">{']'}</Text>
     </Box>
   );
 }
@@ -41,138 +39,136 @@ export const Header = React.memo(function Header(): JSX.Element {
     repos,
     tasks,
     pillars,
+    tracks,
     savedViews,
     activeRepoId,
     activeViewId,
     activeTaskId,
     activeSessionBranch,
-    activeSessionBackendType,
-    focus,
+    sessionActivityByTaskId,
+    syncInProgress,
     daemonConnected,
+    filters,
   } = state;
 
-  const activeTask =
-    activeTaskId != null ? tasks.find((task) => task.id === activeTaskId) : undefined;
+  const activeRepo =
+    activeRepoId != null ? repos.find((repo) => repo.id === activeRepoId) : undefined;
+  const activeView = savedViews.find((view) => view.id === activeViewId);
   const contextTask = getHeaderContextTask(state);
+  const contextTrack =
+    contextTask != null ? tracks.find((track) => track.id === contextTask.trackId) : undefined;
   const contextPillar =
     contextTask?.pillarId != null
       ? pillars.find((pillar) => pillar.id === contextTask.pillarId)
       : undefined;
-  const activeTaskRepo =
-    contextTask != null
-      ? repos.find((repo) => repo.id === contextTask.repoId)
-      : undefined;
-  const activeView = savedViews.find((v) => v.id === activeViewId);
-  const terminalMode = focus === 'terminal' && activeTask != null;
-
-  const daemonBadge = daemonConnected ? (
-    <Text backgroundColor="green" color="black" bold>
-      {' DAEMON '}
-    </Text>
-  ) : (
-    <Text backgroundColor="yellow" color="black" bold>
-      {' DISCONNECTED '}
-    </Text>
+  const contextRepo =
+    contextTask != null ? repos.find((repo) => repo.id === contextTask.repoId) : undefined;
+  const contextActivity =
+    contextTask != null ? sessionActivityByTaskId[contextTask.id] : undefined;
+  const busySessions = tasks.filter(
+    (task) => task.sessionId != null && sessionActivityByTaskId[task.id]?.isBusy,
   );
+  const busySpinner = useSpinnerFrame(busySessions.length > 0);
+  const activeFilters = countActiveFilters(filters);
+  const branchLabel =
+    activeTaskId === contextTask?.id
+      ? activeSessionBranch ?? contextTask?.branchName
+      : contextTask?.branchName;
 
   return (
-    <Box flexDirection="row" flexWrap="nowrap" height={1} overflow="hidden">
-      <Box flexDirection="row" flexGrow={1} flexShrink={1} overflow="hidden">
-        <Box marginRight={1}>
-          <Text backgroundColor="cyan" color="black" bold>
-            {' AGENTBOARD '}
-          </Text>
+    <Box flexDirection="column" height={HEADER_HEIGHT} overflow="hidden">
+      <Box
+        flexDirection="row"
+        justifyContent="space-between"
+        height={1}
+        overflow="hidden"
+      >
+        <Box flexDirection="row" gap={1} overflow="hidden">
+          <Badge label="agentboard" tone="accent" />
+          <Badge
+            icon="◈"
+            label={activeRepo ? truncate(activeRepo.label, 18) : 'all repos'}
+            tone="muted"
+          />
+          {activeView && (
+            <Badge icon="⌘" label={truncate(activeView.label, 16)} tone="purple" />
+          )}
+          {activeFilters > 0 && (
+            <Badge icon="⚲" label={String(activeFilters)} tone="muted" />
+          )}
         </Box>
 
-        {repos.length === 0 ? (
-          <Box marginRight={1}>
-            <Text dimColor>{'No repos registered'}</Text>
-          </Box>
-        ) : (
-          <>
-            {repos.map((repo) => {
-              const isActive = repo.id === activeRepoId;
-              return (
-                <Box key={repo.id} marginRight={1}>
-                  <Text
-                    color={isActive ? 'cyan' : 'white'}
-                    bold={isActive}
-                  >
-                    [{repo.label}
-                    {isActive ? '*' : ''}]
-                  </Text>
-                </Box>
-              );
-            })}
-            <Box marginRight={1}>
-              <Text
-                color={activeRepoId === undefined ? 'cyan' : 'white'}
-                bold={activeRepoId === undefined}
-              >
-                [{activeRepoId === undefined ? 'All*' : 'All'}]
-              </Text>
-            </Box>
-          </>
-        )}
-
-        {!terminalMode && activeView && (
-          <Box marginRight={1}>
-            <Text color="magenta">{`View: @${activeView.label}`}</Text>
-          </Box>
-        )}
+        <Box flexDirection="row" gap={1} flexShrink={0} overflow="hidden">
+          {busySessions.length > 0 && (
+            <Badge
+              icon={busySpinner}
+              label={busySessions.length === 1 ? '1 running' : `${busySessions.length} running`}
+              tone="warning"
+            />
+          )}
+          {syncInProgress && <Badge icon="↻" label="syncing" tone="warning" />}
+          <Badge
+            icon={daemonConnected ? '●' : '○'}
+            label={daemonConnected ? 'daemon' : 'offline'}
+            tone={daemonConnected ? 'success' : 'danger'}
+          />
+        </Box>
       </Box>
 
-      <Box flexDirection="row" flexShrink={0} overflow="hidden">
-        {contextTask && (
-          <>
-            <InfoBadge
-              label="repo"
-              value={activeTaskRepo?.label ?? contextTask.repoId}
-              labelColor="cyan"
-            />
-            <InfoBadge
-              label="pillar"
-              value={contextPillar?.label ?? 'none'}
-              labelColor="magenta"
-            />
-            <InfoBadge
-              label="ws"
-              value={contextTask.worktreePath ? 'worktree' : 'regular'}
-              labelColor="green"
-            />
-            <InfoBadge
-              label="task"
-              value={contextTask.title}
-              labelColor="yellow"
-              flexShrink={1}
-            />
-          </>
-        )}
-
-        {terminalMode && (
-          <>
-            <Box marginRight={1}>
-              <Text backgroundColor="blue" color="white" bold>
-                {' TERMINAL '}
-              </Text>
-            </Box>
-            <Box marginRight={1}>
-              <Text color="cyan">
-                {activeSessionBranch ?? activeTask.branchName ?? 'branch pending'}
-              </Text>
-            </Box>
-            {activeSessionBackendType && (
-              <Box marginRight={1}>
-                <Text dimColor>{`[${activeSessionBackendType}]`}</Text>
+      <Box
+        flexDirection="row"
+        justifyContent="space-between"
+        height={1}
+        overflow="hidden"
+      >
+        <Box flexDirection="row" flexGrow={1} flexShrink={1} overflow="hidden">
+          {contextTask ? (
+            <>
+              <Box marginRight={1} flexShrink={1} overflow="hidden">
+                <Text color={UI_CHROME.text} wrap="truncate">
+                  {truncate(contextTask.title, 48)}
+                </Text>
               </Box>
-            )}
-            <Box marginRight={1}>
-              <Text dimColor>{'Esc:board'}</Text>
-            </Box>
-          </>
-        )}
+              <HeaderText
+                icon="≡"
+                value={contextTrack?.label ?? contextTask.trackId}
+                valueColor={UI_CHROME.accent}
+              />
+              <HeaderText
+                icon="◈"
+                value={contextRepo?.label ?? contextTask.repoId}
+                valueColor={UI_CHROME.blue}
+              />
+              {contextPillar && (
+                <HeaderText
+                  icon={contextPillar.icon ?? '⬢'}
+                  value={contextPillar.label}
+                  valueColor={contextPillar.color ?? UI_CHROME.purple}
+                />
+              )}
+              <HeaderText
+                icon="⌂"
+                value={contextTask.worktreePath ? 'worktree' : 'repo'}
+                valueColor={contextTask.worktreePath ? UI_CHROME.success : UI_CHROME.muted}
+              />
+            </>
+          ) : (
+            <Text color={UI_CHROME.muted}>No task selected</Text>
+          )}
+        </Box>
 
-        {daemonBadge}
+        <Box flexDirection="row" gap={1} flexShrink={0} overflow="hidden">
+          {branchLabel && (
+            <Badge icon="⎇" label={truncate(branchLabel, 20)} tone="muted" />
+          )}
+          {contextTask && (
+            <SessionActivityBadge
+              activity={contextActivity}
+              hasSession={Boolean(contextTask.sessionId)}
+              isActiveSession={activeTaskId === contextTask.id}
+            />
+          )}
+        </Box>
       </Box>
     </Box>
   );

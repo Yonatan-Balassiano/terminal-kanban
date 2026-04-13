@@ -7,6 +7,7 @@ import type { TrackRecord, TaskRecord } from '../types/index.js';
 import { useAppState } from '../store/index.js';
 import { TaskCard, getTaskCardHeight } from './TaskCard.js';
 import { getVisibleWindow } from './track-window.js';
+import { UI_CHROME } from './chrome.js';
 
 export interface TrackProps {
   track: TrackRecord;
@@ -14,6 +15,7 @@ export interface TrackProps {
   isSelected: boolean;
   selectedTaskIndex: number;
   repoLabelsById: Map<string, string>;
+  showRepoLabel: boolean;
   height: number;
 }
 
@@ -26,13 +28,13 @@ export function Track({
   isSelected,
   selectedTaskIndex,
   repoLabelsById,
+  showRepoLabel,
   height,
 }: TrackProps): JSX.Element {
   const { pillars, focus, activeTaskId, sessionActivityByTaskId } = useAppState();
   const boardFocused = focus === 'board' || focus === 'filterbar';
   const showSelection = boardFocused && isSelected;
 
-  const headerLabel = `${track.label} (${tasks.length})`;
   const listHeight = Math.max(1, height - TRACK_FRAME_HEIGHT);
   const taskHeights = tasks.map((task) =>
     getTaskCardHeight(task, pillars.some((pillar) => pillar.id === task.pillarId)),
@@ -49,25 +51,25 @@ export function Track({
       flexDirection="column"
       width={COLUMN_WIDTH}
       height={height}
-      borderStyle="single"
-      borderColor={showSelection ? 'cyan' : 'gray'}
+      borderStyle={showSelection ? 'round' : 'single'}
+      borderColor={showSelection ? UI_CHROME.accent : UI_CHROME.line}
       overflow="hidden"
     >
-      {/* Column header */}
-      <Box paddingX={1}>
-        <Text
-          bold
-          color={showSelection ? 'cyan' : 'white'}
-          underline={showSelection}
-        >
-          {headerLabel}
-        </Text>
+      <Box paddingX={1} justifyContent="space-between" overflow="hidden">
+        <Box flexShrink={1} overflow="hidden">
+          <Text
+            color={showSelection ? UI_CHROME.accent : UI_CHROME.text}
+            wrap="truncate"
+          >
+            {track.label.toUpperCase()}
+          </Text>
+        </Box>
+        <Text color={showSelection ? UI_CHROME.accent : UI_CHROME.muted}>{tasks.length}</Text>
       </Box>
 
-      {/* Task list */}
       {tasks.length === 0 ? (
         <Box paddingX={1} paddingY={1}>
-          <Text dimColor>No tasks</Text>
+          <Text color={UI_CHROME.muted}>No tasks</Text>
         </Box>
       ) : (
         <Box flexDirection="column" overflow="hidden">
@@ -82,6 +84,7 @@ export function Track({
                 sessionActivity={sessionActivityByTaskId[task.id]}
                 pillars={pillars}
                 repoLabel={repoLabelsById.get(task.repoId) ?? task.repoId}
+                showRepoLabel={showRepoLabel}
               />
             );
           })}

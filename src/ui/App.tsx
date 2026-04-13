@@ -10,14 +10,14 @@ import {
   TerminalBufferContext,
 } from '../store/terminal-buffer.js';
 import type { AppController } from '../controller/index.js';
-import type { AppAction } from '../types/index.js';
+import type { AppAction, ModalType, TaskRecord } from '../types/index.js';
 
 // Real sub-components
-import { Header } from './Header.js';
+import { Header, HEADER_HEIGHT } from './Header.js';
 import { FilterBar, shouldShowFilterBar } from './FilterBar.js';
 import { Board } from './Board.js';
 import { TerminalPane } from './TerminalPane.js';
-import { StatusBar } from './StatusBar.js';
+import { StatusBar, STATUS_BAR_HEIGHT } from './StatusBar.js';
 import { HelpOverlay } from './HelpOverlay.js';
 import { ModalOverlay } from './ModalOverlay.js';
 import { CreateTaskModal } from './modals/CreateTask.js';
@@ -30,9 +30,14 @@ import { PillarPickerModal } from './modals/PillarPicker.js';
 import { FilterOptionsModal } from './modals/FilterOptions.js';
 import { ViewOptionsModal } from './modals/ViewOptions.js';
 import {
+  CommandPaletteModal,
+  type CommandPaletteItem,
+} from './modals/CommandPalette.js';
+import {
   canShowTerminalPane,
   TERMINAL_DIVIDER_WIDTH,
   getTerminalContentWidth,
+  getTerminalViewportHeight,
 } from './terminal-layout.js';
 import {
   appendTerminalInput,
@@ -44,6 +49,7 @@ import { getTaskPRUrl, hasOpenPR } from './pr-link.js';
 import { canMergeTask } from './task-card-status.js';
 import { getNextActiveRepoId } from './repo-switch.js';
 import { useTerminalSize } from './use-terminal-size.js';
+import { getHeaderContextTask } from './header-context.js';
 
 // --------------- App component -------------------------------
 
@@ -192,10 +198,671 @@ export default function App({ controller }: AppProps) {
     return workspace.path;
   };
 
+  const sortedTracks = [...state.tracks].sort((a, b) => a.sortOrder - b.sortOrder);
+  const backlogTrackIndex = sortedTracks.findIndex((track) => track.id === 'backlog');
+  const selectedTrack = sortedTracks[state.selectedTrackIndex];
+  const selectedTrackTasks = selectedTrack
+    ? state.tasks
+        .filter((task) => task.trackId === selectedTrack.id && task.archivedAt === undefined)
+        .sort((a, b) => a.sortKey - b.sortKey)
+    : [];
+  const selectedTask = selectedTrackTasks[state.selectedTaskIndex];
+  const contextTask = getHeaderContextTask(state);
+  const contextTrackIndex =
+    contextTask != null
+      ? sortedTracks.findIndex((track) => track.id === contextTask.trackId)
+      : -1;
+
+  const openModal = (modal: Exclude<ModalType, null>, data?: unknown) => {
+    dispatch({ type: 'MODAL_OPEN', payload: { modal, data } });
+  };
+
+  const closeModal = () => {
+    dispatch({ type: 'MODAL_CLOSE' });
+  };
+
+  const switchRepo = (direction: -1 | 1) => {
+    const nextRepoId = getNextActiveRepoId(state.repos, state.activeRepoId, direction);
+    dispatch({ type: 'REPO_SWITCH', payload: nextRepoId });
+    controller.setUIState({ activeRepoId: nextRepoId }).catch(() => {});
+  };
+
+  const openDeletePillarModal = (task: TaskRecord | undefined) => {
+    if (!task?.pillarId) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'Selected task has no pillar to delete.',
+      });
+      return;
+    }
+
+    const pillar = state.pillars.find((candidate) => candidate.id === task.pillarId);
+    if (!pillar) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'Selected task pillar no longer exists.',
+      });
+      return;
+    }
+
+    const taskCount = state.tasks.filter((candidate) => candidate.pillarId === pillar.id).length;
+    openModal('delete-pillar-confirm', { pillar, taskCount });
+  };
+
+  const openPRForTask = (task: TaskRecord | undefined) => {
+    if (!task) {
+      return;
+    }
+
+    if (!hasOpenPR(task)) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'Selected task has no open PR.',
+      });
+      return;
+    }
+
+    const repo = state.repos.find((candidate) => candidate.id === task.repoId);
+    const prUrl = getTaskPRUrl(task, repo);
+    if (!prUrl) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'PR link is not available for the selected task.',
+      });
+      return;
+    }
+
+    void openExternalUrl(prUrl)
+      .then(() => {
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: `Opening PR ${task.prNumber ?? ''}`.trim(),
+        });
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error ? err.message : 'Failed to open PR link';
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: message,
+        });
+      });
+  };
+
+  const openChecksForTask = (task: TaskRecord | undefined) => {
+    if (!task) {
+      return;
+    }
+
+    if (!hasOpenPR(task)) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'Selected task has no open PR.',
+      });
+      return;
+    }
+
+    const repo = state.repos.find((candidate) => candidate.id === task.repoId);
+    const prUrl = getTaskPRUrl(task, repo);
+    if (!prUrl) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'Checks link is not available for the selected task.',
+      });
+      return;
+    }
+
+    void openExternalUrl(`${prUrl}/checks`)
+      .then(() => {
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: `Opening checks for PR #${task.prNumber ?? ''}`.trim(),
+        });
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error ? err.message : 'Failed to open checks link';
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: message,
+        });
+      });
+  };
+
+  const createPRForTask = (task: TaskRecord | undefined) => {
+    if (!task) {
+      return;
+    }
+
+    void controller
+      .createTaskPR(task.id)
+      .then(() => {
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: `Ensured PR for task ${task.id}`,
+        });
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error ? err.message : 'Failed to create PR';
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: message,
+        });
+      });
+  };
+
+  const openTaskInIDE = (task: TaskRecord | undefined) => {
+    if (!task) {
+      return;
+    }
+
+    const repo = state.repos.find((candidate) => candidate.id === task.repoId);
+    if (!repo) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'Repo not found for selected task.',
+      });
+      return;
+    }
+
+    void prepareTaskWorkspacePath(task.id)
+      .then((path) => openPathInIDE(path, repo.preferredIde, repo.ideCommand))
+      .then(() => {
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: `Opening IDE for ${task.title}`,
+        });
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error ? err.message : 'Failed to open IDE';
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: message,
+        });
+      });
+  };
+
+  const revealTaskWorkspace = (task: TaskRecord | undefined) => {
+    if (!task) {
+      return;
+    }
+
+    void prepareTaskWorkspacePath(task.id)
+      .then((path) => revealPathInFileManager(path))
+      .then(() => {
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: `Opening workspace for ${task.title}`,
+        });
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error ? err.message : 'Failed to open workspace';
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: message,
+        });
+      });
+  };
+
+  const mergePRForTask = (task: TaskRecord | undefined) => {
+    if (!task) {
+      return;
+    }
+
+    if (!canMergeTask(task)) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'Merge requires an open PR, approved review, and passing build.',
+      });
+      return;
+    }
+
+    void controller
+      .mergeTaskPR(task.id)
+      .then(() => {
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: `Merged PR #${task.prNumber ?? ''}`.trim(),
+        });
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error ? err.message : 'Failed to merge PR';
+        dispatch({
+          type: 'STATUS_MESSAGE',
+          payload: message,
+        });
+      });
+  };
+
+  const focusOpenTerminal = () => {
+    if (!state.activeTaskId) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'No session open for the selected task.',
+      });
+      return;
+    }
+
+    dispatch({ type: 'TERMINAL_PANE_SHOW' });
+    focusTerminal();
+  };
+
+  const fullscreenTerminal = () => {
+    if (!state.activeTaskId) {
+      dispatch({
+        type: 'STATUS_MESSAGE',
+        payload: 'No session open to expand.',
+      });
+      return;
+    }
+
+    dispatch({ type: 'TERMINAL_PANE_SHOW' });
+    dispatch({ type: 'TERMINAL_FULLSCREEN_SET', payload: true });
+    focusTerminal();
+  };
+
+  const moveContextTask = (direction: -1 | 1) => {
+    if (!contextTask || contextTrackIndex < 0) {
+      return;
+    }
+
+    const nextTrack = sortedTracks[contextTrackIndex + direction];
+    if (!nextTrack) {
+      return;
+    }
+
+    controller.moveTask({ id: contextTask.id, trackId: nextTrack.id }).catch(() => {});
+  };
+
+  const executeCommandPaletteAction = (commandId: string) => {
+    switch (commandId) {
+      case 'create-task':
+        openModal('create-task');
+        return;
+      case 'rename-task':
+        if (contextTask) {
+          openModal('rename-task', { task: contextTask });
+        }
+        return;
+      case 'edit-description':
+        if (contextTask) {
+          openModal('task-description', { task: contextTask });
+        }
+        return;
+      case 'delete-task':
+        if (contextTask) {
+          openModal('delete-confirm', { task: contextTask });
+        }
+        return;
+      case 'archive-task':
+        closeModal();
+        if (contextTask) {
+          controller.archiveTask(contextTask.id).catch(() => {});
+        }
+        return;
+      case 'assign-pillar':
+        if (contextTask) {
+          openModal('pillar-picker', { task: contextTask });
+        }
+        return;
+      case 'create-pillar':
+        openModal('create-pillar', contextTask ? { task: contextTask } : undefined);
+        return;
+      case 'delete-pillar':
+        openDeletePillarModal(contextTask);
+        return;
+      case 'move-task-left':
+        closeModal();
+        moveContextTask(-1);
+        return;
+      case 'move-task-right':
+        closeModal();
+        moveContextTask(1);
+        return;
+      case 'open-shell':
+        closeModal();
+        if (contextTask) {
+          openTaskSession(contextTask.id);
+        }
+        return;
+      case 'recreate-shell':
+        closeModal();
+        if (contextTask) {
+          recreateTaskSession(contextTask.id);
+        }
+        return;
+      case 'focus-terminal':
+        closeModal();
+        focusOpenTerminal();
+        return;
+      case 'fullscreen-terminal':
+        closeModal();
+        fullscreenTerminal();
+        return;
+      case 'open-ide':
+        closeModal();
+        openTaskInIDE(contextTask);
+        return;
+      case 'open-workspace':
+        closeModal();
+        revealTaskWorkspace(contextTask);
+        return;
+      case 'create-pr':
+        closeModal();
+        createPRForTask(contextTask);
+        return;
+      case 'open-pr':
+        closeModal();
+        openPRForTask(contextTask);
+        return;
+      case 'open-checks':
+        closeModal();
+        openChecksForTask(contextTask);
+        return;
+      case 'merge-pr':
+        closeModal();
+        mergePRForTask(contextTask);
+        return;
+      case 'filters':
+        openModal('filter-picker');
+        return;
+      case 'layout':
+        openModal('view-picker');
+        return;
+      case 'sync':
+        closeModal();
+        controller.triggerSync().catch(() => {});
+        return;
+      case 'repo-prev':
+        closeModal();
+        switchRepo(-1);
+        return;
+      case 'repo-next':
+        closeModal();
+        switchRepo(1);
+        return;
+      case 'help':
+        openModal('help');
+        return;
+      case 'quit':
+        closeModal();
+        exit();
+        return;
+      default:
+        return;
+    }
+  };
+
+  const commandPaletteCommands: CommandPaletteItem[] = [
+    {
+      id: 'create-task',
+      title: 'Create task',
+      section: 'Task',
+      detail: 'Add a new task into the backlog track.',
+      shortcut: 'n',
+      keywords: ['new', 'backlog', 'add'],
+    },
+    {
+      id: 'rename-task',
+      title: 'Rename current task',
+      section: 'Task',
+      detail: contextTask ? `Rename ${contextTask.title}` : 'Rename the current task.',
+      shortcut: 'r',
+      keywords: ['title', 'edit'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to rename it.',
+    },
+    {
+      id: 'edit-description',
+      title: 'Edit task description',
+      section: 'Task',
+      detail: 'Open the long-form task description editor.',
+      shortcut: 'Ctrl+D',
+      keywords: ['notes', 'description'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to edit its description.',
+    },
+    {
+      id: 'delete-task',
+      title: 'Delete current task',
+      section: 'Task',
+      detail: 'Delete the selected task after confirmation.',
+      shortcut: 'd',
+      keywords: ['remove'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to delete it.',
+    },
+    {
+      id: 'archive-task',
+      title: 'Archive current task',
+      section: 'Task',
+      detail: 'Archive the selected task.',
+      shortcut: 'a',
+      keywords: ['done', 'hide'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to archive it.',
+    },
+    {
+      id: 'assign-pillar',
+      title: 'Assign pillar',
+      section: 'Task',
+      detail: 'Attach or change the pillar for the current task.',
+      shortcut: 'p',
+      keywords: ['label', 'pillar'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to assign a pillar.',
+    },
+    {
+      id: 'create-pillar',
+      title: 'Create pillar',
+      section: 'Task',
+      detail: 'Create a new pillar and optionally assign it to the current task.',
+      shortcut: 'P',
+      keywords: ['new pillar'],
+    },
+    {
+      id: 'delete-pillar',
+      title: 'Delete current pillar',
+      section: 'Task',
+      detail: 'Delete the current pillar and every task attached to it.',
+      shortcut: 'D',
+      keywords: ['remove pillar'],
+      disabled: contextTask?.pillarId == null,
+      disabledReason: 'The current task does not have a pillar to delete.',
+    },
+    {
+      id: 'move-task-left',
+      title: 'Move task left',
+      section: 'Task',
+      detail: 'Move the current task to the previous track.',
+      shortcut: '[',
+      keywords: ['previous track', 'kanban'],
+      disabled: contextTask == null || contextTrackIndex <= 0,
+      disabledReason: 'The current task is already in the first track.',
+    },
+    {
+      id: 'move-task-right',
+      title: 'Move task right',
+      section: 'Task',
+      detail: 'Move the current task to the next track.',
+      shortcut: ']',
+      keywords: ['next track', 'kanban'],
+      disabled:
+        contextTask == null ||
+        contextTrackIndex < 0 ||
+        contextTrackIndex >= sortedTracks.length - 1,
+      disabledReason: 'The current task is already in the last track.',
+    },
+    {
+      id: 'open-shell',
+      title: 'Open task shell',
+      section: 'Session',
+      detail: 'Start or attach the session for the current task.',
+      shortcut: 'Enter',
+      keywords: ['terminal', 'session', 'shell'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to open its shell.',
+    },
+    {
+      id: 'recreate-shell',
+      title: 'Recreate task shell',
+      section: 'Session',
+      detail: 'Recreate the current task shell with the native backend.',
+      shortcut: 'R',
+      keywords: ['terminal', 'session', 'restart'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to recreate its shell.',
+    },
+    {
+      id: 'focus-terminal',
+      title: 'Focus terminal pane',
+      section: 'Session',
+      detail: 'Jump into the embedded terminal pane.',
+      shortcut: 't',
+      keywords: ['terminal', 'pane'],
+      disabled: state.activeTaskId == null,
+      disabledReason: 'Open a task shell before focusing the terminal pane.',
+    },
+    {
+      id: 'fullscreen-terminal',
+      title: 'Expand terminal workspace',
+      section: 'Session',
+      detail: 'Make the terminal take over the workspace.',
+      shortcut: 'z',
+      keywords: ['terminal', 'fullscreen', 'expand'],
+      disabled: state.activeTaskId == null,
+      disabledReason: 'Open a task shell before expanding the terminal.',
+    },
+    {
+      id: 'open-ide',
+      title: 'Open workspace in IDE',
+      section: 'Workspace',
+      detail: 'Open the current task workspace in the configured IDE.',
+      shortcut: 'i',
+      keywords: ['editor', 'workspace'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to open its workspace.',
+    },
+    {
+      id: 'open-workspace',
+      title: 'Reveal workspace',
+      section: 'Workspace',
+      detail: 'Open the current task workspace in Finder or Explorer.',
+      shortcut: 'x',
+      keywords: ['finder', 'explorer', 'folder'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to reveal its workspace.',
+    },
+    {
+      id: 'create-pr',
+      title: 'Create or ensure pull request',
+      section: 'GitHub',
+      detail: 'Create the PR flow for the current task branch.',
+      shortcut: 'c',
+      keywords: ['github', 'pull request'],
+      disabled: contextTask == null,
+      disabledReason: 'Select a task to create a pull request.',
+    },
+    {
+      id: 'open-pr',
+      title: 'Open pull request',
+      section: 'GitHub',
+      detail: 'Open the current task PR in the browser.',
+      shortcut: 'o',
+      keywords: ['github', 'browser', 'pr'],
+      disabled: contextTask == null || !hasOpenPR(contextTask),
+      disabledReason: 'The current task does not have an open pull request.',
+    },
+    {
+      id: 'open-checks',
+      title: 'Open pull request checks',
+      section: 'GitHub',
+      detail: 'Open CI checks for the current task PR.',
+      shortcut: 'v',
+      keywords: ['github', 'checks', 'ci'],
+      disabled: contextTask == null || !hasOpenPR(contextTask),
+      disabledReason: 'The current task does not have an open pull request.',
+    },
+    {
+      id: 'merge-pr',
+      title: 'Merge pull request',
+      section: 'GitHub',
+      detail: 'Squash merge the current task PR when it is ready.',
+      shortcut: 'm',
+      keywords: ['github', 'merge'],
+      disabled: contextTask == null || !canMergeTask(contextTask),
+      disabledReason: 'Open PR, approved review, and passing build are required.',
+    },
+    {
+      id: 'filters',
+      title: 'Open filters',
+      section: 'View',
+      detail: 'Change repo and pillar filters.',
+      shortcut: 'f',
+      keywords: ['filter', 'repo', 'pillar'],
+    },
+    {
+      id: 'layout',
+      title: 'Change layout',
+      section: 'View',
+      detail: 'Choose the board and terminal layout.',
+      shortcut: 'g',
+      keywords: ['view', 'split', 'terminal'],
+    },
+    {
+      id: 'repo-prev',
+      title: 'Previous repo',
+      section: 'View',
+      detail: 'Switch to the previous repo filter.',
+      shortcut: ',',
+      keywords: ['repo', 'left'],
+      disabled: state.repos.length === 0,
+      disabledReason: 'Add a repo before switching repo scope.',
+    },
+    {
+      id: 'repo-next',
+      title: 'Next repo',
+      section: 'View',
+      detail: 'Switch to the next repo filter.',
+      shortcut: '.',
+      keywords: ['repo', 'right'],
+      disabled: state.repos.length === 0,
+      disabledReason: 'Add a repo before switching repo scope.',
+    },
+    {
+      id: 'sync',
+      title: 'Sync now',
+      section: 'System',
+      detail: 'Refresh PR, CI, and review state from GitHub.',
+      shortcut: 's',
+      keywords: ['refresh', 'github'],
+    },
+    {
+      id: 'help',
+      title: 'Open help',
+      section: 'System',
+      detail: 'Show the keyboard reference.',
+      shortcut: '?',
+      keywords: ['shortcuts', 'keys'],
+    },
+    {
+      id: 'quit',
+      title: 'Quit AgentBoard',
+      section: 'System',
+      detail: 'Exit the application.',
+      shortcut: 'q',
+      keywords: ['exit', 'close'],
+    },
+  ];
+
   // --------------- keystroke routing -----------------------
 
   useInput((input, key) => {
-    const { focus, activeTaskId, selectedTrackIndex, selectedTaskIndex, tracks, tasks } =
+    const { focus, activeTaskId, selectedTrackIndex, selectedTaskIndex, tracks } =
       state;
 
     if (key.ctrl && input === 'c' && focus !== 'terminal') {
@@ -276,22 +943,14 @@ export default function App({ controller }: AppProps) {
     // ---- Board / filterbar focus ----------------------------
     if (focus === 'board' || focus === 'filterbar') {
       if (key.ctrl && input === 'd') {
-        const sortedTracks = [...tracks].sort((a, b) => a.sortOrder - b.sortOrder);
-        const currentTrack = sortedTracks[selectedTrackIndex];
-        const trackTasks = currentTrack
-          ? tasks
-              .filter((t) => t.trackId === currentTrack.id && t.archivedAt === undefined)
-              .sort((a, b) => a.sortKey - b.sortKey)
-          : [];
-        const task = trackTasks[selectedTaskIndex];
-
-        if (task) {
-          dispatch({
-            type: 'MODAL_OPEN',
-            payload: { modal: 'task-description', data: { task } },
-          });
-          dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        if (selectedTask) {
+          openModal('task-description', { task: selectedTask });
         }
+        return;
+      }
+
+      if (key.ctrl && input === 'p') {
+        openModal('command-palette');
         return;
       }
 
@@ -311,335 +970,118 @@ export default function App({ controller }: AppProps) {
         return;
       }
 
-      // Task navigation within the current track
-      const sortedTracks = [...tracks].sort((a, b) => a.sortOrder - b.sortOrder);
-      const currentTrack = sortedTracks[selectedTrackIndex];
-      const trackTasks = currentTrack
-        ? tasks
-            .filter((t) => t.trackId === currentTrack.id && t.archivedAt === undefined)
-            .sort((a, b) => a.sortKey - b.sortKey)
-        : [];
-      const task = trackTasks[selectedTaskIndex];
-
       if (key.upArrow || input === 'k') {
         const next = Math.max(0, selectedTaskIndex - 1);
         dispatch({ type: 'TASK_SELECT', payload: next });
         return;
       }
       if (key.downArrow || input === 'j') {
-        const next = Math.min(trackTasks.length - 1, selectedTaskIndex + 1);
+        const next = Math.min(selectedTrackTasks.length - 1, selectedTaskIndex + 1);
         dispatch({ type: 'TASK_SELECT', payload: next });
         return;
       }
 
       if (input === ',' || input === '<') {
-        const nextRepoId = getNextActiveRepoId(state.repos, state.activeRepoId, -1);
-        dispatch({ type: 'REPO_SWITCH', payload: nextRepoId });
-        controller.setUIState({ activeRepoId: nextRepoId }).catch(() => {});
+        switchRepo(-1);
         return;
       }
 
       if (input === '.' || input === '>') {
-        const nextRepoId = getNextActiveRepoId(state.repos, state.activeRepoId, 1);
-        dispatch({ type: 'REPO_SWITCH', payload: nextRepoId });
-        controller.setUIState({ activeRepoId: nextRepoId }).catch(() => {});
+        switchRepo(1);
+        return;
+      }
+
+      if (input === ':') {
+        openModal('command-palette');
         return;
       }
 
       // ---- Actions -------------------------------------------
       if (input === 'n') {
-        dispatch({ type: 'MODAL_OPEN', payload: { modal: 'create-task' } });
-        dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        openModal('create-task');
         return;
       }
       if (input === 'r') {
-        if (task) {
-          dispatch({
-            type: 'MODAL_OPEN',
-            payload: { modal: 'rename-task', data: { task } },
-          });
-          dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        if (selectedTask) {
+          openModal('rename-task', { task: selectedTask });
         }
         return;
       }
       if (input === 'R') {
-        if (task) {
-          recreateTaskSession(task.id);
+        if (selectedTask) {
+          recreateTaskSession(selectedTask.id);
         }
         return;
       }
       if (input === 'd') {
-        if (task) {
-          dispatch({
-            type: 'MODAL_OPEN',
-            payload: { modal: 'delete-confirm', data: { task } },
-          });
-          dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        if (selectedTask) {
+          openModal('delete-confirm', { task: selectedTask });
         }
         return;
       }
       if (input === 'P') {
-        dispatch({
-          type: 'MODAL_OPEN',
-          payload: { modal: 'create-pillar' },
-        });
-        dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        openModal('create-pillar');
         return;
       }
       if (input === 'D') {
-        if (!task?.pillarId) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'Selected task has no pillar to delete.',
-          });
-          return;
-        }
-
-        const pillar = state.pillars.find((candidate) => candidate.id === task.pillarId);
-        if (!pillar) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'Selected task pillar no longer exists.',
-          });
-          return;
-        }
-
-        const taskCount = state.tasks.filter((candidate) => candidate.pillarId === pillar.id).length;
-        dispatch({
-          type: 'MODAL_OPEN',
-          payload: { modal: 'delete-pillar-confirm', data: { pillar, taskCount } },
-        });
-        dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        openDeletePillarModal(selectedTask);
         return;
       }
       if (input === '[') {
-        if (task && currentTrack) {
+        if (selectedTask && selectedTrack) {
           const prevTrack = sortedTracks[selectedTrackIndex - 1];
           if (prevTrack) {
-            controller.moveTask({ id: task.id, trackId: prevTrack.id }).catch(() => {});
+            controller.moveTask({ id: selectedTask.id, trackId: prevTrack.id }).catch(() => {});
           }
         }
         return;
       }
       if (input === ']') {
-        if (task && currentTrack) {
+        if (selectedTask && selectedTrack) {
           const nextTrack = sortedTracks[selectedTrackIndex + 1];
           if (nextTrack) {
-            controller.moveTask({ id: task.id, trackId: nextTrack.id }).catch(() => {});
+            controller.moveTask({ id: selectedTask.id, trackId: nextTrack.id }).catch(() => {});
           }
         }
         return;
       }
       if (input === 'p') {
-        if (task) {
-          dispatch({
-            type: 'MODAL_OPEN',
-            payload: { modal: 'pillar-picker', data: { task } },
-          });
-          dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        if (selectedTask) {
+          openModal('pillar-picker', { task: selectedTask });
         }
         return;
       }
       if (input === 'o') {
-        if (!task) {
-          return;
-        }
-
-        if (!hasOpenPR(task)) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'Selected task has no open PR.',
-          });
-          return;
-        }
-
-        const repo = state.repos.find((candidate) => candidate.id === task.repoId);
-        const prUrl = getTaskPRUrl(task, repo);
-        if (!prUrl) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'PR link is not available for the selected task.',
-          });
-          return;
-        }
-
-        void openExternalUrl(prUrl)
-          .then(() => {
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: `Opening PR ${task.prNumber ?? ''}`.trim(),
-            });
-          })
-          .catch((err: unknown) => {
-            const message =
-              err instanceof Error ? err.message : 'Failed to open PR link';
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: message,
-            });
-          });
+        openPRForTask(selectedTask);
         return;
       }
       if (input === 'v') {
-        if (!task) {
-          return;
-        }
-
-        if (!hasOpenPR(task)) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'Selected task has no open PR.',
-          });
-          return;
-        }
-
-        const repo = state.repos.find((candidate) => candidate.id === task.repoId);
-        const prUrl = getTaskPRUrl(task, repo);
-        if (!prUrl) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'Checks link is not available for the selected task.',
-          });
-          return;
-        }
-
-        void openExternalUrl(`${prUrl}/checks`)
-          .then(() => {
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: `Opening checks for PR #${task.prNumber ?? ''}`.trim(),
-            });
-          })
-          .catch((err: unknown) => {
-            const message =
-              err instanceof Error ? err.message : 'Failed to open checks link';
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: message,
-            });
-          });
+        openChecksForTask(selectedTask);
         return;
       }
       if (input === 'c') {
-        if (!task) {
-          return;
-        }
-
-        void controller
-          .createTaskPR(task.id)
-          .then(() => {
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: `Ensured PR for task ${task.id}`,
-            });
-          })
-          .catch((err: unknown) => {
-            const message =
-              err instanceof Error ? err.message : 'Failed to create PR';
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: message,
-            });
-          });
+        createPRForTask(selectedTask);
         return;
       }
       if (input === 'i') {
-        if (!task) {
-          return;
-        }
-
-        const repo = state.repos.find((candidate) => candidate.id === task.repoId);
-        if (!repo) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'Repo not found for selected task.',
-          });
-          return;
-        }
-
-        void prepareTaskWorkspacePath(task.id)
-          .then((path) => openPathInIDE(path, repo.preferredIde, repo.ideCommand))
-          .then(() => {
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: `Opening IDE for ${task.title}`,
-            });
-          })
-          .catch((err: unknown) => {
-            const message =
-              err instanceof Error ? err.message : 'Failed to open IDE';
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: message,
-            });
-          });
+        openTaskInIDE(selectedTask);
         return;
       }
       if (input === 'x') {
-        if (!task) {
-          return;
-        }
-
-        void prepareTaskWorkspacePath(task.id)
-          .then((path) => revealPathInFileManager(path))
-          .then(() => {
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: `Opening workspace for ${task.title}`,
-            });
-          })
-          .catch((err: unknown) => {
-            const message =
-              err instanceof Error ? err.message : 'Failed to open workspace';
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: message,
-            });
-          });
+        revealTaskWorkspace(selectedTask);
         return;
       }
       if (input === 'm') {
-        if (!task) {
-          return;
-        }
-
-        if (!canMergeTask(task)) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'Merge requires an open PR, approved review, and passing build.',
-          });
-          return;
-        }
-
-        void controller
-          .mergeTaskPR(task.id)
-          .then(() => {
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: `Merged PR #${task.prNumber ?? ''}`.trim(),
-            });
-          })
-          .catch((err: unknown) => {
-            const message =
-              err instanceof Error ? err.message : 'Failed to merge PR';
-            dispatch({
-              type: 'STATUS_MESSAGE',
-              payload: message,
-            });
-          });
+        mergePRForTask(selectedTask);
         return;
       }
       if (input === 'f') {
-        dispatch({
-          type: 'MODAL_OPEN',
-          payload: { modal: 'filter-picker' },
-        });
-        dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        openModal('filter-picker');
         return;
       }
       if (input === 'a') {
-        if (task) {
-          controller.archiveTask(task.id).catch(() => {});
+        if (selectedTask) {
+          controller.archiveTask(selectedTask.id).catch(() => {});
         }
         return;
       }
@@ -648,44 +1090,21 @@ export default function App({ controller }: AppProps) {
         return;
       }
       if (input === 't') {
-        if (!state.activeTaskId) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'No session open for the selected task.',
-          });
-          return;
-        }
-
-        dispatch({ type: 'TERMINAL_PANE_SHOW' });
-        focusTerminal();
+        focusOpenTerminal();
         return;
       }
       if (input === 'z') {
-        if (!state.activeTaskId) {
-          dispatch({
-            type: 'STATUS_MESSAGE',
-            payload: 'No session open to expand.',
-          });
-          return;
-        }
-
-        dispatch({ type: 'TERMINAL_PANE_SHOW' });
-        dispatch({ type: 'TERMINAL_FULLSCREEN_SET', payload: true });
-        focusTerminal();
+        fullscreenTerminal();
         return;
       }
       if (key.return) {
-        if (task) {
-          openTaskSession(task.id);
+        if (selectedTask) {
+          openTaskSession(selectedTask.id);
         }
         return;
       }
       if (input === 'g') {
-        dispatch({
-          type: 'MODAL_OPEN',
-          payload: { modal: 'view-picker' },
-        });
-        dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+        openModal('view-picker');
         return;
       }
       if (input === 'q') {
@@ -694,28 +1113,20 @@ export default function App({ controller }: AppProps) {
       }
       if (input === '?') {
         if (state.modal === null) {
-          dispatch({ type: 'MODAL_OPEN', payload: { modal: 'help' } });
-          dispatch({ type: 'FOCUS_SET', payload: 'modal' });
+          openModal('help');
         } else {
-          dispatch({ type: 'MODAL_CLOSE' });
-          dispatch({ type: 'FOCUS_SET', payload: 'board' });
+          closeModal();
         }
         return;
       }
     }
   });
 
-  // --------------- modal callbacks -------------------------
-
-  const closeModal = () => {
-    dispatch({ type: 'MODAL_CLOSE' });
-    dispatch({ type: 'FOCUS_SET', payload: 'board' });
-  };
-
-  const sortedTracks = [...state.tracks].sort((a, b) => a.sortOrder - b.sortOrder);
-  const backlogTrackIndex = sortedTracks.findIndex((track) => track.id === 'backlog');
   const filterBarVisible = shouldShowFilterBar(state);
-  const contentHeight = Math.max(1, rows - 2 - (filterBarVisible ? 1 : 0));
+  const contentHeight = Math.max(
+    1,
+    rows - HEADER_HEIGHT - STATUS_BAR_HEIGHT - (filterBarVisible ? 1 : 0),
+  );
   const sessionTaskIds = Array.from(
     new Set(
       [
@@ -772,7 +1183,7 @@ export default function App({ controller }: AppProps) {
       .resizeSession({
         taskId: state.activeTaskId,
         cols: Math.max(20, getTerminalContentWidth(columns, terminalUsesFullWidth)),
-        rows: Math.max(5, terminalRenderHeight),
+        rows: Math.max(5, getTerminalViewportHeight(terminalRenderHeight)),
       })
       .catch(() => {});
   }, [
@@ -814,6 +1225,16 @@ export default function App({ controller }: AppProps) {
 
   const renderModal = () => {
     if (modal === null) return null;
+
+    if (modal === 'command-palette') {
+      return (
+        <CommandPaletteModal
+          commands={commandPaletteCommands}
+          onSelect={executeCommandPaletteAction}
+          onCancel={closeModal}
+        />
+      );
+    }
 
     if (modal === 'help') {
       return <HelpOverlay />;

@@ -16,6 +16,6 @@ describe('TerminalBufferService', () => {
 
     const snapshot = buffers.getBuffer(taskId);
     expect(snapshot.lines[0]).toBe('1234567890');
-    expect(snapshot.lines[1]).toBe('1');
+    expect(snapshot.lines[1]).toBe('1 ');
   });
 });

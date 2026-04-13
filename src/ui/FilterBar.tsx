@@ -6,6 +6,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { useAppState } from '../store/index.js';
 import type { AppState } from '../types/index.js';
+import { Badge, countActiveFilters, UI_CHROME } from './chrome.js';
 
 export function hasActiveFilters(filters: AppState['filters']): boolean {
   return (
@@ -32,16 +33,21 @@ export const FilterBar = React.memo(function FilterBar(): JSX.Element {
     return <></>;
   }
 
-  const chips: JSX.Element[] = [];
+  const chips: JSX.Element[] = [
+    <Badge
+      key="summary"
+      icon="⚲"
+      label={String(countActiveFilters(state.filters))}
+      tone="muted"
+    />,
+  ];
 
   if (state.filters.repoIds && state.filters.repoIds.length > 0) {
     for (const id of state.filters.repoIds) {
       const repo = state.repos.find((r) => r.id === id);
       const label = repo ? repo.label : id;
       chips.push(
-        <Text key={`repo:${id}`} backgroundColor="blue" color="white">
-          {` repo:${label} `}
-        </Text>,
+        <Badge key={`repo:${id}`} icon="◈" label={label} tone="accent" />,
       );
     }
   }
@@ -51,31 +57,29 @@ export const FilterBar = React.memo(function FilterBar(): JSX.Element {
       const pillar = state.pillars.find((p) => p.id === id);
       const label = pillar ? pillar.label : id;
       chips.push(
-        <Text key={`pillar:${id}`} backgroundColor="magenta" color="white">
-          {` pillar:${label} `}
-        </Text>,
+        <Badge key={`pillar:${id}`} icon={pillar?.icon ?? '⬢'} label={label} tone="purple" />,
       );
     }
   }
 
   if (state.filters.searchText && state.filters.searchText.length > 0) {
     chips.push(
-      <Text key="search" backgroundColor="green" color="white">
-        {` search:${state.filters.searchText} `}
-      </Text>,
+      <Badge key="search" icon="/" label={state.filters.searchText} tone="success" />,
     );
   }
 
   const isFocused = state.focus === 'filterbar' || state.focus === 'search';
 
   return (
-    <Box flexDirection="row" gap={1} height={1} overflow="hidden">
-      {chips.length > 0 && chips}
-      {isFocused && (
-        <Text dimColor>
-          {'[f] filter  [/] search  [ESC] clear'}
+    <Box flexDirection="row" justifyContent="space-between" height={1} overflow="hidden">
+      <Box flexDirection="row" gap={1} overflow="hidden">
+        {chips}
+      </Box>
+      <Box flexShrink={0} overflow="hidden">
+        <Text color={UI_CHROME.muted}>
+          {isFocused ? '[f] edit  [/] search  [:] commands  [Esc] clear' : 'Filtered board'}
         </Text>
-      )}
+      </Box>
     </Box>
   );
 });
