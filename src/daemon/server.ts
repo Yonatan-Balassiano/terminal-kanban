@@ -29,6 +29,7 @@ import type {
   SavedViewRecord,
   FilterModel,
   ResizeSessionParams,
+  InspectSessionParams,
   PrepareTaskWorkspaceParams,
   CreateTaskPRParams,
 } from '../types/index.js';
@@ -290,6 +291,13 @@ export async function dispatch(
       case 'getBuffer': {
         const buf = await services.session.getBuffer(p['taskId'] as string);
         return { id: req.id, result: buf };
+      }
+
+      case 'inspectSession': {
+        const activity = await services.session.inspectSession(
+          (p as unknown as InspectSessionParams).taskId,
+        );
+        return { id: req.id, result: activity };
       }
 
       case 'prepareTaskWorkspace': {

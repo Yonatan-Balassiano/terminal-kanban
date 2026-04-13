@@ -2,9 +2,15 @@
 // AgentBoard — TaskCard component
 // ============================================================
 
+import React from 'react';
 import { Box, Text } from 'ink';
 import chalk from 'chalk';
-import type { TaskRecord, PillarRecord, PRState } from '../types/index.js';
+import type {
+  TaskRecord,
+  PillarRecord,
+  PRState,
+  SessionActivitySnapshot,
+} from '../types/index.js';
 import {
   canMergeTask,
   getBuildBadge,
@@ -18,18 +24,76 @@ export interface TaskCardProps {
   task: TaskRecord;
   isSelected: boolean;
   isActiveSession: boolean;
+  sessionActivity?: SessionActivitySnapshot;
   pillars: PillarRecord[];
   repoLabel: string;
 }
 
 const CARD_WIDTH = 30;
 const CARD_CONTENT_WIDTH = CARD_WIDTH - 4;
+const SHELL_SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 // ---- helpers ------------------------------------------------
 
 function truncate(str: string, max: number): string {
   if (str.length <= max) return str;
   return str.slice(0, max - 1) + '…';
+}
+
+function ShellStatus({
+  hasSession,
+  isActiveSession,
+  isBusySession,
+  shortId,
+}: {
+  hasSession: boolean;
+  isActiveSession: boolean;
+  isBusySession: boolean;
+  shortId: string;
+}): JSX.Element {
+  const [spinnerIndex, setSpinnerIndex] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!isBusySession) {
+      setSpinnerIndex(0);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setSpinnerIndex((index) => (index + 1) % SHELL_SPINNER_FRAMES.length);
+    }, 80);
+    timer.unref?.();
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [isBusySession]);
+
+  const sessionIcon = isBusySession
+    ? SHELL_SPINNER_FRAMES[spinnerIndex] ?? SHELL_SPINNER_FRAMES[0]
+    : isActiveSession
+      ? '●'
+      : hasSession
+        ? '●'
+        : '○';
+  const sessionIconColor = isBusySession
+    ? 'yellow'
+    : isActiveSession
+      ? 'cyan'
+      : hasSession
+        ? 'green'
+        : 'gray';
+  const sessionLabel = isActiveSession ? 'open shell' : 'shell';
+  const sessionLabelColor = isActiveSession ? 'cyan' : 'gray';
+
+  return (
+    <Box>
+      <Text>{'  '}</Text>
+      <Text color={sessionIconColor}>{sessionIcon}</Text>
+      <Text color={sessionLabelColor}>{` ${sessionLabel}`}</Text>
+      <Text dimColor>{`  ${shortId}`}</Text>
+    </Box>
+  );
 }
 
 function prBadge(prState: PRState, prDraft: boolean, prNumber?: number): string | null {
@@ -64,6 +128,7 @@ export function TaskCard({
   task,
   isSelected,
   isActiveSession,
+  sessionActivity,
   pillars,
   repoLabel,
 }: TaskCardProps): JSX.Element {
@@ -145,16 +210,8 @@ export function TaskCard({
 
   // Row 6: session indicator + short task id
   const hasSession = Boolean(task.sessionId);
-  const sessionDot = isActiveSession
-    ? chalk.cyan('●')
-    : hasSession
-      ? chalk.green('●')
-      : chalk.gray('○');
-  const sessionLabel = isActiveSession
-    ? chalk.cyan('open shell')
-    : chalk.gray('shell');
+  const isBusySession = sessionActivity?.isBusy === true;
   const shortId = chalk.dim(`#${task.id.slice(0, 8)}`);
-  const row6 = `${sessionDot} ${sessionLabel}  ${shortId}`;
 
   const bodyBackgroundColor: string | undefined = undefined;
   const titleBackgroundColor: string | undefined = isActiveSession ? 'cyan' : undefined;
@@ -210,10 +267,12 @@ export function TaskCard({
           {row5}
         </Text>
 
-        <Text backgroundColor={bodyBackgroundColor} wrap="truncate">
-          {'  '}
-          {row6}
-        </Text>
+        <ShellStatus
+          hasSession={hasSession}
+          isActiveSession={isActiveSession}
+          isBusySession={isBusySession}
+          shortId={shortId}
+        />
       </Box>
     </Box>
   );

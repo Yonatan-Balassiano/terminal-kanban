@@ -122,17 +122,20 @@ export class PtyBackend implements SessionBackend {
   }
 
   async list(): Promise<BackendSessionInfo[]> {
-    return Array.from(this.ptys.keys()).map((backendSessionId) => ({
+    return Array.from(this.ptys.entries()).map(([backendSessionId, pty]) => ({
       backendSessionId,
       status: 'active' as const,
+      shellPid: pty.pid,
     }));
   }
 
   async inspect(backendSessionId: string): Promise<BackendSessionInfo | null> {
-    if (!this.ptys.has(backendSessionId)) return null;
+    const pty = this.ptys.get(backendSessionId);
+    if (!pty) return null;
     return {
       backendSessionId,
       status: 'active',
+      shellPid: pty.pid,
     };
   }
 }

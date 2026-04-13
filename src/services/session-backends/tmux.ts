@@ -57,7 +57,7 @@ export class TmuxBackend implements SessionBackend {
     }
   >();
 
-  constructor(private onOutput?: (taskId: string) => void) {}
+  constructor(private onOutput?: (taskId: string, data: string) => void) {}
 
   private streamFilePath(backendSessionId: string): string {
     return join(tmpdir(), `agentboard-${backendSessionId}.stream.log`);
@@ -88,7 +88,7 @@ export class TmuxBackend implements SessionBackend {
       readSync(fd, buffer, 0, length, tap.offset);
       tap.offset = size;
       if (buffer.length > 0) {
-        this.onOutput?.(tap.taskId);
+        this.onOutput?.(tap.taskId, buffer.toString('utf8'));
       }
     } finally {
       closeSync(fd);
@@ -292,12 +292,24 @@ export class TmuxBackend implements SessionBackend {
 
   async inspect(backendSessionId: string): Promise<BackendSessionInfo | null> {
     try {
-      execSync(`tmux has-session -t ${JSON.stringify(backendSessionId)}`, {
-        stdio: 'ignore',
-      });
+      const metadata = execFileSync(
+        'tmux',
+        [
+          'display-message',
+          '-p',
+          '-t',
+          backendSessionId,
+          '#{pane_pid} #{pane_current_command}',
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+      const [pidRaw, currentCommand] = metadata.split(/\s+/, 2);
+      const shellPid = Number.parseInt(pidRaw ?? '', 10);
       return {
         backendSessionId,
         status: 'active',
+        shellPid: Number.isFinite(shellPid) ? shellPid : undefined,
+        currentCommand: currentCommand || undefined,
       };
     } catch {
       return null;
