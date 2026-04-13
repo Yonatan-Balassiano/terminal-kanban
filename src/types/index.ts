@@ -16,6 +16,7 @@ export type WorktreeMode = 'off' | 'auto' | 'always';
 export type PreferredIDE = 'system' | 'webstorm' | 'idea' | 'cursor' | 'vscode';
 export type GitState = 'unknown' | 'clean' | 'dirty' | 'untracked' | 'conflicted' | 'detached';
 export type TerminalLayoutMode = 'side-by-side' | 'top-bottom';
+export type SessionActivityKind = 'agent' | 'process';
 
 export type EventType =
   | 'task.created'
@@ -210,6 +211,20 @@ export interface BackendSessionInfo {
   backendSessionId: string;
   status: SessionStatus;
   lastActivity?: number;
+  shellPid?: number;
+  currentCommand?: string;
+}
+
+export interface SessionActivitySnapshot {
+  taskId: string;
+  sessionId?: string;
+  sessionStatus: SessionStatus;
+  isBusy: boolean;
+  kind?: SessionActivityKind;
+  command?: string;
+  label?: string;
+  pid?: number;
+  updatedAt: number;
 }
 
 export interface BackendHealth {
@@ -269,6 +284,7 @@ export type RPCMethod =
   | 'sendInput'
   | 'resizeSession'
   | 'getBuffer'
+  | 'inspectSession'
   | 'prepareTaskWorkspace'
   | 'createTaskPR'
   | 'mergeTaskPR'
@@ -378,6 +394,10 @@ export interface ResizeSessionParams {
 }
 
 export interface GetBufferParams {
+  taskId: string;
+}
+
+export interface InspectSessionParams {
   taskId: string;
 }
 
@@ -536,6 +556,7 @@ export interface AppState {
   activeTaskId?: string;
   activeSessionBranch?: string;
   activeSessionBackendType?: SessionBackendType;
+  sessionActivityByTaskId: Record<string, SessionActivitySnapshot | undefined>;
   terminalFullscreen: boolean;
   terminalScrollOffset: number;
   syncInProgress: boolean;
@@ -560,6 +581,10 @@ export type AppAction =
   | { type: 'TERMINAL_SCROLL_SET'; payload: number }
   | { type: 'TERMINAL_SCROLL_RESET' }
   | { type: 'SESSION_OPENED'; payload: { taskId: string; session: SessionRecord } }
+  | {
+      type: 'SESSION_ACTIVITY_UPDATED';
+      payload: { taskId: string; activity: SessionActivitySnapshot | null };
+    }
   | { type: 'BUFFER_UPDATE'; payload: GetBufferResult }
   | { type: 'SYNC_START' }
   | { type: 'SYNC_DONE'; payload: SyncResult }

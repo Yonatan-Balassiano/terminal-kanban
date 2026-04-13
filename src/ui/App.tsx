@@ -716,6 +716,15 @@ export default function App({ controller }: AppProps) {
   const backlogTrackIndex = sortedTracks.findIndex((track) => track.id === 'backlog');
   const filterBarVisible = shouldShowFilterBar(state);
   const contentHeight = Math.max(1, rows - 2 - (filterBarVisible ? 1 : 0));
+  const sessionTaskIds = Array.from(
+    new Set(
+      [
+        ...state.tasks.filter((task) => task.sessionId != null).map((task) => task.id),
+        state.activeTaskId,
+      ].filter((taskId): taskId is string => taskId != null),
+    ),
+  );
+  const sessionTaskIdsKey = sessionTaskIds.join(',');
 
   // --------------- render ----------------------------------
 
@@ -774,6 +783,34 @@ export default function App({ controller }: AppProps) {
     terminalRenderHeight,
     terminalUsesFullWidth,
   ]);
+
+  useEffect(() => {
+    if (sessionTaskIds.length === 0) {
+      return;
+    }
+
+    let inFlight = false;
+    const poll = () => {
+      if (inFlight) {
+        return;
+      }
+
+      inFlight = true;
+      void Promise.all(
+        sessionTaskIds.map((taskId) => controller.inspectSession(taskId).catch(() => null)),
+      ).finally(() => {
+        inFlight = false;
+      });
+    };
+
+    poll();
+    const timer = setInterval(poll, 1500);
+    timer.unref?.();
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [controller, sessionTaskIdsKey]);
 
   const renderModal = () => {
     if (modal === null) return null;

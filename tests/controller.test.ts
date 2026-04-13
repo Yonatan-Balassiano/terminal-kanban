@@ -231,6 +231,64 @@ describe('AppController', () => {
     });
   });
 
+  it('stores inspected session activity in app state through dispatch', async () => {
+    const dispatch = vi.fn<(action: AppAction) => void>();
+    const activity = {
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      sessionStatus: 'active',
+      isBusy: true,
+      kind: 'agent',
+      command: 'claude',
+      label: 'Claude',
+      pid: 123,
+      updatedAt: 1,
+    } as const;
+    const rpc = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      subscribe: vi.fn(),
+      call: vi.fn().mockResolvedValue(activity),
+    };
+
+    const controller = new AppController(
+      rpc as unknown as ConstructorParameters<typeof AppController>[0],
+      dispatch,
+    );
+
+    await expect(controller.inspectSession('task-1')).resolves.toEqual(activity);
+
+    expect(rpc.call).toHaveBeenCalledWith('inspectSession', { taskId: 'task-1' });
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'SESSION_ACTIVITY_UPDATED',
+      payload: { taskId: 'task-1', activity },
+    });
+  });
+
+  it('surfaces a restart warning when the daemon does not support session inspection', async () => {
+    const dispatch = vi.fn<(action: AppAction) => void>();
+    const rpc = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      subscribe: vi.fn(),
+      call: vi.fn().mockRejectedValue(new Error('Not implemented')),
+    };
+
+    const controller = new AppController(
+      rpc as unknown as ConstructorParameters<typeof AppController>[0],
+      dispatch,
+    );
+
+    await expect(controller.inspectSession('task-1')).resolves.toBeNull();
+    await expect(controller.inspectSession('task-1')).resolves.toBeNull();
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'STATUS_MESSAGE',
+      payload: 'Restart daemon to enable session activity indicators.',
+    });
+  });
+
   it('ignores pushed board snapshots when the content is unchanged', async () => {
     const dispatch = vi.fn<(action: AppAction) => void>();
     const board = {

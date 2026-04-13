@@ -13,6 +13,7 @@ import type { TerminalBufferService } from './terminal-buffer.js';
 import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
 import type { WorktreeService } from './worktree.js';
+import { hasMeaningfulTerminalOutput, inspectSessionActivity } from './session-activity.js';
 
 // --------------- DB row shape --------------------------------
 
@@ -72,6 +73,7 @@ export class SessionManager {
   private ptyBackend?: PtyBackend;
   private bufferPushInFlight = new Map<string, Promise<void>>();
   private bufferPushQueued = new Set<string>();
+  private lastOutputAtByTaskId = new Map<string, number>();
 
   constructor(
     private db: Db,
@@ -94,7 +96,10 @@ export class SessionManager {
   getBackend(type: SessionBackendType): SessionBackend {
     if (type === 'tmux') {
       if (!this.tmuxBackend) {
-        this.tmuxBackend = new TmuxBackend((taskId) => {
+        this.tmuxBackend = new TmuxBackend((taskId, data) => {
+          if (hasMeaningfulTerminalOutput(data)) {
+            this.noteSessionOutput(taskId);
+          }
           void this.scheduleBufferPush(taskId);
         });
       }
@@ -102,6 +107,9 @@ export class SessionManager {
     }
     if (!this.ptyBackend) {
       this.ptyBackend = new PtyBackend((taskId, data) => {
+        if (hasMeaningfulTerminalOutput(data)) {
+          this.noteSessionOutput(taskId);
+        }
         this.buffers.write(taskId, data);
         const cwd = extractLastOsc7Cwd(data);
         if (cwd) {
@@ -110,6 +118,10 @@ export class SessionManager {
       });
     }
     return this.ptyBackend;
+  }
+
+  private noteSessionOutput(taskId: string): void {
+    this.lastOutputAtByTaskId.set(taskId, Date.now());
   }
 
   private async scheduleBufferPush(taskId: string): Promise<void> {
@@ -383,6 +395,38 @@ export class SessionManager {
     return this.buffers.getBuffer(taskId);
   }
 
+  async inspectSession(taskId: string): Promise<import('../types/index.js').SessionActivitySnapshot | null> {
+    const session = this.getSession(taskId);
+    if (!session) {
+      return null;
+    }
+
+    if (!session.backendSessionId) {
+      return inspectSessionActivity(taskId, session.id, session.status);
+    }
+
+    const backend = this.getBackend(session.backendType);
+    const info = await backend.inspect(session.backendSessionId);
+    if (!info) {
+      return {
+        taskId,
+        sessionId: session.id,
+        sessionStatus: 'orphaned',
+        isBusy: false,
+        updatedAt: Date.now(),
+      };
+    }
+
+    return inspectSessionActivity(
+      taskId,
+      session.id,
+      info.status,
+      info.shellPid,
+      this.lastOutputAtByTaskId.get(taskId),
+      info.currentCommand,
+    );
+  }
+
   // ---- terminateSession ------------------------------------
 
   async terminateSession(sessionId: string): Promise<void> {
@@ -399,6 +443,7 @@ export class SessionManager {
     }
 
     this.buffers.destroy(session.taskId);
+    this.lastOutputAtByTaskId.delete(session.taskId);
 
     this.db
       .prepare<[string, number, string], void>(

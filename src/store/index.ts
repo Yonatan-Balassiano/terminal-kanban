@@ -31,6 +31,7 @@ export const initialState: AppState = {
   activeTaskId: undefined,
   activeSessionBranch: undefined,
   activeSessionBackendType: undefined,
+  sessionActivityByTaskId: {},
   terminalFullscreen: false,
   terminalScrollOffset: 0,
   syncInProgress: false,
@@ -46,6 +47,14 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case 'BOARD_LOADED': {
       const { repos, pillars, labels, tracks, tasks, savedViews, uiState } =
         action.payload;
+      const sessionTaskIds = new Set(
+        tasks.filter((task) => task.sessionId != null).map((task) => task.id),
+      );
+      const sessionActivityByTaskId = Object.fromEntries(
+        Object.entries(state.sessionActivityByTaskId).filter(([taskId]) =>
+          sessionTaskIds.has(taskId),
+        ),
+      );
       return {
         ...state,
         repos,
@@ -62,6 +71,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
           uiState.terminalPaneVisible ?? state.terminalPaneVisible,
         terminalLayoutMode:
           uiState.terminalLayoutMode ?? state.terminalLayoutMode,
+        sessionActivityByTaskId,
         themeMode: uiState.themeMode ?? state.themeMode,
         // selectedTrackIndex and selectedTaskIndex are intentionally NOT reset
       };
@@ -170,10 +180,51 @@ export function reducer(state: AppState, action: AppAction): AppState {
         activeTaskId: action.payload.taskId,
         activeSessionBranch: action.payload.session.branch,
         activeSessionBackendType: action.payload.session.backendType,
+        sessionActivityByTaskId: {
+          ...state.sessionActivityByTaskId,
+          [action.payload.taskId]:
+            state.sessionActivityByTaskId[action.payload.taskId],
+        },
         terminalPaneVisible: true,
         terminalFullscreen: false,
         terminalScrollOffset: 0,
       };
+
+    case 'SESSION_ACTIVITY_UPDATED': {
+      const existing = state.sessionActivityByTaskId[action.payload.taskId];
+      if (action.payload.activity === null) {
+        if (existing === undefined) {
+          return state;
+        }
+
+        const next = { ...state.sessionActivityByTaskId };
+        delete next[action.payload.taskId];
+        return {
+          ...state,
+          sessionActivityByTaskId: next,
+        };
+      }
+
+      const nextActivity = action.payload.activity;
+      if (
+        existing?.isBusy === nextActivity.isBusy &&
+        existing?.kind === nextActivity.kind &&
+        existing?.command === nextActivity.command &&
+        existing?.label === nextActivity.label &&
+        existing?.pid === nextActivity.pid &&
+        existing?.sessionStatus === nextActivity.sessionStatus
+      ) {
+        return state;
+      }
+
+      return {
+        ...state,
+        sessionActivityByTaskId: {
+          ...state.sessionActivityByTaskId,
+          [action.payload.taskId]: nextActivity,
+        },
+      };
+    }
 
     case 'SYNC_START':
       if (state.syncInProgress) {

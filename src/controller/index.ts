@@ -21,6 +21,7 @@ import type {
   RPCEvent,
   GetBufferResult,
   SessionRecord,
+  SessionActivitySnapshot,
   TaskWorkspaceResult,
 } from '../types/index.js';
 
@@ -41,6 +42,8 @@ export class AppController {
   private bufferRefreshQueued = new Set<string>();
   private activeSessionTaskId: string | null = null;
   private lastBoardSnapshotKey: string | null = null;
+  private sessionInspectionAvailable = true;
+  private sessionInspectionWarningShown = false;
 
   constructor(
     private rpc: RPCClient,
@@ -210,6 +213,7 @@ export class AppController {
     });
     this.dispatchRef.current({ type: 'TERMINAL_PANE_SHOW' });
     await this.refreshBuffer(taskId);
+    await this.inspectSession(taskId);
     return session;
   }
 
@@ -222,6 +226,7 @@ export class AppController {
     });
     this.dispatchRef.current({ type: 'TERMINAL_PANE_SHOW' });
     await this.refreshBuffer(taskId);
+    await this.inspectSession(taskId);
     return session;
   }
 
@@ -231,6 +236,38 @@ export class AppController {
 
   async resizeSession(params: ResizeSessionParams): Promise<void> {
     await this.rpc.call('resizeSession', params);
+  }
+
+  async inspectSession(taskId: string): Promise<SessionActivitySnapshot | null> {
+    if (!this.sessionInspectionAvailable) {
+      return null;
+    }
+
+    try {
+      const activity = await this.rpc.call<SessionActivitySnapshot | null>('inspectSession', {
+        taskId,
+      });
+      this.dispatchRef.current({
+        type: 'SESSION_ACTIVITY_UPDATED',
+        payload: { taskId, activity },
+      });
+      return activity;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'Not implemented') {
+        this.sessionInspectionAvailable = false;
+        if (!this.sessionInspectionWarningShown) {
+          this.sessionInspectionWarningShown = true;
+          this.dispatchRef.current({
+            type: 'STATUS_MESSAGE',
+            payload: 'Restart daemon to enable session activity indicators.',
+          });
+        }
+        return null;
+      }
+
+      throw err;
+    }
   }
 
   async prepareTaskWorkspace(taskId: string): Promise<TaskWorkspaceResult> {

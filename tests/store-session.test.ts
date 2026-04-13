@@ -34,6 +34,31 @@ describe('store session state', () => {
     expect(next).toBe(initialState);
   });
 
+  it('stores session activity by task id', () => {
+    const next = reducer(initialState, {
+      type: 'SESSION_ACTIVITY_UPDATED',
+      payload: {
+        taskId: 'task-1',
+        activity: {
+          taskId: 'task-1',
+          sessionId: 'session-1',
+          sessionStatus: 'active',
+          isBusy: true,
+          kind: 'agent',
+          command: 'claude',
+          label: 'Claude',
+          pid: 123,
+          updatedAt: 1,
+        },
+      },
+    });
+
+    expect(next.sessionActivityByTaskId['task-1']).toMatchObject({
+      isBusy: true,
+      label: 'Claude',
+    });
+  });
+
   it('does not create new state when sync is already idle', () => {
     const next = reducer(initialState, {
       type: 'SYNC_DONE',

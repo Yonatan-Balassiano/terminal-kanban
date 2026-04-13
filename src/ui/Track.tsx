@@ -28,7 +28,7 @@ export function Track({
   repoLabelsById,
   height,
 }: TrackProps): JSX.Element {
-  const { pillars, focus, activeTaskId } = useAppState();
+  const { pillars, focus, activeTaskId, sessionActivityByTaskId } = useAppState();
   const boardFocused = focus === 'board' || focus === 'filterbar';
   const showSelection = boardFocused && isSelected;
 
@@ -79,6 +79,7 @@ export function Track({
                 task={task}
                 isSelected={showSelection && actualIndex === selectedTaskIndex}
                 isActiveSession={activeTaskId === task.id}
+                sessionActivity={sessionActivityByTaskId[task.id]}
                 pillars={pillars}
                 repoLabel={repoLabelsById.get(task.repoId) ?? task.repoId}
               />
