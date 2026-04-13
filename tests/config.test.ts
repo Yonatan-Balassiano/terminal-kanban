@@ -1,0 +1,16 @@
+import { describe, expect, it } from 'vitest';
+import { defaultConfig } from '../src/config/index.js';
+
+describe('defaultConfig', () => {
+  it('syncs GitHub every 30 seconds by default', () => {
+    expect(defaultConfig().pollIntervalMs).toBe(30000);
+  });
+
+  it('uses backlog, in-progress, and done as the default board tracks', () => {
+    expect(defaultConfig().tracks).toEqual([
+      { id: 'backlog', label: 'Backlog', sortOrder: 0 },
+      { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
+      { id: 'done', label: 'Done', sortOrder: 2 },
+    ]);
+  });
+});

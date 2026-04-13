@@ -1,0 +1,14 @@
+ALTER TABLE repos ADD COLUMN preferred_ide TEXT;
+ALTER TABLE repos ADD COLUMN ide_command TEXT;
+ALTER TABLE repos ADD COLUMN worktree_mode TEXT NOT NULL DEFAULT 'auto';
+ALTER TABLE repos ADD COLUMN worktree_root TEXT;
+
+ALTER TABLE tasks ADD COLUMN last_session_cwd TEXT;
+ALTER TABLE tasks ADD COLUMN ci_summary TEXT;
+ALTER TABLE tasks ADD COLUMN failing_check_name TEXT;
+ALTER TABLE tasks ADD COLUMN review_summary TEXT;
+ALTER TABLE tasks ADD COLUMN git_state TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE tasks ADD COLUMN git_ahead_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN git_behind_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN has_untracked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN has_conflicts INTEGER NOT NULL DEFAULT 0;

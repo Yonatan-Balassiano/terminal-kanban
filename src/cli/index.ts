@@ -1,0 +1,442 @@
+// ============================================================
+// AgentBoard — CLI layer (Commander)
+// ============================================================
+
+import { Command } from 'commander';
+import {
+  configPaths,
+  loadConfig,
+  ensureDirectories,
+  writeDefaultConfig,
+  type ConfigPaths,
+} from '../config/index.js';
+import { ensureRunning, readPidFile } from '../daemon/index.js';
+import { createRPCClient, RPCClient } from './rpc.js';
+import type {
+  DoctorCheck,
+  DoctorResult,
+  TaskRecord,
+  RepoRecord,
+  DaemonStatus,
+} from '../types/index.js';
+
+// ============================================================
+// Helpers
+// ============================================================
+
+/** Map ConfigPaths (dbFile) to the shape expected by DaemonOpts / ensureRunning. */
+function daemonOpts(paths: ConfigPaths) {
+  return {
+    configFile: paths.configFile,
+    dbPath: paths.dbFile,
+    socketPath: paths.socketPath,
+    logFile: paths.logFile,
+    stateDir: paths.stateDir,
+  };
+}
+
+function statusSymbol(status: DoctorCheck['status']): string {
+  switch (status) {
+    case 'pass': return '✓ pass';
+    case 'warn': return '⚠ warn';
+    case 'fail': return '✗ fail';
+  }
+}
+
+function printDoctorChecks(checks: DoctorResult): void {
+  for (const check of checks) {
+    const symbol = statusSymbol(check.status);
+    const detail = check.message ? `: ${check.message}` : '';
+    console.log(`${symbol} — ${check.name}${detail}`);
+    if (check.remediation) {
+      console.log(`       remediation: ${check.remediation}`);
+    }
+  }
+}
+
+function printTaskTable(tasks: TaskRecord[]): void {
+  if (tasks.length === 0) {
+    console.log('No tasks found.');
+    return;
+  }
+  const header = ['ID', 'Title', 'Track', 'PR', 'CI'];
+  const rows = tasks.map((t) => [
+    t.id,
+    t.title,
+    t.trackId,
+    t.prState,
+    t.ciState,
+  ]);
+  const widths = header.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => String(r[i]).length)),
+  );
+  const fmt = (cols: string[]) =>
+    cols.map((c, i) => c.padEnd(widths[i])).join('  ');
+  console.log(fmt(header));
+  console.log(widths.map((w) => '-'.repeat(w)).join('  '));
+  for (const row of rows) {
+    console.log(fmt(row.map(String)));
+  }
+}
+
+function printRepoTable(repos: RepoRecord[]): void {
+  if (repos.length === 0) {
+    console.log('No repos registered.');
+    return;
+  }
+  const header = ['ID', 'Label', 'Path', 'Health'];
+  const rows = repos.map((r) => [r.id, r.label, r.path, r.health]);
+  const widths = header.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => String(r[i]).length)),
+  );
+  const fmt = (cols: string[]) =>
+    cols.map((c, i) => c.padEnd(widths[i])).join('  ');
+  console.log(fmt(header));
+  console.log(widths.map((w) => '-'.repeat(w)).join('  '));
+  for (const row of rows) {
+    console.log(fmt(row.map(String)));
+  }
+}
+
+// ============================================================
+// buildCli
+// ============================================================
+
+export function buildCli(): Command {
+  const program = new Command();
+
+  program
+    .name('agentboard')
+    .description('Terminal-native Kanban board for AI coding sessions')
+    .version('0.1.0');
+
+  // ----------------------------------------------------------
+  // Default action — launch TUI
+  // ----------------------------------------------------------
+  program.action(async () => {
+    try {
+      const paths = configPaths();
+      await ensureRunning(daemonOpts(paths));
+
+      const rpc = new RPCClient(paths.socketPath);
+
+      // Dynamic imports to avoid loading React / ink at CLI startup.
+      const { render } = await import('ink');
+      const React = await import('react');
+      const { default: App } = await import('../ui/App.js');
+      const { AppController } = await import('../controller/index.js');
+
+      // AppController needs a dispatch reference; supply a noop initially —
+      // App mounts first, then wires the real dispatch and starts the controller.
+      const noopDispatch: React.Dispatch<import('../types/index.js').AppAction> =
+        () => {};
+      const controller = new AppController(rpc, noopDispatch);
+
+      render(React.default.createElement(App, { controller }), {
+        exitOnCtrlC: false,
+      });
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+  // ----------------------------------------------------------
+  // init
+  // ----------------------------------------------------------
+  program
+    .command('init')
+    .description('Initialise AgentBoard directories and default config')
+    .action(() => {
+      try {
+        ensureDirectories();
+        writeDefaultConfig();
+        const paths = configPaths();
+        console.log(`AgentBoard initialized. Edit config at: ${paths.configFile}`);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // doctor
+  // ----------------------------------------------------------
+  program
+    .command('doctor')
+    .description('Run environment health checks')
+    .option('--json', 'Output results as JSON')
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const paths = configPaths();
+
+        // Best-effort: try to ensure the daemon is running for a live DB check.
+        try {
+          await ensureRunning(daemonOpts(paths));
+        } catch {
+          // Not fatal — doctor still runs with whatever is available.
+        }
+
+        const { openDb } = await import('../db/index.js');
+        const db = openDb(paths.dbFile);
+        const { DoctorService } = await import('../services/doctor.js');
+        const doctor = new DoctorService(db, paths.socketPath);
+        const results = await doctor.run();
+
+        if (opts.json) {
+          console.log(JSON.stringify(results, null, 2));
+        } else {
+          printDoctorChecks(results);
+        }
+
+        db.close();
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // attach <task>
+  // ----------------------------------------------------------
+  program
+    .command('attach <task>')
+    .description('Open a session for a task and print its attach command')
+    .action(async (task: string) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const session = await rpc.call<import('../types/index.js').SessionRecord>(
+          'openSession',
+          { taskId: task },
+        );
+        rpc.disconnect();
+        if (session.attachCommand) {
+          console.log(session.attachCommand);
+        } else {
+          console.log(`Session created: ${session.id}`);
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // ls
+  // ----------------------------------------------------------
+  program
+    .command('ls')
+    .description('List tasks on the board')
+    .option('--repo <id>', 'Filter by repo ID')
+    .option('--json', 'Output as JSON')
+    .action(async (opts: { repo?: string; json?: boolean }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const board = await rpc.call<import('../types/index.js').BoardSnapshot>(
+          'getBoard',
+          opts.repo ? { repoId: opts.repo } : {},
+        );
+        rpc.disconnect();
+
+        if (opts.json) {
+          console.log(JSON.stringify(board.tasks, null, 2));
+        } else {
+          printTaskTable(board.tasks);
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // repos
+  // ----------------------------------------------------------
+  const repos = program
+    .command('repos')
+    .description('Manage repositories');
+
+  repos
+    .command('add <path>')
+    .description('Register a repository with AgentBoard')
+    .option('--label <label>', 'Human-readable label for the repo')
+    .action(async (repoPath: string, opts: { label?: string }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const repo = await rpc.call<RepoRecord>('addRepo', {
+          path: repoPath,
+          label: opts.label,
+        });
+        rpc.disconnect();
+        console.log(JSON.stringify(repo, null, 2));
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  repos
+    .command('ls')
+    .description('List registered repositories')
+    .option('--json', 'Output as JSON')
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const repoList = await rpc.call<RepoRecord[]>('listRepos');
+        rpc.disconnect();
+
+        if (opts.json) {
+          console.log(JSON.stringify(repoList, null, 2));
+        } else {
+          printRepoTable(repoList);
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  repos
+    .command('rm <id>')
+    .description('Remove a registered repository')
+    .action(async (id: string) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        await rpc.call('removeRepo', { id });
+        rpc.disconnect();
+        console.log(`Repo ${id} removed.`);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // sync
+  // ----------------------------------------------------------
+  program
+    .command('sync')
+    .description('Trigger a GitHub sync')
+    .action(async () => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const result = await rpc.call<import('../types/index.js').SyncResult>('triggerSync');
+        rpc.disconnect();
+        console.log(JSON.stringify(result, null, 2));
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // gc
+  // ----------------------------------------------------------
+  program
+    .command('gc')
+    .description('Garbage-collect old data (not yet implemented)')
+    .action(() => {
+      console.log('gc not yet implemented');
+    });
+
+  // ----------------------------------------------------------
+  // daemon
+  // ----------------------------------------------------------
+  const daemon = program
+    .command('daemon')
+    .description('Manage the AgentBoard background daemon');
+
+  daemon
+    .command('start')
+    .description('Start the daemon if it is not already running')
+    .action(async () => {
+      try {
+        const paths = configPaths();
+        const { isDaemonRunning } = await import('../daemon/index.js');
+        if (await isDaemonRunning(paths.socketPath)) {
+          console.log('Daemon already running.');
+          return;
+        }
+
+        await ensureRunning(daemonOpts(paths));
+        console.log('Daemon started.');
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  daemon
+    .command('stop')
+    .description('Stop the daemon')
+    .action(async () => {
+      try {
+        const paths = configPaths();
+        const pidFile = `${paths.stateDir}/daemon.pid`;
+        const pid = readPidFile(pidFile);
+        if (!pid) {
+          console.log('Daemon is not running (no PID file found).');
+          return;
+        }
+        process.kill(pid, 'SIGTERM');
+        console.log('Daemon stopped.');
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  daemon
+    .command('status')
+    .description('Show daemon status')
+    .option('--json', 'Output as JSON')
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const status = await rpc.call<DaemonStatus>('daemonStatus');
+        rpc.disconnect();
+
+        if (opts.json) {
+          console.log(JSON.stringify(status, null, 2));
+        } else {
+          const rows: Array<[string, string | number]> = [
+            ['version', status.version],
+            ['pid', status.pid],
+            ['uptime (s)', Math.round(status.uptime / 1000)],
+            ['db', status.dbPath],
+            ['socket', status.socketPath],
+          ];
+          const labelWidth = Math.max(...rows.map(([k]) => k.length));
+          for (const [k, v] of rows) {
+            console.log(`${k.padEnd(labelWidth)}  ${v}`);
+          }
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // Suppress Commander's allowUnknownOption so unrecognised flags surface
+  // as proper errors rather than silently passing through.
+  program.allowUnknownOption(false);
+
+  // loadConfig is available for commands that need runtime config.
+  void loadConfig;
+
+  return program;
+}
