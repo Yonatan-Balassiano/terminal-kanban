@@ -1,0 +1,444 @@
+package tui
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
+
+const (
+	commandPaletteWidth = 86
+	commandVisibleRows  = 8
+	filterColumnWidth   = 28
+	filterVisibleRows   = 8
+)
+
+func renderModal(m *Model) string {
+	switch m.modal {
+	case ModalHelp:
+		return renderHelpModal()
+	case ModalCreateTask:
+		return renderCreateTaskModal(m)
+	case ModalRenameTask:
+		return renderRenameTaskModal(m)
+	case ModalTaskDescription:
+		return renderTaskDescriptionModal(m)
+	case ModalArchiveConfirm:
+		return renderArchiveConfirmModal(m)
+	case ModalDeleteConfirm:
+		return renderDeleteConfirmModal(m)
+	case ModalCreatePillar:
+		return renderCreatePillarModal(m)
+	case ModalDeletePillar:
+		return renderDeletePillarConfirmModal(m)
+	case ModalPillarPicker:
+		return renderPillarPickerModal(m)
+	case ModalFilterPicker:
+		return renderFilterModal(m)
+	case ModalViewPicker:
+		return renderViewModal(m)
+	case ModalCommandPalette:
+		return renderCommandPaletteModal(m)
+	default:
+		return lipgloss.NewStyle().
+			Border(lipgloss.DoubleBorder()).
+			BorderForeground(lipgloss.Color(uiChrome.Accent)).
+			Padding(1).
+			Render("Go TUI modal is not implemented yet.")
+	}
+}
+
+func renderCreateTaskModal(m *Model) string {
+	state := m.createTaskModal
+	if state == nil {
+		return ""
+	}
+
+	options := m.createTaskPillarOptions()
+	selectedRepo := ""
+	if len(m.repos) > 0 {
+		selectedRepo = m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].Label
+	}
+	if selectedRepo == "" {
+		selectedRepo = "None"
+	}
+
+	selectedPillar := "None"
+	if len(options) > 0 {
+		selectedPillar = options[clamp(state.PillarIndex, 0, len(options)-1)].Label
+	}
+
+	linePrefix := func(line createTaskLine) string {
+		if state.ActiveLine == line {
+			return "▸"
+		}
+		return " "
+	}
+
+	lineColor := func(line createTaskLine) lipgloss.Style {
+		if state.ActiveLine == line {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("cyan"))
+		}
+		return lipgloss.NewStyle()
+	}
+
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Create Task"),
+		"",
+		lineColor(createTaskTitleLine).Render(fmt.Sprintf("%s Title: %s%s", linePrefix(createTaskTitleLine), state.Value, ternaryString(state.ActiveLine == createTaskTitleLine, "|", ""))),
+		lineColor(createTaskRepoLine).Render(fmt.Sprintf("%s Repo: %s", linePrefix(createTaskRepoLine), selectedRepo)),
+		lineColor(createTaskPillarLine).Render(fmt.Sprintf("%s Pillar: %s", linePrefix(createTaskPillarLine), selectedPillar)),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[↑/↓ lines]  [←/→ change current field]"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
+	}
+
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderRenameTaskModal(m *Model) string {
+	state := m.renameTaskModal
+	if state == nil {
+		return ""
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Rename Task"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Title: ") + state.Value + "|",
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] rename  [Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderTaskDescriptionModal(m *Model) string {
+	state := m.taskDescriptionModal
+	if state == nil {
+		return ""
+	}
+	task := m.taskByID(state.TaskID)
+	taskTitle := ""
+	if task != nil {
+		taskTitle = task.Title
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Task Description"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(taskTitle, 48)),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Desc: ") + state.Value + "|",
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] save  [Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderArchiveConfirmModal(m *Model) string {
+	state := m.archiveConfirmModal
+	if state == nil {
+		return ""
+	}
+	task := m.taskByID(state.TaskID)
+	title := ""
+	if task != nil {
+		title = task.Title
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("yellow")).Render("Archive Task"),
+		"",
+		fmt.Sprintf("Archive task '%s'?", title),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderDeleteConfirmModal(m *Model) string {
+	state := m.deleteConfirmModal
+	if state == nil {
+		return ""
+	}
+	task := m.taskByID(state.TaskID)
+	title := ""
+	if task != nil {
+		title = task.Title
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("red")).Render("Delete Task"),
+		"",
+		fmt.Sprintf("Delete task '%s'?", title),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderCreatePillarModal(m *Model) string {
+	state := m.createPillarModal
+	if state == nil {
+		return ""
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Create Pillar"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Label: ") + state.Value + "|",
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderDeletePillarConfirmModal(m *Model) string {
+	state := m.deletePillarConfirmModal
+	if state == nil {
+		return ""
+	}
+	pillar := m.pillarByID(state.PillarID)
+	label := ""
+	if pillar != nil {
+		label = pillar.Label
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("red")).Render("Delete Pillar"),
+		"",
+		fmt.Sprintf("Delete pillar '%s'?", label),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("red")).Render(
+			fmt.Sprintf("This will also delete %d task%s in this pillar.", state.TaskCount, ternaryString(state.TaskCount == 1, "", "s")),
+		),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderPillarPickerModal(m *Model) string {
+	state := m.pillarPickerModal
+	if state == nil {
+		return ""
+	}
+	task := m.taskByID(state.TaskID)
+	currentPillarID := ""
+	if task != nil {
+		currentPillarID = task.PillarID
+	}
+	options := m.pillarPickerOptions()
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Assign Pillar"),
+		"",
+	}
+	for index, option := range options {
+		selected := index == state.Index
+		label := option.Label
+		row := ternaryString(selected, "▶ ", "  ") + label
+		style := lipgloss.NewStyle()
+		if selected {
+			style = style.Foreground(lipgloss.Color("green"))
+		}
+		if option.ID == currentPillarID {
+			row += " (current)"
+		}
+		lines = append(lines, style.Render(row))
+	}
+	lines = append(lines, "")
+	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑↓ navigate  [Enter] select  [c] create  [d] delete  [Esc] cancel"))
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderFilterModal(m *Model) string {
+	state := m.filterModal
+	if state == nil {
+		return ""
+	}
+
+	left := renderFilterColumn("Repos", state.ActiveColumn == filterRepoColumn, m.filterRepoOptions(), state.SelectedRepoIDs, state.RepoIndex)
+	right := renderFilterColumn("Pillars", state.ActiveColumn == filterPillarColumn, m.filterPillarOptions(), state.SelectedPillarIDs, state.PillarIndex)
+
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Filters"),
+		"",
+		lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No checks means all. [←/→] switch list  [↑/↓] move  [space] toggle"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] apply  [c] clear all  [Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderViewModal(m *Model) string {
+	state := m.viewModal
+	if state == nil {
+		return ""
+	}
+	options := []struct {
+		Label       string
+		Description string
+	}{
+		{Label: "Side By Side", Description: "Board on the left, terminal on the right"},
+		{Label: "Top / Bottom", Description: "Board on top, terminal on the bottom"},
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("View Layout"),
+		"",
+	}
+	for index, option := range options {
+		selected := index == state.Index
+		style := lipgloss.NewStyle()
+		if selected {
+			style = style.Foreground(lipgloss.Color("cyan")).Bold(true)
+		}
+		lines = append(lines, style.Render(fmt.Sprintf("%s %s", ternaryString(selected, "▸", " "), option.Label)))
+		lines = append(lines, lipgloss.NewStyle().MarginLeft(2).Foreground(lipgloss.Color(uiChrome.Muted)).Render(option.Description))
+	}
+	lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[↑/↓] choose  [Enter] apply  [Esc] cancel"))
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderCommandPaletteModal(m *Model) string {
+	state := m.commandPaletteModal
+	if state == nil {
+		return ""
+	}
+	filtered := m.filteredCommandPaletteCommands(state.Query)
+	lines := []string{
+		joinSpaceBetween(strings.Join([]string{
+			badge("COMMANDS", "accent", "", false),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Search actions and workflows"),
+		}, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Esc close"), commandPaletteWidth-4),
+		"",
+		lipgloss.NewStyle().
+			Width(commandPaletteWidth-4).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(uiChrome.Line)).
+			Padding(0, 1).
+			Render(ternaryString(state.Query != "", ": "+state.Query, ": Type to filter commands")),
+		"",
+	}
+
+	if len(filtered) == 0 {
+		lines = append(lines, lipgloss.NewStyle().
+			Width(commandPaletteWidth-4).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(uiChrome.Line)).
+			Padding(1).
+			Render(
+				lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render("No matching commands")+"\n"+
+					lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Try searching by action, workflow, or shortcut."),
+			))
+	} else {
+		windowStart := commandWindowStart(state.Index, len(filtered), commandVisibleRows)
+		visible := filtered[windowStart:min(len(filtered), windowStart+commandVisibleRows)]
+		for offset, command := range visible {
+			actualIndex := windowStart + offset
+			selected := actualIndex == state.Index
+			borderColor := uiChrome.Line
+			if selected {
+				borderColor = uiChrome.Accent
+			}
+			titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
+			if command.Disabled {
+				titleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
+			}
+			if selected {
+				titleStyle = titleStyle.Bold(true)
+			}
+			detail := command.Detail
+			detailColor := uiChrome.Muted
+			if command.Disabled && command.DisabledReason != "" {
+				detail = command.DisabledReason
+				detailColor = uiChrome.Warning
+			}
+			lines = append(lines, lipgloss.NewStyle().
+				Width(commandPaletteWidth-4).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color(borderColor)).
+				Padding(0, 1).
+				Render(
+					joinSpaceBetween(strings.Join([]string{
+						lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(selected, uiChrome.Accent, uiChrome.Muted))).Render(ternaryString(selected, "▸", " ")),
+						badge(strings.ToUpper(command.Section), "muted", "", false),
+						titleStyle.Render(command.Title),
+					}, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(command.Shortcut), commandPaletteWidth-8)+"\n"+
+						lipgloss.NewStyle().Foreground(lipgloss.Color(detailColor)).Render(truncateText(detail, commandPaletteWidth-8)),
+				))
+			if offset < len(visible)-1 {
+				lines = append(lines, "")
+			}
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, joinSpaceBetween(
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑↓ move  Enter run"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(
+			ternaryString(len(filtered) > 0, fmt.Sprintf("%d/%d", clamp(state.Index, 0, len(filtered)-1)+1, len(filtered)), "0 results"),
+		),
+		commandPaletteWidth-4,
+	))
+
+	return modalBox(lipgloss.DoubleBorder(), strings.Join(lines, "\n"))
+}
+
+func renderFilterColumn(title string, active bool, options []filterOption, selectedIDs []string, selectedIndex int) string {
+	windowStart := commandWindowStart(selectedIndex, len(options), filterVisibleRows)
+	visible := options[windowStart:min(len(options), windowStart+filterVisibleRows)]
+
+	lines := []string{
+		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(active, "cyan", uiChrome.Text))).Bold(true).Render(title),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(
+			ternaryString(len(selectedIDs) == 0, "all selected", fmt.Sprintf("%d checked", len(selectedIDs))),
+		),
+	}
+
+	for offset, option := range visible {
+		actualIndex := windowStart + offset
+		selected := active && actualIndex == selectedIndex
+		checked := slices.Contains(selectedIDs, option.ID)
+		style := lipgloss.NewStyle()
+		if selected {
+			style = style.Foreground(lipgloss.Color("cyan")).Bold(true)
+		}
+		lines = append(lines, style.Render(fmt.Sprintf("%s [%s] %s", ternaryString(selected, "▸", " "), ternaryString(checked, "x", " "), padFilterLabel(option.Label, filterColumnWidth-9))))
+	}
+	for len(visible) < filterVisibleRows {
+		lines = append(lines, " ")
+		visible = append(visible, filterOption{})
+	}
+
+	borderColor := "gray"
+	if active {
+		borderColor = "cyan"
+	}
+
+	return lipgloss.NewStyle().
+		Width(filterColumnWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Padding(0, 1).
+		Render(strings.Join(lines, "\n"))
+}
+
+func modalBox(border lipgloss.Border, content string) string {
+	return lipgloss.NewStyle().
+		Border(border).
+		BorderForeground(lipgloss.Color(uiChrome.Accent)).
+		Padding(1).
+		Render(content)
+}
+
+func commandWindowStart(index, length, visibleRows int) int {
+	if length <= visibleRows {
+		return 0
+	}
+	centered := index - visibleRows/2
+	return clamp(centered, 0, length-visibleRows)
+}
+
+func padFilterLabel(label string, width int) string {
+	if plainWidth(label) >= width {
+		return truncateText(label, width)
+	}
+	return label + strings.Repeat(" ", width-plainWidth(label))
+}

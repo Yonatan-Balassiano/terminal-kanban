@@ -353,8 +353,21 @@ export async function dispatch(
           githubRepo: `${repo.githubOwner}/${repo.githubRepo}`,
           prNumber: task.prNumber,
         });
-        const result = await services.sync.trigger();
-        return { id: req.id, result };
+
+        services.board.updateTaskSync(task.id, {
+          prState: 'merged',
+          prDraft: false,
+        });
+        if (task.trackId !== 'done') {
+          services.board.moveTask({ id: task.id, trackId: 'done' });
+        }
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+
+        void services.sync.trigger().catch(() => {});
+        return { id: req.id, result: { merged: true } };
       }
 
       // ---- sync -----------------------------------------------

@@ -2,7 +2,11 @@
 // AgentBoard — CLI layer (Commander)
 // ============================================================
 
+import * as fs from 'fs';
+import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { Command } from 'commander';
+import { fileURLToPath } from 'url';
 import {
   configPaths,
   loadConfig,
@@ -11,7 +15,7 @@ import {
   type ConfigPaths,
 } from '../config/index.js';
 import { ensureRunning, readPidFile } from '../daemon/index.js';
-import { createRPCClient, RPCClient } from './rpc.js';
+import { createRPCClient } from './rpc.js';
 import type {
   DoctorCheck,
   DoctorResult,
@@ -98,6 +102,45 @@ function printRepoTable(repos: RepoRecord[]): void {
   }
 }
 
+function resolveGoTUIBinary(): string | null {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(moduleDir, '../../dist-go/agentboard-tui'),
+    path.resolve(moduleDir, '../../dist-go/agentboard-tui.exe'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function launchGoTUI(socketPath: string): void {
+  const binary = resolveGoTUIBinary();
+  if (!binary) {
+    throw new Error('Go TUI binary not found. Run `npm run build:go` or `npm run build` first.');
+  }
+
+  const result = spawnSync(binary, [], {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      AGENTBOARD_SOCKET_PATH: socketPath,
+    },
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (typeof result.status === 'number' && result.status !== 0) {
+    process.exit(result.status);
+  }
+}
+
 // ============================================================
 // buildCli
 // ============================================================
@@ -117,24 +160,7 @@ export function buildCli(): Command {
     try {
       const paths = configPaths();
       await ensureRunning(daemonOpts(paths));
-
-      const rpc = new RPCClient(paths.socketPath);
-
-      // Dynamic imports to avoid loading React / ink at CLI startup.
-      const { render } = await import('ink');
-      const React = await import('react');
-      const { default: App } = await import('../ui/App.js');
-      const { AppController } = await import('../controller/index.js');
-
-      // AppController needs a dispatch reference; supply a noop initially —
-      // App mounts first, then wires the real dispatch and starts the controller.
-      const noopDispatch: React.Dispatch<import('../types/index.js').AppAction> =
-        () => {};
-      const controller = new AppController(rpc, noopDispatch);
-
-      render(React.default.createElement(App, { controller }), {
-        exitOnCtrlC: false,
-      });
+      launchGoTUI(paths.socketPath);
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
       process.exit(1);

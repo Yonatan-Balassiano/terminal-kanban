@@ -5,6 +5,20 @@
 import * as net from 'net';
 import type { RPCRequest, RPCResponse, RPCEvent, RPCMethod } from '../types/index.js';
 
+function rpcTimeoutMs(method: RPCMethod): number {
+  switch (method) {
+    case 'createTaskPR':
+    case 'mergeTaskPR':
+    case 'triggerSync':
+      return 45_000;
+    case 'openSession':
+    case 'recreateSession':
+      return 20_000;
+    default:
+      return 10_000;
+  }
+}
+
 // --------------- RPCClient ----------------------------------
 
 export class RPCClient {
@@ -122,7 +136,7 @@ export class RPCClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`RPC call timed out: ${method} (id=${id})`));
-      }, 10_000);
+      }, rpcTimeoutMs(method));
 
       this.pending.set(id, {
         resolve: (resp: RPCResponse) => {

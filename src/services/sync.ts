@@ -13,8 +13,8 @@ function buildAutoPRBody(taskId: string): string {
   return `Created by AgentBoard for task ${taskId}.`;
 }
 
-const MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS = 4;
-const MANUAL_REMOTE_BRANCH_RETRY_DELAY_MS = 1500;
+const MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS = 8;
+const MANUAL_REMOTE_BRANCH_RETRY_DELAY_MS = 400;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
