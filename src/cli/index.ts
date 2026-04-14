@@ -58,9 +58,9 @@ function printDoctorChecks(checks: DoctorResult): void {
   }
 }
 
-function printTaskTable(tasks: TaskRecord[]): void {
+function printTaskTable(tasks: TaskRecord[], emptyMessage = 'No tasks found.'): void {
   if (tasks.length === 0) {
-    console.log('No tasks found.');
+    console.log(emptyMessage);
     return;
   }
   const header = ['ID', 'Title', 'Track', 'PR', 'CI'];
@@ -81,6 +81,14 @@ function printTaskTable(tasks: TaskRecord[]): void {
   for (const row of rows) {
     console.log(fmt(row.map(String)));
   }
+}
+
+function filterListedTasks(tasks: TaskRecord[], archivedOnly: boolean): TaskRecord[] {
+  if (!archivedOnly) {
+    return tasks;
+  }
+
+  return tasks.filter((task) => task.archivedAt !== undefined);
 }
 
 function printRepoTable(repos: RepoRecord[]): void {
@@ -256,22 +264,28 @@ export function buildCli(): Command {
     .command('ls')
     .description('List tasks on the board')
     .option('--repo <id>', 'Filter by repo ID')
+    .option('--archived', 'List archived tasks only')
     .option('--json', 'Output as JSON')
-    .action(async (opts: { repo?: string; json?: boolean }) => {
+    .action(async (opts: { repo?: string; archived?: boolean; json?: boolean }) => {
       try {
         const paths = configPaths();
         await ensureRunning(daemonOpts(paths));
         const rpc = await createRPCClient(paths.socketPath);
         const board = await rpc.call<import('../types/index.js').BoardSnapshot>(
           'getBoard',
-          opts.repo ? { repoId: opts.repo } : {},
+          {
+            ...(opts.repo ? { repoId: opts.repo } : {}),
+            ...(opts.archived ? { filter: { includeArchived: true } } : {}),
+          },
         );
         rpc.disconnect();
 
+        const tasks = filterListedTasks(board.tasks, opts.archived === true);
+
         if (opts.json) {
-          console.log(JSON.stringify(board.tasks, null, 2));
+          console.log(JSON.stringify(tasks, null, 2));
         } else {
-          printTaskTable(board.tasks);
+          printTaskTable(tasks, opts.archived ? 'No archived tasks found.' : 'No tasks found.');
         }
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);

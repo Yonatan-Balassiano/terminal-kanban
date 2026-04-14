@@ -295,7 +295,10 @@ export type RPCMethod =
 
 // --------------- RPC param/result types ---------------------
 
-export type GetBoardParams = { repoId?: string };
+export interface GetBoardParams {
+  repoId?: string;
+  filter?: FilterModel;
+}
 export type GetBoardResult = BoardSnapshot;
 
 export type SetUIStateParams = Partial<UIStateRecord>;
