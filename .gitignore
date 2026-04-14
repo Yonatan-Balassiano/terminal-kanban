@@ -1,5 +1,7 @@
 node_modules/
+.cache/
 dist/
+dist-go/
 *.db
 *.db-wal
 *.db-shm
