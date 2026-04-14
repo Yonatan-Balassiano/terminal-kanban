@@ -40,6 +40,46 @@ interface GhPRJson {
   statusCheckRollup: GhStatusCheck[];
 }
 
+export function deriveReviewState(reviews: GhReview[]): {
+  reviewState: ReviewState;
+  reviewSummary?: string;
+} {
+  if (reviews.length === 0) {
+    return { reviewState: 'none' };
+  }
+
+  const latestByReviewer = new Map<string, string>();
+  for (const review of reviews) {
+    const login = review.author?.login ?? 'unknown';
+    latestByReviewer.set(login, review.state);
+  }
+
+  const states = Array.from(latestByReviewer.values());
+  if (states.some((state) => state === 'CHANGES_REQUESTED')) {
+    return {
+      reviewState: 'changes_requested',
+      reviewSummary: 'changes requested',
+    };
+  }
+
+  const approvedCount = states.filter((state) => state === 'APPROVED').length;
+  if (approvedCount > 0) {
+    return {
+      reviewState: 'approved',
+      reviewSummary: `approved by ${approvedCount}`,
+    };
+  }
+
+  if (states.some((state) => state === 'COMMENTED')) {
+    return {
+      reviewState: 'commented',
+      reviewSummary: 'comments only',
+    };
+  }
+
+  return { reviewState: 'none' };
+}
+
 function normalizeCheckField(value: string | null | undefined): string {
   return value?.toUpperCase() ?? '';
 }
@@ -261,29 +301,7 @@ export class GitHubService {
       const ciState = deriveCIState(checks);
       const { ciSummary, failingCheckName } = summarizeChecks(checks);
 
-      // Derive reviewState from reviews (latest per reviewer)
-      let reviewState: ReviewState = 'none';
-      let reviewSummary: string | undefined;
-      const reviews = data.reviews ?? [];
-      if (reviews.length > 0) {
-        // Build latest state per reviewer
-        const latestByReviewer = new Map<string, string>();
-        for (const review of reviews) {
-          const login = review.author?.login ?? 'unknown';
-          latestByReviewer.set(login, review.state);
-        }
-        const states = Array.from(latestByReviewer.values());
-        if (states.some((s) => s === 'CHANGES_REQUESTED')) {
-          reviewState = 'changes_requested';
-          reviewSummary = 'changes requested';
-        } else if (states.every((s) => s === 'APPROVED')) {
-          reviewState = 'approved';
-          reviewSummary = `approved by ${states.length}`;
-        } else if (states.some((s) => s === 'COMMENTED')) {
-          reviewState = 'commented';
-          reviewSummary = 'comments only';
-        }
-      }
+      const { reviewState, reviewSummary } = deriveReviewState(data.reviews ?? []);
 
       return {
         number: data.number,

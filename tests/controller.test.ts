@@ -177,6 +177,35 @@ describe('AppController', () => {
     expect(rpc.call).toHaveBeenNthCalledWith(2, 'getBoard');
   });
 
+  it('refreshes the board after a manual sync', async () => {
+    const dispatch = vi.fn<(action: AppAction) => void>();
+    const board = {
+      repos: [],
+      pillars: [],
+      labels: [],
+      tracks: [],
+      tasks: [],
+      savedViews: [],
+      uiState: {},
+    };
+    const rpc = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      subscribe: vi.fn(),
+      call: vi.fn().mockResolvedValueOnce({ tasksUpdated: 1, errors: [] }).mockResolvedValueOnce(board),
+    };
+
+    const controller = new AppController(
+      rpc as unknown as ConstructorParameters<typeof AppController>[0],
+      dispatch,
+    );
+
+    await controller.triggerSync();
+
+    expect(rpc.call).toHaveBeenNthCalledWith(1, 'triggerSync');
+    expect(rpc.call).toHaveBeenNthCalledWith(2, 'getBoard');
+  });
+
   it('applies pushed session buffer updates only for the active task', async () => {
     const dispatch = vi.fn<(action: AppAction) => void>();
     const session: SessionRecord = {

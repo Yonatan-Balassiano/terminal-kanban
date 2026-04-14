@@ -6,7 +6,7 @@ import type {
   TaskRecord,
 } from '../types/index.js';
 import { truncatePlain } from './ansi-truncate.js';
-import { UI_CHROME, getSessionBadgeModel, useSpinnerFrame } from './chrome.js';
+import { Badge, type BadgeTone, UI_CHROME, getSessionBadgeModel } from './chrome.js';
 import { canMergeTask, getTaskCardBorderColor } from './task-card-status.js';
 
 export interface TaskCardProps {
@@ -238,41 +238,42 @@ function getReviewStatus(task: TaskRecord): InlineStatus | null {
   return null;
 }
 
-function getPRStatus(task: TaskRecord): InlineStatus | null {
-  if (task.prDraft) {
-    return { icon: '~', label: `PR #${task.prNumber ?? '?'}`, color: UI_CHROME.warning };
-  }
-  if (task.prState === 'open') {
-    return { icon: '↗', label: `PR #${task.prNumber ?? '?'}`, color: UI_CHROME.warning };
-  }
-  if (task.prState === 'merged') {
-    return { icon: '⇡', label: `PR #${task.prNumber ?? '?'}`, color: UI_CHROME.purple };
-  }
-  if (task.prState === 'closed') {
-    return { icon: '×', label: `PR #${task.prNumber ?? '?'}`, color: UI_CHROME.danger };
-  }
-  if (canMergeTask(task)) {
-    return { icon: '⇢', label: 'Merge ready', color: UI_CHROME.success };
+function getPRBadgeModel(task: TaskRecord): { label: string; tone: BadgeTone } | null {
+  if (task.prNumber == null || task.prState === 'none') {
+    return null;
   }
 
-  return null;
+  if (task.prState === 'merged') {
+    return { label: `#${task.prNumber}`, tone: 'purple' };
+  }
+
+  if (task.prState === 'closed') {
+    return { label: `#${task.prNumber}`, tone: 'danger' };
+  }
+
+  if (task.prDraft || task.prState === 'draft') {
+    return { label: `#${task.prNumber}`, tone: 'warning' };
+  }
+
+  if (canMergeTask(task)) {
+    return { label: `#${task.prNumber}`, tone: 'success' };
+  }
+
+  return { label: `#${task.prNumber}`, tone: 'info' };
 }
 
 function getGitStatus(task: TaskRecord): InlineStatus | null {
   if (task.gitState === 'conflicted') {
-    return { icon: '!', label: 'Conflict', color: UI_CHROME.danger };
+    return { icon: '!', label: 'conflict', color: UI_CHROME.danger };
   }
   if (task.gitState === 'dirty') {
-    return { icon: '~', label: 'Dirty', color: UI_CHROME.warning };
+    return { icon: '~', label: 'dirty', color: UI_CHROME.warning };
   }
   if (task.gitState === 'untracked') {
-    return { icon: '?', label: 'Untracked', color: UI_CHROME.warning };
+    return { icon: '?', label: 'untracked', color: UI_CHROME.warning };
   }
   if (task.gitState === 'detached') {
-    return { icon: '×', label: 'Detached', color: UI_CHROME.danger };
-  }
-  if (task.gitState === 'clean') {
-    return { icon: '✓', label: 'Clean', color: UI_CHROME.muted };
+    return { icon: '×', label: 'detached', color: UI_CHROME.danger };
   }
 
   return null;
@@ -308,35 +309,37 @@ export function TaskCard({
 }: TaskCardProps): JSX.Element {
   const pillar = pillars.find((candidate) => candidate.id === task.pillarId);
   const isBusySession = sessionActivity?.isBusy === true;
-  const spinnerFrame = useSpinnerFrame(isBusySession);
   const borderColor = getTaskCardBorderColor(task, isSelected);
   const sessionStatus = getHeaderStatus(
     sessionActivity,
     Boolean(task.sessionId),
     isActiveSession,
   );
-  const activeSessionIcon = isBusySession ? spinnerFrame : sessionStatus.icon;
+  const activeSessionIcon = isBusySession ? '◌' : sessionStatus.icon;
   const descriptionPreview = getDescriptionPreview(task.description);
   const titleLines = getTaskCardTitleLines(task.title);
   const branchLabel = truncate(compactTaskBranchLabel(task.branchName), 16);
   const workspaceLabel = task.worktreePath ? 'worktree' : 'root';
-  const headerLabel = truncate(`${repoLabel} > ${workspaceLabel}`, CARD_CONTENT_WIDTH);
-  const prStatus = getPRStatus(task);
-  const checksStatus = getChecksStatus(task) ?? prStatus;
-  const reviewStatus = getReviewStatus(task) ?? (checksStatus === prStatus ? null : prStatus);
+  const headerLabel = truncate(`${repoLabel} > ${workspaceLabel}`, CARD_CONTENT_WIDTH - 2);
+  const prBadge = getPRBadgeModel(task);
+  const checksStatus = getChecksStatus(task);
+  const reviewStatus = getReviewStatus(task);
   const gitStatus = getGitStatus(task);
 
   return (
     <Box
       flexDirection="column"
       width={CARD_WIDTH}
-      borderStyle={isActiveSession ? 'double' : 'round'}
+      borderStyle={isSelected || isActiveSession ? 'double' : 'round'}
       borderColor={borderColor}
     >
       <Box flexDirection="column" paddingX={1} overflow="hidden">
-        <Text color={isSelected ? UI_CHROME.accent : UI_CHROME.blue} wrap="truncate">
-          {headerLabel}
-        </Text>
+        <Box flexDirection="row" gap={1} overflow="hidden">
+          <Text color={sessionStatus.color}>{activeSessionIcon}</Text>
+          <Text color={isSelected ? UI_CHROME.accent : UI_CHROME.blue} wrap="truncate">
+            {headerLabel}
+          </Text>
+        </Box>
 
         <Text color={UI_CHROME.line}>{'─'.repeat(CARD_CONTENT_WIDTH)}</Text>
 
@@ -360,10 +363,6 @@ export function TaskCard({
         <Text color={UI_CHROME.line}>{'─'.repeat(CARD_CONTENT_WIDTH)}</Text>
 
         <Box flexDirection="row" gap={1} overflow="hidden">
-          <Text color={sessionStatus.color}>{activeSessionIcon}</Text>
-          <Text color={sessionStatus.color} wrap="truncate">
-            {sessionStatus.label}
-          </Text>
           {pillar && (
             <Text color={UI_CHROME.muted} wrap="truncate">
               {`${pillar.icon ?? '⬢'} ${truncate(pillar.label, 9)}`}
@@ -387,12 +386,19 @@ export function TaskCard({
         </Box>
 
         <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
-          <Box flexShrink={1} overflow="hidden" width={13}>
-            <StatusText status={checksStatus} />
+          <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} overflow="hidden">
+            <Box flexShrink={1} overflow="hidden" width={10}>
+              <StatusText status={checksStatus} />
+            </Box>
+            <Box flexShrink={1} overflow="hidden" width={10}>
+              <StatusText status={reviewStatus} />
+            </Box>
           </Box>
-          <Box flexShrink={1} overflow="hidden" width={13}>
-            <StatusText status={reviewStatus} />
-          </Box>
+          {prBadge && (
+            <Box flexShrink={0} marginLeft={1}>
+              <Badge label={prBadge.label} tone={prBadge.tone} emphasis="strong" />
+            </Box>
+          )}
         </Box>
       </Box>
     </Box>

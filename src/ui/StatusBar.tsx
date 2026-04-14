@@ -2,7 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { useAppState } from '../store/index.js';
 import type { AppFocus } from '../types/index.js';
-import { Badge, UI_CHROME, useSpinnerFrame } from './chrome.js';
+import { Badge, UI_CHROME } from './chrome.js';
 import { getHeaderContextTask } from './header-context.js';
 
 export const STATUS_BAR_HEIGHT = 1;
@@ -45,12 +45,11 @@ export const StatusBar = React.memo(function StatusBar(): JSX.Element {
   const contextTask = getHeaderContextTask(state);
   const contextActivity =
     contextTask != null ? state.sessionActivityByTaskId[contextTask.id] : undefined;
-  const busySpinner = useSpinnerFrame(contextActivity?.isBusy === true);
   const focus = focusLabel(state.focus);
   const hints = kbdHints(state.focus);
   const activityLabel =
     contextActivity?.isBusy === true
-      ? `${busySpinner} ${contextActivity.label ?? contextActivity.command ?? 'Working'}`
+      ? `◌ ${contextActivity.label ?? contextActivity.command ?? 'Working'}`
       : undefined;
 
   return (

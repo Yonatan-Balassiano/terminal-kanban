@@ -338,6 +338,7 @@ export class AppController {
     this.dispatchRef.current({ type: 'SYNC_START' });
     try {
       await this.rpc.call('triggerSync');
+      await this.refreshBoard();
     } finally {
       this.dispatchRef.current({
         type: 'SYNC_DONE',

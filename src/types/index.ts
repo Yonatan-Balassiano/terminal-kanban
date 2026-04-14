@@ -525,6 +525,7 @@ export type ModalType =
   | 'command-palette'
   | 'rename-task'
   | 'task-description'
+  | 'archive-confirm'
   | 'delete-confirm'
   | 'filter-picker'
   | 'create-pillar'

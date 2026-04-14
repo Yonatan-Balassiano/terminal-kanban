@@ -110,6 +110,61 @@ describe('SyncService', () => {
     });
   });
 
+  it('retries remote branch detection during a manual sync before creating a PR', async () => {
+    const board = {
+      getTasks: vi.fn().mockReturnValue([makeTask()]),
+      updateTaskSync: vi.fn(),
+      moveTask: vi.fn(),
+    };
+    const prInfo = makePrInfo();
+    const github = {
+      getPR: vi.fn().mockResolvedValue(null),
+      createPR: vi.fn().mockResolvedValue(prInfo),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi
+        .fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+      }),
+    };
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const sync = new SyncService(
+      board as never,
+      github as never,
+      git as never,
+      db as never,
+      wait,
+    );
+
+    await sync.trigger();
+
+    expect(git.remoteBranchExists).toHaveBeenCalledTimes(3);
+    expect(wait).toHaveBeenCalledTimes(2);
+    expect(github.createPR).toHaveBeenCalledWith('/repo', {
+      githubRepo: 'org/proj',
+      branch: 'ab/task-1',
+      baseBranch: 'main',
+      title: '[auto|task-1] My task',
+      body: 'Created by AgentBoard for task task-1.',
+    });
+  });
+
   it('moves backlog to in-progress for an existing open PR without moving to review', async () => {
     const board = {
       getTasks: vi.fn().mockReturnValue([makeTask()]),
@@ -261,5 +316,50 @@ describe('SyncService', () => {
     expect(board.updateTaskSync).not.toHaveBeenCalled();
     expect(result.tasksUpdated).toBe(1);
     expect(result.errors).toEqual(['Task task-1: gh pr create failed']);
+  });
+
+  it('waits for the remote branch before creating a PR from the explicit PR action', async () => {
+    const task = makeTask();
+    const board = {
+      getTask: vi.fn().mockReturnValue(task),
+      updateTaskSync: vi.fn(),
+      moveTask: vi.fn(),
+    };
+    const prInfo = makePrInfo();
+    const github = {
+      getPR: vi.fn().mockResolvedValue(null),
+      createPR: vi.fn().mockResolvedValue(prInfo),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+      }),
+    };
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const sync = new SyncService(
+      board as never,
+      github as never,
+      git as never,
+      db as never,
+      wait,
+    );
+
+    await expect(sync.createTaskPR('task-1')).resolves.toEqual(prInfo);
+
+    expect(git.remoteBranchExists).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledTimes(1);
+    expect(board.updateTaskSync).toHaveBeenCalledWith(
+      'task-1',
+      expect.objectContaining({
+        prNumber: 42,
+        prState: 'open',
+        prUrl: 'https://example.test/pr/42',
+      }),
+    );
   });
 });

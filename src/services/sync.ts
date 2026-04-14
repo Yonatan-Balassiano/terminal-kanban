@@ -13,6 +13,15 @@ function buildAutoPRBody(taskId: string): string {
   return `Created by AgentBoard for task ${taskId}.`;
 }
 
+const MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS = 4;
+const MANUAL_REMOTE_BRANCH_RETRY_DELAY_MS = 1500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 export class SyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
@@ -23,6 +32,7 @@ export class SyncService {
     private github: GitHubService,
     private git: GitService,
     private db: Db,
+    private wait = sleep,
   ) {}
 
   start(intervalMs: number): void {
@@ -44,7 +54,7 @@ export class SyncService {
   }
 
   async trigger(): Promise<SyncResult> {
-    return this.runSync();
+    return this.runSync({ retryPendingRemoteBranches: true });
   }
 
   async createTaskPR(taskId: string): Promise<PRInfo> {
@@ -81,7 +91,11 @@ export class SyncService {
       return existing;
     }
 
-    const remoteBranchPresent = await this.git.remoteBranchExists(repoPath, task.branchName);
+    const remoteBranchPresent = await this.waitForRemoteBranch(
+      repoPath,
+      task.branchName,
+      true,
+    );
     if (!remoteBranchPresent) {
       throw new Error(`Task branch ${task.branchName} is not pushed to origin`);
     }
@@ -141,7 +155,31 @@ export class SyncService {
     return true;
   }
 
-  private async runSync(): Promise<SyncResult> {
+  private async waitForRemoteBranch(
+    repoPath: string,
+    branch: string,
+    retryPendingRemoteBranches: boolean,
+  ): Promise<boolean> {
+    const attempts = retryPendingRemoteBranches
+      ? MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS
+      : 1;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (await this.git.remoteBranchExists(repoPath, branch)) {
+        return true;
+      }
+
+      if (attempt < attempts - 1) {
+        await this.wait(MANUAL_REMOTE_BRANCH_RETRY_DELAY_MS);
+      }
+    }
+
+    return false;
+  }
+
+  private async runSync(opts?: {
+    retryPendingRemoteBranches?: boolean;
+  }): Promise<SyncResult> {
     if (this.running) {
       return { tasksUpdated: 0, errors: [] };
     }
@@ -189,7 +227,11 @@ export class SyncService {
           let remoteBranchPresent = false;
 
           if (!prInfo) {
-            remoteBranchPresent = await this.git.remoteBranchExists(repoPath, task.branchName);
+            remoteBranchPresent = await this.waitForRemoteBranch(
+              repoPath,
+              task.branchName,
+              opts?.retryPendingRemoteBranches === true,
+            );
 
             if (remoteBranchPresent && task.trackId === 'backlog') {
               this.board.moveTask({ id: task.id, trackId: 'in-progress' });

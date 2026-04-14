@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   canMergeTask,
   getBuildBadge,
+  getMergeBlockerReason,
   getReviewBadge,
   getTaskCardBorderColor,
   TASK_CARD_ORANGE,
   TASK_CARD_PURPLE,
+  TASK_CARD_SELECTED,
 } from '../src/ui/task-card-status.js';
 
 describe('task card status styling', () => {
@@ -51,7 +53,16 @@ describe('task card status styling', () => {
         { prState: 'none', ciState: 'none' },
         true,
       ),
-    ).toBe('cyan');
+    ).toBe(TASK_CARD_SELECTED);
+  });
+
+  it('uses the selection color even when the task status border would otherwise be green', () => {
+    expect(
+      getTaskCardBorderColor(
+        { prState: 'open', ciState: 'passed', reviewState: 'approved' },
+        true,
+      ),
+    ).toBe(TASK_CARD_SELECTED);
   });
 
   it('adds a V approved label when the PR is approved', () => {
@@ -81,5 +92,35 @@ describe('task card status styling', () => {
         reviewState: 'approved',
       }),
     ).toBe(false);
+
+    expect(
+      canMergeTask({
+        prNumber: 39,
+        prState: 'open',
+        prDraft: true,
+        ciState: 'passed',
+        reviewState: 'approved',
+      }),
+    ).toBe(false);
+  });
+
+  it('explains why a PR cannot be merged', () => {
+    expect(
+      getMergeBlockerReason({
+        prNumber: 39,
+        prState: 'merged',
+        ciState: 'passed',
+        reviewState: 'approved',
+      }),
+    ).toBe('PR #39 is already merged.');
+
+    expect(
+      getMergeBlockerReason({
+        prNumber: 39,
+        prState: 'open',
+        ciState: 'pending',
+        reviewState: 'approved',
+      }),
+    ).toBe('PR #39 checks are still pending.');
   });
 });

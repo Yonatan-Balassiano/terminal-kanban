@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { useAppState } from '../store/index.js';
-import { Badge, SessionActivityBadge, UI_CHROME, countActiveFilters, useSpinnerFrame } from './chrome.js';
+import { Badge, SessionActivityBadge, UI_CHROME, countActiveFilters } from './chrome.js';
 import { getHeaderContextTask } from './header-context.js';
 
 export const HEADER_HEIGHT = 2;
@@ -68,7 +68,6 @@ export const Header = React.memo(function Header(): JSX.Element {
   const busySessions = tasks.filter(
     (task) => task.sessionId != null && sessionActivityByTaskId[task.id]?.isBusy,
   );
-  const busySpinner = useSpinnerFrame(busySessions.length > 0);
   const activeFilters = countActiveFilters(filters);
   const branchLabel =
     activeTaskId === contextTask?.id
@@ -101,7 +100,7 @@ export const Header = React.memo(function Header(): JSX.Element {
         <Box flexDirection="row" gap={1} flexShrink={0} overflow="hidden">
           {busySessions.length > 0 && (
             <Badge
-              icon={busySpinner}
+              icon="◌"
               label={busySessions.length === 1 ? '1 running' : `${busySessions.length} running`}
               tone="warning"
             />

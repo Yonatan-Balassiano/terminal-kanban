@@ -23,6 +23,7 @@ import { ModalOverlay } from './ModalOverlay.js';
 import { CreateTaskModal } from './modals/CreateTask.js';
 import { RenameTaskModal } from './modals/RenameTask.js';
 import { TaskDescriptionModal } from './modals/TaskDescription.js';
+import { ArchiveConfirmModal } from './modals/ArchiveConfirm.js';
 import { DeleteConfirmModal } from './modals/DeleteConfirm.js';
 import { CreatePillarModal } from './modals/CreatePillar.js';
 import { DeletePillarConfirmModal } from './modals/DeletePillarConfirm.js';
@@ -47,7 +48,7 @@ import {
 import { openExternalUrl } from './open-external.js';
 import { openPathInIDE, revealPathInFileManager } from './open-workspace.js';
 import { getTaskPRUrl, hasOpenPR } from './pr-link.js';
-import { canMergeTask } from './task-card-status.js';
+import { canMergeTask, getMergeBlockerReason } from './task-card-status.js';
 import { getNextActiveRepoId } from './repo-switch.js';
 import { useTerminalSize } from './use-terminal-size.js';
 import { getHeaderContextTask } from './header-context.js';
@@ -439,10 +440,11 @@ export default function App({ controller }: AppProps) {
       return;
     }
 
-    if (!canMergeTask(task)) {
+    const mergeBlocker = getMergeBlockerReason(task);
+    if (mergeBlocker) {
       dispatch({
         type: 'STATUS_MESSAGE',
-        payload: 'Merge requires an open PR, approved review, and passing build.',
+        payload: mergeBlocker,
       });
       return;
     }
@@ -526,9 +528,8 @@ export default function App({ controller }: AppProps) {
         }
         return;
       case 'archive-task':
-        closeModal();
         if (contextTask) {
-          controller.archiveTask(contextTask.id).catch(() => {});
+          openModal('archive-confirm', { task: contextTask });
         }
         return;
       case 'assign-pillar':
@@ -1103,7 +1104,7 @@ export default function App({ controller }: AppProps) {
       }
       if (input === 'a') {
         if (selectedTask) {
-          controller.archiveTask(selectedTask.id).catch(() => {});
+          openModal('archive-confirm', { task: selectedTask });
         }
         return;
       }
@@ -1338,6 +1339,21 @@ export default function App({ controller }: AppProps) {
           taskCount={taskCount}
           onConfirm={() => {
             controller.deletePillar({ id: pillar.id }).catch(() => {});
+            closeModal();
+          }}
+          onCancel={closeModal}
+        />
+      );
+    }
+
+    if (modal === 'archive-confirm') {
+      const task = payload['task'] as import('../types/index.js').TaskRecord | undefined;
+      if (!task) return null;
+      return (
+        <ArchiveConfirmModal
+          task={task}
+          onConfirm={() => {
+            controller.archiveTask(task.id).catch(() => {});
             closeModal();
           }}
           onCancel={closeModal}

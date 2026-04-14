@@ -13,7 +13,7 @@ describe('ui chrome helpers', () => {
     ).toBe(5);
   });
 
-  it('marks busy sessions with a spinning warning badge model', () => {
+  it('marks busy sessions with a static warning badge model', () => {
     expect(
       getSessionBadgeModel(
         {
@@ -27,7 +27,6 @@ describe('ui chrome helpers', () => {
         { hasSession: true, isActiveSession: false },
       ),
     ).toEqual({
-      isSpinning: true,
       label: 'Claude',
       tone: 'warning',
     });
@@ -40,7 +39,6 @@ describe('ui chrome helpers', () => {
         isActiveSession: true,
       }),
     ).toEqual({
-      isSpinning: false,
       label: 'live',
       tone: 'accent',
     });

@@ -1,4 +1,3 @@
-import React from 'react';
 import { Text } from 'ink';
 import type { SessionActivitySnapshot } from '../types/index.js';
 
@@ -17,8 +16,6 @@ export const UI_CHROME = {
   warning: '#fbbf24',
 } as const;
 
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
 const BADGE_TONES = {
   accent: { background: '#182536', foreground: UI_CHROME.accent },
   danger: { background: '#2b1d26', foreground: UI_CHROME.danger },
@@ -33,31 +30,8 @@ const BADGE_TONES = {
 export type BadgeTone = keyof typeof BADGE_TONES;
 
 export interface SessionBadgeModel {
-  isSpinning: boolean;
   label: string;
   tone: BadgeTone;
-}
-
-export function useSpinnerFrame(active: boolean, intervalMs = 80): string {
-  const [spinnerIndex, setSpinnerIndex] = React.useState(0);
-
-  React.useEffect(() => {
-    if (!active) {
-      setSpinnerIndex(0);
-      return;
-    }
-
-    const timer = setInterval(() => {
-      setSpinnerIndex((index) => (index + 1) % SPINNER_FRAMES.length);
-    }, intervalMs);
-    timer.unref?.();
-
-    return () => {
-      clearInterval(timer);
-    };
-  }, [active, intervalMs]);
-
-  return SPINNER_FRAMES[spinnerIndex] ?? SPINNER_FRAMES[0] ?? '*';
 }
 
 function normalizeActivityLabel(activity?: SessionActivitySnapshot): string {
@@ -77,30 +51,29 @@ export function getSessionBadgeModel(
   },
 ): SessionBadgeModel {
   if (activity?.sessionStatus === 'orphaned') {
-    return { isSpinning: false, label: 'orphaned', tone: 'danger' };
+    return { label: 'orphaned', tone: 'danger' };
   }
 
   if (activity?.sessionStatus === 'terminated') {
-    return { isSpinning: false, label: 'ended', tone: 'muted' };
+    return { label: 'ended', tone: 'muted' };
   }
 
   if (activity?.isBusy) {
     return {
-      isSpinning: true,
       label: normalizeActivityLabel(activity),
       tone: 'warning',
     };
   }
 
   if (opts.isActiveSession) {
-    return { isSpinning: false, label: 'live', tone: 'accent' };
+    return { label: 'live', tone: 'accent' };
   }
 
   if (opts.hasSession || activity?.sessionStatus === 'idle') {
-    return { isSpinning: false, label: 'idle', tone: 'success' };
+    return { label: 'idle', tone: 'success' };
   }
 
-  return { isSpinning: false, label: 'shell', tone: 'muted' };
+  return { label: 'shell', tone: 'muted' };
 }
 
 export interface BadgeProps {
@@ -142,10 +115,9 @@ export function SessionActivityBadge({
   isActiveSession,
 }: SessionActivityBadgeProps): JSX.Element {
   const model = getSessionBadgeModel(activity, { hasSession, isActiveSession });
-  const spinnerFrame = useSpinnerFrame(model.isSpinning);
   const icon =
-    model.isSpinning
-      ? spinnerFrame
+    model.tone === 'warning'
+      ? '◌'
       : model.label === 'live'
         ? '●'
         : model.label === 'idle'
