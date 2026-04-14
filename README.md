@@ -35,6 +35,7 @@ Core ideas:
 Required:
 
 - Node.js `>= 20`
+- Go `>= 1.26.2`
 - Git
 
 Recommended:
@@ -62,7 +63,8 @@ cd terminal-canban
 npm install
 ```
 
-Or use the bootstrap script to do the full first-run setup in one shot:
+Or use the bootstrap script to do the full first-run setup in one shot. It validates
+the required local toolchain first, including Node.js, Git, and Go:
 
 ```bash
 bash scripts/bootstrap.sh
