@@ -186,7 +186,45 @@ func TestTaskCardBorderColorTreatsChangesRequestedAsRed(t *testing.T) {
 		ReviewState: "changes_requested",
 	}, false)
 
-	if color != "red" {
-		t.Fatalf("taskCardBorderColor() = %q, want red", color)
+	if color != "#ef4444" {
+		t.Fatalf("taskCardBorderColor() = %q, want #ef4444", color)
+	}
+}
+
+func TestTaskCardBorderColorKeepsCIStateWhenSelected(t *testing.T) {
+	color := taskCardBorderColor(TaskRecord{
+		PRState: "open",
+		CIState: "pending",
+	}, true)
+
+	if color != uiChrome.Warning {
+		t.Fatalf("taskCardBorderColor() = %q, want %q", color, uiChrome.Warning)
+	}
+}
+
+func TestTaskCardBorderColorUsesStrongGreenForPassingBuild(t *testing.T) {
+	color := taskCardBorderColor(TaskRecord{
+		PRState: "open",
+		CIState: "passed",
+	}, false)
+
+	if color != "#22c55e" {
+		t.Fatalf("taskCardBorderColor() = %q, want #22c55e", color)
+	}
+}
+
+func TestTaskCardBorderColorUsesBrighterNeutralWhenNoStatusApplies(t *testing.T) {
+	color := taskCardBorderColor(TaskRecord{}, false)
+
+	if color != "#475569" {
+		t.Fatalf("taskCardBorderColor() = %q, want #475569", color)
+	}
+}
+
+func TestTaskCardBorderColorUsesAccentForSelectedNeutralCard(t *testing.T) {
+	color := taskCardBorderColor(TaskRecord{}, true)
+
+	if color != uiChrome.Accent {
+		t.Fatalf("taskCardBorderColor() = %q, want %q", color, uiChrome.Accent)
 	}
 }

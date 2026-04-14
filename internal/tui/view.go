@@ -702,22 +702,34 @@ func toneColor(tone string) string {
 }
 
 func taskCardBorderColor(task TaskRecord, isSelected bool) string {
-	if isSelected {
-		return "cyan"
-	}
 	if task.PRState == "merged" {
+		if isSelected {
+			return uiChrome.Purple
+		}
 		return "#a855f7"
 	}
 	if task.CIState == "failed" || task.ReviewState == "changes_requested" || task.PRState == "closed" {
-		return "red"
+		if isSelected {
+			return uiChrome.Danger
+		}
+		return "#ef4444"
 	}
 	if canMergeTask(task) || task.CIState == "passed" || task.ReviewState == "approved" {
-		return "green"
+		if isSelected {
+			return uiChrome.Success
+		}
+		return "#22c55e"
 	}
 	if task.PRState == "open" || task.PRState == "draft" || task.CIState == "pending" {
-		return "#ff9f1c"
+		if isSelected {
+			return uiChrome.Warning
+		}
+		return "#f59e0b"
 	}
-	return "gray"
+	if isSelected {
+		return uiChrome.Accent
+	}
+	return "#475569"
 }
 
 func taskCardHeight(task TaskRecord) int {
