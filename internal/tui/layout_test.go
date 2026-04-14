@@ -3,6 +3,7 @@ package tui
 import (
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -226,5 +227,86 @@ func TestTaskCardBorderColorUsesAccentForSelectedNeutralCard(t *testing.T) {
 
 	if color != uiChrome.Accent {
 		t.Fatalf("taskCardBorderColor() = %q, want %q", color, uiChrome.Accent)
+	}
+}
+
+func TestHandleTerminalKeyTabArmsBoardNavigation(t *testing.T) {
+	model := &Model{
+		focus:        FocusTerminal,
+		activeTaskID: "task-1",
+	}
+
+	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyTab})
+
+	if !model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should be armed")
+	}
+	if model.terminalBoardNavTaskID != "task-1" {
+		t.Fatalf("terminalBoardNavTaskID = %q, want task-1", model.terminalBoardNavTaskID)
+	}
+	if cmd == nil {
+		t.Fatal("handleTerminalKey(tab) returned nil cmd")
+	}
+}
+
+func TestHandleTerminalKeyTabDownSwitchesToNeighborTaskShell(t *testing.T) {
+	model := &Model{
+		focus:                   FocusTerminal,
+		activeTaskID:            "task-1",
+		terminalBoardNavPending: true,
+		terminalBoardNavTaskID:  "task-1",
+		selectedTrackIndex:      0,
+		selectedTaskIndex:       0,
+		tracks: []TrackRecord{
+			{ID: "in-progress", SortOrder: 1},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "First"},
+			{ID: "task-2", TrackID: "in-progress", SortKey: 2, Title: "Second"},
+		},
+	}
+
+	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+
+	if model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should clear after switching")
+	}
+	if model.selectedTaskIndex != 1 {
+		t.Fatalf("selectedTaskIndex = %d, want 1", model.selectedTaskIndex)
+	}
+	selected := model.selectedTask()
+	if selected == nil || selected.ID != "task-2" {
+		t.Fatalf("selectedTask() = %#v, want task-2", selected)
+	}
+	if cmd == nil {
+		t.Fatal("handleTerminalKey(tab+j) returned nil cmd")
+	}
+}
+
+func TestHandleTerminalKeyTabRuneFallsBackToLiteralTabInput(t *testing.T) {
+	model := &Model{
+		focus:                   FocusTerminal,
+		activeTaskID:            "task-1",
+		terminalBoardNavPending: true,
+		terminalBoardNavTaskID:  "task-1",
+		terminalCommand:         "gi",
+	}
+
+	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+
+	if model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should clear after fallback input")
+	}
+	if model.pendingTerminalInputTaskID != "task-1" {
+		t.Fatalf("pendingTerminalInputTaskID = %q, want task-1", model.pendingTerminalInputTaskID)
+	}
+	if model.pendingTerminalInput != "\tt" {
+		t.Fatalf("pendingTerminalInput = %q, want %q", model.pendingTerminalInput, "\\tt")
+	}
+	if model.terminalCommand != "git" {
+		t.Fatalf("terminalCommand = %q, want git", model.terminalCommand)
+	}
+	if cmd == nil {
+		t.Fatal("handleTerminalKey(tab+t) returned nil cmd")
 	}
 }

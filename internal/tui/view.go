@@ -508,7 +508,7 @@ func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 		}
 		lines = append(lines, joinSpaceBetween(
 			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(historyLabel),
-			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("branch "+truncateText(branchLabel, 28)+"  Esc board"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("branch "+truncateText(branchLabel, 20)+"  Tab nav  Esc board"),
 			contentWidth,
 		))
 	}
@@ -565,7 +565,7 @@ func renderHelpModal() string {
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete, a archive", "p assign pillar, P create pillar, D delete pillar and its tasks", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"GitHub", "c create PR, o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
-		{"Terminal", "Ctrl+C interrupts the running command inside the terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
+		{"Terminal", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
 	}
 
 	lines := []string{
@@ -1196,7 +1196,7 @@ func kbdHints(focus AppFocus) string {
 	case FocusBoard:
 		return "move  : commands  Enter shell  n new  f filters  s sync  ? help"
 	case FocusTerminal:
-		return "Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
+		return "Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
 	case FocusModal:
 		return "Enter confirm  Esc cancel"
 	case FocusFilterBar, FocusSearch:

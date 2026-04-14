@@ -24,6 +24,7 @@ const (
 	terminalHeaderHeight     = 1
 	terminalFooterHeight     = 1
 	terminalInputFlushMillis = 6
+	terminalBoardNavTimeout  = 250 * time.Millisecond
 )
 
 type boardLoadedMsg struct {
@@ -68,6 +69,19 @@ type asyncErrorMsg struct {
 
 type spinnerTickMsg struct{}
 type sessionPollTickMsg struct{}
+type terminalBoardNavTimeoutMsg struct {
+	Version int
+}
+
+type boardNavigationAction int
+
+const (
+	boardNavigationNone boardNavigationAction = iota
+	boardNavigationLeft
+	boardNavigationRight
+	boardNavigationUp
+	boardNavigationDown
+)
 
 type Model struct {
 	client *RPCClient
@@ -109,6 +123,9 @@ type Model struct {
 	pendingTerminalPushSync    bool
 	terminalInputFlushVersion  int
 	postPushSyncVersion        int
+	terminalBoardNavPending    bool
+	terminalBoardNavTaskID     string
+	terminalBoardNavVersion    int
 
 	createTaskModal          *createTaskModalState
 	renameTaskModal          *renameTaskModalState
@@ -182,6 +199,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.syncCmd()
+
+	case terminalBoardNavTimeoutMsg:
+		if msg.Version != m.terminalBoardNavVersion || !m.terminalBoardNavPending {
+			return m, nil
+		}
+		return m, m.flushPendingTerminalBoardNavCmd()
 
 	case sessionPollTickMsg:
 		taskIDs := m.sessionTaskIDs()
@@ -341,14 +364,8 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	}
 
 	switch key.String() {
-	case "left", "h":
-		m.selectedTrackIndex = max(0, m.selectedTrackIndex-1)
-	case "right", "l":
-		m.selectedTrackIndex = min(max(0, len(m.sortedTracks())-1), m.selectedTrackIndex+1)
-	case "up", "k":
-		m.selectedTaskIndex = max(0, m.selectedTaskIndex-1)
-	case "down", "j":
-		m.selectedTaskIndex = min(max(0, len(m.selectedTrackTasks())-1), m.selectedTaskIndex+1)
+	case "left", "h", "right", "l", "up", "k", "down", "j":
+		m.applyBoardNavigation(boardNavigationActionForKey(key))
 	case ",":
 		m.switchRepo(-1)
 		return m.persistActiveRepoCmd()
@@ -463,7 +480,22 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 }
 
 func (m *Model) handleTerminalKey(key tea.KeyMsg) tea.Cmd {
+	if m.terminalBoardNavPending {
+		return m.handlePendingTerminalBoardNavKey(key)
+	}
+
 	switch key.Type {
+	case tea.KeyTab:
+		if m.activeTaskID == "" {
+			return nil
+		}
+		m.terminalBoardNavPending = true
+		m.terminalBoardNavTaskID = m.activeTaskID
+		m.terminalBoardNavVersion++
+		version := m.terminalBoardNavVersion
+		return tea.Tick(terminalBoardNavTimeout, func(_ time.Time) tea.Msg {
+			return terminalBoardNavTimeoutMsg{Version: version}
+		})
 	case tea.KeyEsc:
 		flushCmd := m.flushPendingTerminalInputCmd()
 		m.terminalCommand = ""
@@ -506,6 +538,131 @@ func (m *Model) handleTerminalKey(key tea.KeyMsg) tea.Cmd {
 		key,
 		shouldTriggerTerminalPushSync(commandBeforeSubmit, key),
 	)
+}
+
+func boardNavigationActionForKey(key tea.KeyMsg) boardNavigationAction {
+	switch key.String() {
+	case "left", "h":
+		return boardNavigationLeft
+	case "right", "l":
+		return boardNavigationRight
+	case "up", "k":
+		return boardNavigationUp
+	case "down", "j":
+		return boardNavigationDown
+	default:
+		return boardNavigationNone
+	}
+}
+
+func (m *Model) applyBoardNavigation(action boardNavigationAction) bool {
+	previousTrackIndex := m.selectedTrackIndex
+	previousTaskIndex := m.selectedTaskIndex
+
+	switch action {
+	case boardNavigationLeft:
+		m.selectedTrackIndex = max(0, m.selectedTrackIndex-1)
+	case boardNavigationRight:
+		m.selectedTrackIndex = min(max(0, len(m.sortedTracks())-1), m.selectedTrackIndex+1)
+	case boardNavigationUp:
+		m.selectedTaskIndex = max(0, m.selectedTaskIndex-1)
+	case boardNavigationDown:
+		m.selectedTaskIndex = min(max(0, len(m.selectedTrackTasks())-1), m.selectedTaskIndex+1)
+	default:
+		return false
+	}
+
+	m.selectedTaskIndex = clamp(m.selectedTaskIndex, 0, max(0, len(m.selectedTrackTasks())-1))
+	return m.selectedTrackIndex != previousTrackIndex || m.selectedTaskIndex != previousTaskIndex
+}
+
+func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
+	if key.Type == tea.KeyEsc {
+		m.clearTerminalBoardNav()
+		flushCmd := m.flushPendingTerminalInputCmd()
+		m.terminalCommand = ""
+		m.focus = FocusBoard
+		m.terminalFullscreen = false
+		return flushCmd
+	}
+
+	if action := boardNavigationActionForKey(key); action != boardNavigationNone {
+		m.clearTerminalBoardNav()
+		m.applyBoardNavigation(action)
+
+		task := m.selectedTask()
+		if task == nil {
+			m.statusMessage = "Selected track has no task."
+			return nil
+		}
+		if task.ID == m.activeTaskID {
+			return nil
+		}
+		return m.openSessionCmd(task.ID, false)
+	}
+
+	if m.terminalBoardNavTaskID == "" {
+		m.clearTerminalBoardNav()
+		return nil
+	}
+
+	switch key.Type {
+	case tea.KeyPgUp:
+		taskID := m.terminalBoardNavTaskID
+		m.clearTerminalBoardNav()
+		m.terminalScrollOffset += 10
+		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+	case tea.KeyPgDown:
+		taskID := m.terminalBoardNavTaskID
+		m.clearTerminalBoardNav()
+		m.terminalScrollOffset = max(0, m.terminalScrollOffset-10)
+		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+	case tea.KeyShiftUp:
+		taskID := m.terminalBoardNavTaskID
+		m.clearTerminalBoardNav()
+		m.terminalScrollOffset += 1
+		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+	case tea.KeyShiftDown:
+		taskID := m.terminalBoardNavTaskID
+		m.clearTerminalBoardNav()
+		m.terminalScrollOffset = max(0, m.terminalScrollOffset-1)
+		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+	}
+
+	data := encodeTerminalKey(key)
+	if data == "" {
+		m.clearTerminalBoardNav()
+		return nil
+	}
+
+	taskID := m.terminalBoardNavTaskID
+	commandBeforeSubmit := m.terminalCommand
+	m.clearTerminalBoardNav()
+	m.terminalCommand = appendTerminalCommand(m.terminalCommand, key)
+	if m.terminalScrollOffset != 0 {
+		m.terminalScrollOffset = 0
+	}
+
+	return m.queueTerminalInputCmd(
+		taskID,
+		"\t"+data,
+		key,
+		shouldTriggerTerminalPushSync(commandBeforeSubmit, key),
+	)
+}
+
+func (m *Model) flushPendingTerminalBoardNavCmd() tea.Cmd {
+	taskID := m.terminalBoardNavTaskID
+	m.clearTerminalBoardNav()
+	if taskID == "" {
+		return nil
+	}
+	return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+}
+
+func (m *Model) clearTerminalBoardNav() {
+	m.terminalBoardNavPending = false
+	m.terminalBoardNavTaskID = ""
 }
 
 func (m *Model) View() string {
