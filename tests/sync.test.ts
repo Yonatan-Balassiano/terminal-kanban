@@ -50,6 +50,27 @@ function makePrInfo(): PRInfo {
   };
 }
 
+async function flushPromises(count = 20): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+async function waitForAssertion(assertion: () => void, attempts = 200): Promise<void> {
+  let lastError: unknown;
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      assertion();
+      return;
+    } catch (error: unknown) {
+      lastError = error;
+      await Promise.resolve();
+    }
+  }
+
+  throw lastError;
+}
+
 describe('SyncService', () => {
   it('creates a PR after the branch is pushed and moves backlog to in-progress', async () => {
     const board = {
@@ -80,12 +101,7 @@ describe('SyncService', () => {
       }),
     };
 
-    const sync = new SyncService(
-      board as never,
-      github as never,
-      git as never,
-      db as never,
-    );
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
     await sync.trigger();
 
     expect(git.remoteBranchExists).toHaveBeenCalledWith('/repo', 'ab/task-1');
@@ -102,7 +118,7 @@ describe('SyncService', () => {
         prNumber: 42,
         prState: 'open',
         prUrl: 'https://example.test/pr/42',
-      }),
+      })
     );
     expect(board.moveTask).toHaveBeenCalledWith({
       id: 'task-1',
@@ -144,13 +160,7 @@ describe('SyncService', () => {
     };
     const wait = vi.fn().mockResolvedValue(undefined);
 
-    const sync = new SyncService(
-      board as never,
-      github as never,
-      git as never,
-      db as never,
-      wait,
-    );
+    const sync = new SyncService(board as never, github as never, git as never, db as never, wait);
 
     await sync.trigger();
 
@@ -193,12 +203,7 @@ describe('SyncService', () => {
       }),
     };
 
-    const sync = new SyncService(
-      board as never,
-      github as never,
-      git as never,
-      db as never,
-    );
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
 
     const result = await sync.trigger();
 
@@ -213,9 +218,7 @@ describe('SyncService', () => {
 
   it('moves a merged PR task to done', async () => {
     const board = {
-      getTasks: vi
-        .fn()
-        .mockReturnValue([makeTask({ trackId: 'in-progress', prState: 'open' })]),
+      getTasks: vi.fn().mockReturnValue([makeTask({ trackId: 'in-progress', prState: 'open' })]),
       updateTaskSync: vi.fn(),
       moveTask: vi.fn(),
     };
@@ -245,12 +248,7 @@ describe('SyncService', () => {
       }),
     };
 
-    const sync = new SyncService(
-      board as never,
-      github as never,
-      git as never,
-      db as never,
-    );
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
 
     const result = await sync.trigger();
 
@@ -262,7 +260,7 @@ describe('SyncService', () => {
         prState: 'merged',
         prUrl: 'https://example.test/pr/42',
         ciState: 'passed',
-      }),
+      })
     );
     expect(board.moveTask).toHaveBeenCalledWith({
       id: 'task-1',
@@ -300,12 +298,7 @@ describe('SyncService', () => {
       }),
     };
 
-    const sync = new SyncService(
-      board as never,
-      github as never,
-      git as never,
-      db as never,
-    );
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
 
     const result = await sync.trigger();
 
@@ -341,13 +334,7 @@ describe('SyncService', () => {
     };
     const wait = vi.fn().mockResolvedValue(undefined);
 
-    const sync = new SyncService(
-      board as never,
-      github as never,
-      git as never,
-      db as never,
-      wait,
-    );
+    const sync = new SyncService(board as never, github as never, git as never, db as never, wait);
 
     await expect(sync.createTaskPR('task-1')).resolves.toEqual(prInfo);
 
@@ -359,7 +346,71 @@ describe('SyncService', () => {
         prNumber: 42,
         prState: 'open',
         prUrl: 'https://example.test/pr/42',
-      }),
+      })
     );
+  });
+
+  it('retries post-push PR creation in the background until the branch appears', async () => {
+    let task = makeTask();
+    const board = {
+      getTask: vi.fn().mockImplementation(() => task),
+      updateTaskSync: vi.fn().mockImplementation((_id: string, patch: Partial<TaskRecord>) => {
+        task = { ...task, ...patch };
+      }),
+      moveTask: vi.fn().mockImplementation(({ trackId }: { trackId: string }) => {
+        task = { ...task, trackId };
+      }),
+    };
+    const prInfo = makePrInfo();
+    const github = {
+      getPR: vi.fn().mockResolvedValue(null),
+      createPR: vi.fn().mockResolvedValue(prInfo),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi
+        .fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+      }),
+    };
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never, wait);
+
+    expect(sync.schedulePostPushSync('task-1')).toEqual({ scheduled: true });
+
+    await flushPromises();
+    await waitForAssertion(() => {
+      expect(github.createPR).toHaveBeenCalledWith('/repo', {
+        githubRepo: 'org/proj',
+        branch: 'ab/task-1',
+        baseBranch: 'main',
+        title: '[auto|task-1] My task',
+        body: 'Created by AgentBoard for task task-1.',
+      });
+      expect(task.prState).toBe('open');
+      expect(task.prNumber).toBe(42);
+    });
+
+    expect(git.remoteBranchExists).toHaveBeenCalledTimes(3);
+    expect(wait).toHaveBeenCalledTimes(2);
+    expect(board.moveTask).toHaveBeenCalledWith({
+      id: 'task-1',
+      trackId: 'in-progress',
+    });
   });
 });

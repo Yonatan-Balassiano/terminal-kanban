@@ -287,6 +287,7 @@ export type RPCMethod =
   | 'inspectSession'
   | 'prepareTaskWorkspace'
   | 'createTaskPR'
+  | 'schedulePostPushSync'
   | 'mergeTaskPR'
   | 'triggerSync'
   | 'daemonStatus'
@@ -416,6 +417,10 @@ export interface TaskWorkspaceResult {
 }
 
 export interface CreateTaskPRParams {
+  taskId: string;
+}
+
+export interface SchedulePostPushSyncParams {
   taskId: string;
 }
 

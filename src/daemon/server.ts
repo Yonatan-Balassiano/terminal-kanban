@@ -32,6 +32,7 @@ import type {
   InspectSessionParams,
   PrepareTaskWorkspaceParams,
   CreateTaskPRParams,
+  SchedulePostPushSyncParams,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
 
@@ -62,7 +63,7 @@ function makePlaceholderBoard(): BoardSnapshot {
 export async function dispatch(
   req: RPCRequest,
   services: ServiceContainer,
-  socketPath: string,
+  socketPath: string
 ): Promise<RPCResponse> {
   const notImpl: RPCResponse = {
     id: req.id,
@@ -116,7 +117,7 @@ export async function dispatch(
       case 'renameTask': {
         services.board.renameTask(
           (p as unknown as RenameTaskParams).id,
-          (p as unknown as RenameTaskParams).title,
+          (p as unknown as RenameTaskParams).title
         );
         serverEvents.emit('event', {
           type: 'board_patch',
@@ -128,7 +129,7 @@ export async function dispatch(
       case 'updateTaskDescription': {
         services.board.setTaskDescription(
           (p as unknown as UpdateTaskDescriptionParams).id,
-          (p as unknown as UpdateTaskDescriptionParams).description,
+          (p as unknown as UpdateTaskDescriptionParams).description
         );
         serverEvents.emit('event', {
           type: 'board_patch',
@@ -149,7 +150,7 @@ export async function dispatch(
       case 'reorderTask': {
         services.board.reorderTask(
           (p as unknown as ReorderTaskParams).id,
-          (p as unknown as ReorderTaskParams).sortKey,
+          (p as unknown as ReorderTaskParams).sortKey
         );
         serverEvents.emit('event', {
           type: 'board_patch',
@@ -179,7 +180,7 @@ export async function dispatch(
       case 'assignPillar': {
         services.board.assignPillar(
           (p as unknown as AssignPillarParams).id,
-          (p as unknown as AssignPillarParams).pillarId,
+          (p as unknown as AssignPillarParams).pillarId
         );
         serverEvents.emit('event', {
           type: 'board_patch',
@@ -191,7 +192,7 @@ export async function dispatch(
       case 'setLabels': {
         services.board.setLabels(
           (p as unknown as SetLabelsParams).id,
-          (p as unknown as SetLabelsParams).labelIds,
+          (p as unknown as SetLabelsParams).labelIds
         );
         serverEvents.emit('event', {
           type: 'board_patch',
@@ -295,14 +296,14 @@ export async function dispatch(
 
       case 'inspectSession': {
         const activity = await services.session.inspectSession(
-          (p as unknown as InspectSessionParams).taskId,
+          (p as unknown as InspectSessionParams).taskId
         );
         return { id: req.id, result: activity };
       }
 
       case 'prepareTaskWorkspace': {
         const result = services.worktrees.prepareTaskWorkspace(
-          (p as unknown as PrepareTaskWorkspaceParams).taskId,
+          (p as unknown as PrepareTaskWorkspaceParams).taskId
         );
         serverEvents.emit('event', {
           type: 'board_patch',
@@ -312,14 +313,19 @@ export async function dispatch(
       }
 
       case 'createTaskPR': {
-        const pr = await services.sync.createTaskPR(
-          (p as unknown as CreateTaskPRParams).taskId,
-        );
+        const pr = await services.sync.createTaskPR((p as unknown as CreateTaskPRParams).taskId);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
         });
         return { id: req.id, result: pr };
+      }
+
+      case 'schedulePostPushSync': {
+        const result = services.sync.schedulePostPushSync(
+          (p as unknown as SchedulePostPushSyncParams).taskId
+        );
+        return { id: req.id, result };
       }
 
       case 'mergeTaskPR': {

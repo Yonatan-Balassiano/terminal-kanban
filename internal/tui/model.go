@@ -198,7 +198,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Version != m.postPushSyncVersion {
 			return m, nil
 		}
-		return m, m.syncCmd()
+		if msg.TaskID == "" {
+			return m, nil
+		}
+		m.statusMessage = "Watching pushed branch for PR creation."
+		return m, m.schedulePostPushSyncCmd(msg.TaskID)
 
 	case terminalBoardNavTimeoutMsg:
 		if msg.Version != m.terminalBoardNavVersion || !m.terminalBoardNavPending {
@@ -794,6 +798,15 @@ func (m *Model) sendInputCmd(taskID, data string) tea.Cmd {
 func (m *Model) syncCmd() tea.Cmd {
 	m.syncInProgress = true
 	return m.boardActionCmd("triggerSync", nil, "Sync complete.")
+}
+
+func (m *Model) schedulePostPushSyncCmd(taskID string) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.client.Call("schedulePostPushSync", map[string]string{"taskId": taskID}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+		return boardActionMsg{status: "Watching pushed branch for PR creation."}
+	}
 }
 
 func (m *Model) moveContextTaskCmd(task *TaskRecord, direction int) tea.Cmd {

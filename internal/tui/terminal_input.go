@@ -17,6 +17,7 @@ type flushTerminalInputMsg struct {
 
 type postPushSyncMsg struct {
 	Version int
+	TaskID  string
 }
 
 func appendTerminalCommand(current string, key tea.KeyMsg) string {
@@ -98,7 +99,7 @@ func (m *Model) flushPendingTerminalInputCmd() tea.Cmd {
 		m.postPushSyncVersion++
 		version := m.postPushSyncVersion
 		commands = append(commands, tea.Tick(postPushSyncDelay, func(_ time.Time) tea.Msg {
-			return postPushSyncMsg{Version: version}
+			return postPushSyncMsg{Version: version, TaskID: taskID}
 		}))
 	}
 

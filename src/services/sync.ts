@@ -15,6 +15,8 @@ function buildAutoPRBody(taskId: string): string {
 
 const MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS = 8;
 const MANUAL_REMOTE_BRANCH_RETRY_DELAY_MS = 400;
+const POST_PUSH_PR_RETRY_ATTEMPTS = 24;
+const POST_PUSH_PR_RETRY_INTERVAL_MS = 5000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -25,6 +27,8 @@ function sleep(ms: number): Promise<void> {
 export class SyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private postPushAttemptsRemainingByTaskId = new Map<string, number>();
+  private postPushLoopActiveByTaskId = new Set<string>();
   readonly syncEvent = new EventEmitter();
 
   constructor(
@@ -32,7 +36,7 @@ export class SyncService {
     private github: GitHubService,
     private git: GitService,
     private db: Db,
-    private wait = sleep,
+    private wait = sleep
   ) {}
 
   start(intervalMs: number): void {
@@ -55,6 +59,18 @@ export class SyncService {
 
   async trigger(): Promise<SyncResult> {
     return this.runSync({ retryPendingRemoteBranches: true });
+  }
+
+  schedulePostPushSync(taskId: string): { scheduled: true } {
+    this.postPushAttemptsRemainingByTaskId.set(taskId, POST_PUSH_PR_RETRY_ATTEMPTS);
+
+    if (this.postPushLoopActiveByTaskId.has(taskId)) {
+      return { scheduled: true };
+    }
+
+    this.postPushLoopActiveByTaskId.add(taskId);
+    void this.runPostPushLoop(taskId);
+    return { scheduled: true };
   }
 
   async createTaskPR(taskId: string): Promise<PRInfo> {
@@ -80,8 +96,7 @@ export class SyncService {
     }
 
     const repoPath = repoRow['path'] as string;
-    const storedBaseBranch =
-      (repoRow['default_base_branch'] as string | null) ?? 'main';
+    const storedBaseBranch = (repoRow['default_base_branch'] as string | null) ?? 'main';
     const detectedBaseBranch = await this.git.defaultBranch(repoPath);
     const baseBranch = detectedBaseBranch || storedBaseBranch;
     const fullRepo = `${githubOwner}/${githubRepo}`;
@@ -91,11 +106,7 @@ export class SyncService {
       return existing;
     }
 
-    const remoteBranchPresent = await this.waitForRemoteBranch(
-      repoPath,
-      task.branchName,
-      true,
-    );
+    const remoteBranchPresent = await this.waitForRemoteBranch(repoPath, task.branchName, true);
     if (!remoteBranchPresent) {
       throw new Error(`Task branch ${task.branchName} is not pushed to origin`);
     }
@@ -117,7 +128,7 @@ export class SyncService {
   private applyTaskSyncPatch(
     task: TaskRecord,
     prInfo?: PRInfo,
-    gitStatus?: Awaited<ReturnType<GitService['getWorkspaceStatus']>> | null,
+    gitStatus?: Awaited<ReturnType<GitService['getWorkspaceStatus']>> | null
   ): boolean {
     const patch: Parameters<BoardService['updateTaskSync']>[1] = {};
 
@@ -142,7 +153,8 @@ export class SyncService {
     if (gitStatus) {
       if (task.gitState !== gitStatus.gitState) patch.gitState = gitStatus.gitState;
       if (task.gitAheadCount !== gitStatus.aheadCount) patch.gitAheadCount = gitStatus.aheadCount;
-      if (task.gitBehindCount !== gitStatus.behindCount) patch.gitBehindCount = gitStatus.behindCount;
+      if (task.gitBehindCount !== gitStatus.behindCount)
+        patch.gitBehindCount = gitStatus.behindCount;
       if (task.hasUntracked !== gitStatus.hasUntracked) patch.hasUntracked = gitStatus.hasUntracked;
       if (task.hasConflicts !== gitStatus.hasConflicts) patch.hasConflicts = gitStatus.hasConflicts;
     }
@@ -158,11 +170,9 @@ export class SyncService {
   private async waitForRemoteBranch(
     repoPath: string,
     branch: string,
-    retryPendingRemoteBranches: boolean,
+    retryPendingRemoteBranches: boolean
   ): Promise<boolean> {
-    const attempts = retryPendingRemoteBranches
-      ? MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS
-      : 1;
+    const attempts = retryPendingRemoteBranches ? MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS : 1;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       if (await this.git.remoteBranchExists(repoPath, branch)) {
@@ -177,8 +187,151 @@ export class SyncService {
     return false;
   }
 
+  private shouldStopPostPushLoop(task: TaskRecord | null): boolean {
+    if (!task || task.archivedAt != null || !task.branchName) {
+      return true;
+    }
+
+    return task.prState !== 'none' || task.prNumber != null;
+  }
+
+  private async runPostPushLoop(taskId: string): Promise<void> {
+    try {
+      while ((this.postPushAttemptsRemainingByTaskId.get(taskId) ?? 0) > 0) {
+        this.postPushAttemptsRemainingByTaskId.set(
+          taskId,
+          (this.postPushAttemptsRemainingByTaskId.get(taskId) ?? 1) - 1
+        );
+
+        await this.runSync({
+          retryPendingRemoteBranches: false,
+          taskIds: [taskId],
+        });
+
+        if (this.shouldStopPostPushLoop(this.board.getTask(taskId))) {
+          return;
+        }
+
+        if ((this.postPushAttemptsRemainingByTaskId.get(taskId) ?? 0) <= 0) {
+          return;
+        }
+
+        await this.wait(POST_PUSH_PR_RETRY_INTERVAL_MS);
+      }
+    } finally {
+      this.postPushAttemptsRemainingByTaskId.delete(taskId);
+      this.postPushLoopActiveByTaskId.delete(taskId);
+    }
+  }
+
+  private loadRepoRow(repoId: string): Record<string, unknown> | undefined {
+    return this.db
+      .prepare<[string], Record<string, unknown>>('SELECT * FROM repos WHERE id = ?')
+      .get(repoId);
+  }
+
+  private async syncTask(
+    task: TaskRecord,
+    opts: { retryPendingRemoteBranches?: boolean } | undefined,
+    result: SyncResult
+  ): Promise<void> {
+    if (!task.branchName) {
+      return;
+    }
+
+    const repoRow = this.loadRepoRow(task.repoId);
+    if (!repoRow) {
+      return;
+    }
+
+    const githubOwner = (repoRow['github_owner'] as string | null) ?? undefined;
+    const githubRepo = (repoRow['github_repo'] as string | null) ?? undefined;
+    const repoPath = repoRow['path'] as string;
+    const storedBaseBranch = (repoRow['default_base_branch'] as string | null) ?? 'main';
+    const detectedBaseBranch = await this.git.defaultBranch(repoPath);
+    const baseBranch = detectedBaseBranch || storedBaseBranch;
+
+    if (baseBranch !== storedBaseBranch) {
+      this.db
+        .prepare<
+          [string, number, string],
+          void
+        >('UPDATE repos SET default_base_branch = ?, updated_at = ? WHERE id = ?')
+        .run(baseBranch, Date.now(), task.repoId);
+    }
+
+    if (!githubOwner || !githubRepo) {
+      return;
+    }
+
+    const fullRepo = `${githubOwner}/${githubRepo}`;
+    let taskChanged = false;
+
+    try {
+      let prInfo = await this.github.getPR(repoPath, task.branchName, fullRepo);
+      let remoteBranchPresent = false;
+
+      if (!prInfo) {
+        remoteBranchPresent = await this.waitForRemoteBranch(
+          repoPath,
+          task.branchName,
+          opts?.retryPendingRemoteBranches === true
+        );
+
+        if (remoteBranchPresent && task.trackId === 'backlog') {
+          this.board.moveTask({ id: task.id, trackId: 'in-progress' });
+          taskChanged = true;
+        }
+
+        if (remoteBranchPresent) {
+          prInfo = await this.github.createPR(repoPath, {
+            githubRepo: fullRepo,
+            branch: task.branchName,
+            baseBranch,
+            title: buildAutoPRTitle(task.id, task.title),
+            body: buildAutoPRBody(task.id),
+          });
+        }
+      }
+
+      const gitStatus = await this.git
+        .getWorkspaceStatus(task.worktreePath ?? repoPath)
+        .catch(() => null);
+
+      if (this.applyTaskSyncPatch(task, prInfo ?? undefined, gitStatus)) {
+        taskChanged = true;
+
+        if (prInfo && task.trackId !== 'done' && prInfo.prState === 'merged') {
+          this.board.moveTask({ id: task.id, trackId: 'done' });
+          taskChanged = true;
+        }
+
+        // A pushed branch with a PR means active work, so move backlog into progress.
+        if (
+          prInfo &&
+          task.trackId === 'backlog' &&
+          (prInfo.prState === 'draft' || prInfo.prState === 'open')
+        ) {
+          this.board.moveTask({ id: task.id, trackId: 'in-progress' });
+          taskChanged = true;
+        }
+      }
+
+      if (taskChanged) {
+        result.tasksUpdated++;
+      }
+    } catch (err: unknown) {
+      if (taskChanged) {
+        result.tasksUpdated++;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      result.errors.push(`Task ${task.id}: ${msg}`);
+    }
+  }
+
   private async runSync(opts?: {
     retryPendingRemoteBranches?: boolean;
+    taskIds?: string[];
   }): Promise<SyncResult> {
     if (this.running) {
       return { tasksUpdated: 0, errors: [] };
@@ -188,100 +341,14 @@ export class SyncService {
     const result: SyncResult = { tasksUpdated: 0, errors: [] };
 
     try {
-      // Load all non-archived tasks that have a branch name
-      const tasks = this.board.getTasks({ includeArchived: false });
+      const tasks =
+        opts?.taskIds
+          ?.map((taskId) => this.board.getTask(taskId))
+          .filter((task): task is TaskRecord => task != null && task.archivedAt == null) ??
+        this.board.getTasks({ includeArchived: false });
 
       for (const task of tasks) {
-        if (!task.branchName) continue;
-
-        // Load repo
-        const repoRow = this.db
-          .prepare<[string], Record<string, unknown>>('SELECT * FROM repos WHERE id = ?')
-          .get(task.repoId);
-
-        if (!repoRow) continue;
-
-        const githubOwner = (repoRow['github_owner'] as string | null) ?? undefined;
-        const githubRepo = (repoRow['github_repo'] as string | null) ?? undefined;
-        const repoPath = repoRow['path'] as string;
-        const storedBaseBranch =
-          (repoRow['default_base_branch'] as string | null) ?? 'main';
-        const detectedBaseBranch = await this.git.defaultBranch(repoPath);
-        const baseBranch = detectedBaseBranch || storedBaseBranch;
-
-        if (baseBranch !== storedBaseBranch) {
-          this.db
-            .prepare<[string, number, string], void>(
-              'UPDATE repos SET default_base_branch = ?, updated_at = ? WHERE id = ?',
-            )
-            .run(baseBranch, Date.now(), task.repoId);
-        }
-
-        if (!githubOwner || !githubRepo) continue;
-
-        const fullRepo = `${githubOwner}/${githubRepo}`;
-
-        let taskChanged = false;
-        try {
-          let prInfo = await this.github.getPR(repoPath, task.branchName, fullRepo);
-          let remoteBranchPresent = false;
-
-          if (!prInfo) {
-            remoteBranchPresent = await this.waitForRemoteBranch(
-              repoPath,
-              task.branchName,
-              opts?.retryPendingRemoteBranches === true,
-            );
-
-            if (remoteBranchPresent && task.trackId === 'backlog') {
-              this.board.moveTask({ id: task.id, trackId: 'in-progress' });
-              taskChanged = true;
-            }
-
-            if (remoteBranchPresent) {
-              prInfo = await this.github.createPR(repoPath, {
-                githubRepo: fullRepo,
-                branch: task.branchName,
-                baseBranch,
-                title: buildAutoPRTitle(task.id, task.title),
-                body: buildAutoPRBody(task.id),
-              });
-            }
-          }
-
-          const gitStatus = await this.git
-            .getWorkspaceStatus(task.worktreePath ?? repoPath)
-            .catch(() => null);
-
-          if (this.applyTaskSyncPatch(task, prInfo ?? undefined, gitStatus)) {
-            taskChanged = true;
-
-            if (prInfo && task.trackId !== 'done' && prInfo.prState === 'merged') {
-              this.board.moveTask({ id: task.id, trackId: 'done' });
-              taskChanged = true;
-            }
-
-            // A pushed branch with a PR means active work, so move backlog into progress.
-            if (
-              prInfo &&
-              task.trackId === 'backlog' &&
-              (prInfo.prState === 'draft' || prInfo.prState === 'open')
-            ) {
-              this.board.moveTask({ id: task.id, trackId: 'in-progress' });
-              taskChanged = true;
-            }
-          }
-
-          if (taskChanged) {
-            result.tasksUpdated++;
-          }
-        } catch (err: unknown) {
-          if (taskChanged) {
-            result.tasksUpdated++;
-          }
-          const msg = err instanceof Error ? err.message : String(err);
-          result.errors.push(`Task ${task.id}: ${msg}`);
-        }
+        await this.syncTask(task, opts, result);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

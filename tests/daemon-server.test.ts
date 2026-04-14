@@ -73,7 +73,7 @@ describe('daemon mergeTaskPR dispatch', () => {
         sync: { trigger },
         view: { getBoardSnapshot },
       } as never,
-      '/tmp/agentboard.sock',
+      '/tmp/agentboard.sock'
     );
 
     expect(response).toEqual({
@@ -100,5 +100,29 @@ describe('daemon mergeTaskPR dispatch', () => {
     });
 
     resolveTrigger?.();
+  });
+});
+
+describe('daemon schedulePostPushSync dispatch', () => {
+  it('arms the background post-push follow-up without blocking on it', async () => {
+    const schedulePostPushSync = vi.fn().mockReturnValue({ scheduled: true });
+
+    const response = await dispatch(
+      {
+        id: 'req-2',
+        method: 'schedulePostPushSync',
+        params: { taskId: 'task-1' },
+      },
+      {
+        sync: { schedulePostPushSync },
+      } as never,
+      '/tmp/agentboard.sock'
+    );
+
+    expect(schedulePostPushSync).toHaveBeenCalledWith('task-1');
+    expect(response).toEqual({
+      id: 'req-2',
+      result: { scheduled: true },
+    });
   });
 });
