@@ -6,7 +6,7 @@ import type { GetBufferResult } from '../types/index.js';
 import { extractTerminalBufferSnapshot } from './terminal-render.js';
 
 const TERMINAL_SCROLLBACK_LINES = 2000;
-const TERMINAL_EMIT_INTERVAL_MS = 33;
+const TERMINAL_EMIT_INTERVAL_MS = 8;
 
 export class TerminalBufferService {
   private terminals = new Map<string, TerminalInstance>();

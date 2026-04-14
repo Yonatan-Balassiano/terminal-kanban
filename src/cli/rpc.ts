@@ -147,6 +147,15 @@ export class RPCClient {
     });
   }
 
+  notify(method: RPCMethod, params?: unknown): void {
+    if (!this.socket || this.socket.destroyed) {
+      throw new Error('RPC client is not connected');
+    }
+
+    const req: RPCRequest = { id: '', method, params };
+    this.socket.write(JSON.stringify(req) + '\n');
+  }
+
   // --------------- subscribe --------------------------------
 
   /**

@@ -38,3 +38,20 @@ export function appendTerminalInput(
 export function shouldTriggerTerminalPushSync(command: string, key: TerminalKeyLike): boolean {
   return key.return === true && /\bgit\s+push\b/.test(command.trim());
 }
+
+export function shouldFlushTerminalInputImmediately(
+  input: string,
+  key: TerminalKeyLike,
+): boolean {
+  return (
+    key.return === true ||
+    key.tab === true ||
+    key.escape === true ||
+    key.upArrow === true ||
+    key.downArrow === true ||
+    key.leftArrow === true ||
+    key.rightArrow === true ||
+    key.ctrl === true ||
+    (input.length === 0 && !key.backspace && !key.delete)
+  );
+}

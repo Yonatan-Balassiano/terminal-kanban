@@ -8,7 +8,7 @@ export const initialTerminalBufferState: GetBufferResult = {
   cursorY: 0,
 };
 
-function snapshotsEqual(left: GetBufferResult, right: GetBufferResult): boolean {
+function snapshotsLikelyEqual(left: GetBufferResult, right: GetBufferResult): boolean {
   if (
     left.cursorX !== right.cursorX ||
     left.cursorY !== right.cursorY ||
@@ -18,19 +18,15 @@ function snapshotsEqual(left: GetBufferResult, right: GetBufferResult): boolean 
     return false;
   }
 
-  for (let index = 0; index < left.lines.length; index += 1) {
-    if (left.lines[index] !== right.lines[index]) {
-      return false;
-    }
-  }
+  const lastLineIndex = left.lines.length - 1;
+  const lastAnsiLineIndex = left.ansiLines.length - 1;
 
-  for (let index = 0; index < left.ansiLines.length; index += 1) {
-    if (left.ansiLines[index] !== right.ansiLines[index]) {
-      return false;
-    }
-  }
-
-  return true;
+  return (
+    (left.lines[0] ?? '') === (right.lines[0] ?? '') &&
+    (left.lines[lastLineIndex] ?? '') === (right.lines[lastLineIndex] ?? '') &&
+    (left.ansiLines[0] ?? '') === (right.ansiLines[0] ?? '') &&
+    (left.ansiLines[lastAnsiLineIndex] ?? '') === (right.ansiLines[lastAnsiLineIndex] ?? '')
+  );
 }
 
 export class TerminalBufferStore {
@@ -44,7 +40,7 @@ export class TerminalBufferStore {
   getSnapshot = (): GetBufferResult => this.snapshot;
 
   setSnapshot(next: GetBufferResult): void {
-    if (snapshotsEqual(this.snapshot, next)) {
+    if (this.snapshot === next || snapshotsLikelyEqual(this.snapshot, next)) {
       return;
     }
 

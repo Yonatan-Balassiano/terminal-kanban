@@ -422,7 +422,12 @@ export function startServer(socketPath: string, services: ServiceContainer): net
 
         let req: RPCRequest;
         try {
-          req = JSON.parse(trimmed) as RPCRequest;
+          const parsed = JSON.parse(trimmed) as Partial<RPCRequest>;
+          req = {
+            id: typeof parsed.id === 'string' ? parsed.id : '',
+            method: parsed.method as RPCMethod,
+            params: parsed.params,
+          };
         } catch {
           const errResp: RPCResponse = {
             id: '',
@@ -451,13 +456,24 @@ export function startServer(socketPath: string, services: ServiceContainer): net
         }
 
         // All other requests: dispatch and reply.
-        dispatch(req, services, socketPath).then(writeResponse).catch(() => {
-          const errResp: RPCResponse = {
-            id: req.id,
-            error: { code: -32000, message: 'Internal error' },
-          };
-          writeResponse(errResp);
-        });
+        const shouldReply = req.id.length > 0;
+        dispatch(req, services, socketPath)
+          .then((response) => {
+            if (shouldReply) {
+              writeResponse(response);
+            }
+          })
+          .catch(() => {
+            if (!shouldReply) {
+              return;
+            }
+
+            const errResp: RPCResponse = {
+              id: req.id,
+              error: { code: -32000, message: 'Internal error' },
+            };
+            writeResponse(errResp);
+          });
       }
     });
 

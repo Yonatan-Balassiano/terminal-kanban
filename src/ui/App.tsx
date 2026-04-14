@@ -41,6 +41,7 @@ import {
 } from './terminal-layout.js';
 import {
   appendTerminalInput,
+  shouldFlushTerminalInputImmediately,
   shouldTriggerTerminalPushSync,
 } from './terminal-command.js';
 import { openExternalUrl } from './open-external.js';
@@ -51,13 +52,11 @@ import { getNextActiveRepoId } from './repo-switch.js';
 import { useTerminalSize } from './use-terminal-size.js';
 import { getHeaderContextTask } from './header-context.js';
 
-// --------------- App component -------------------------------
-
-const TERMINAL_RENDER_INTERVAL_MS = 50;
-
 interface AppProps {
   controller: AppController;
 }
+
+const TERMINAL_INPUT_BATCH_INTERVAL_MS = 6;
 
 export default function App({ controller }: AppProps) {
   const [state, baseDispatch] = useReducer(reducer, initialState);
@@ -65,48 +64,14 @@ export default function App({ controller }: AppProps) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const postPushSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const terminalBufferFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingTerminalBufferRef = useRef<AppAction | null>(null);
-  const lastTerminalBufferFlushRef = useRef(0);
+  const terminalInputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingTerminalInputRef = useRef('');
+  const pendingTerminalInputTaskIdRef = useRef<string | null>(null);
+  const pendingTerminalPushSyncRef = useRef(false);
   const terminalCommandRef = useRef('');
-  const flushTerminalBufferUpdate = () => {
-    if (terminalBufferFlushTimerRef.current) {
-      clearTimeout(terminalBufferFlushTimerRef.current);
-      terminalBufferFlushTimerRef.current = null;
-    }
-
-    const pending = pendingTerminalBufferRef.current;
-    if (pending?.type !== 'BUFFER_UPDATE') {
-      return;
-    }
-
-    pendingTerminalBufferRef.current = null;
-    lastTerminalBufferFlushRef.current = Date.now();
-    terminalBufferStoreRef.current.setSnapshot(pending.payload);
-  };
-  const scheduleTerminalBufferUpdate = (action: Extract<AppAction, { type: 'BUFFER_UPDATE' }>) => {
-    pendingTerminalBufferRef.current = action;
-    const elapsed = Date.now() - lastTerminalBufferFlushRef.current;
-
-    if (elapsed >= TERMINAL_RENDER_INTERVAL_MS && !terminalBufferFlushTimerRef.current) {
-      flushTerminalBufferUpdate();
-      return;
-    }
-
-    if (terminalBufferFlushTimerRef.current) {
-      return;
-    }
-
-    const delay = Math.max(0, TERMINAL_RENDER_INTERVAL_MS - elapsed);
-    const timer = setTimeout(() => {
-      flushTerminalBufferUpdate();
-    }, delay);
-    timer.unref?.();
-    terminalBufferFlushTimerRef.current = timer;
-  };
   const dispatch = (action: AppAction) => {
     if (action.type === 'BUFFER_UPDATE') {
-      scheduleTerminalBufferUpdate(action);
+      terminalBufferStoreRef.current.setSnapshot(action.payload);
       return;
     }
 
@@ -141,14 +106,76 @@ export default function App({ controller }: AppProps) {
 
   useEffect(() => {
     return () => {
+      if (terminalInputFlushTimerRef.current) {
+        clearTimeout(terminalInputFlushTimerRef.current);
+      }
       if (postPushSyncTimerRef.current) {
         clearTimeout(postPushSyncTimerRef.current);
       }
-      if (terminalBufferFlushTimerRef.current) {
-        clearTimeout(terminalBufferFlushTimerRef.current);
-      }
     };
   }, []);
+
+  const flushPendingTerminalInput = () => {
+    if (terminalInputFlushTimerRef.current) {
+      clearTimeout(terminalInputFlushTimerRef.current);
+      terminalInputFlushTimerRef.current = null;
+    }
+
+    const taskId = pendingTerminalInputTaskIdRef.current;
+    const data = pendingTerminalInputRef.current;
+    const shouldTriggerPushSync = pendingTerminalPushSyncRef.current;
+
+    pendingTerminalInputTaskIdRef.current = null;
+    pendingTerminalInputRef.current = '';
+    pendingTerminalPushSyncRef.current = false;
+
+    if (!taskId || data.length === 0) {
+      return;
+    }
+
+    void controller
+      .sendInput(taskId, data)
+      .then(() => {
+        if (shouldTriggerPushSync) {
+          if (postPushSyncTimerRef.current) {
+            clearTimeout(postPushSyncTimerRef.current);
+          }
+          postPushSyncTimerRef.current = setTimeout(() => {
+            void controller.triggerSync().catch(() => {});
+          }, 1500);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const queueTerminalInput = (
+    taskId: string,
+    data: string,
+    input: string,
+    key: Parameters<typeof shouldFlushTerminalInputImmediately>[1],
+    shouldTriggerPushSync: boolean,
+  ) => {
+    const pendingTaskId = pendingTerminalInputTaskIdRef.current;
+    if (pendingTaskId && pendingTaskId !== taskId) {
+      flushPendingTerminalInput();
+    }
+
+    pendingTerminalInputTaskIdRef.current = taskId;
+    pendingTerminalInputRef.current += data;
+    pendingTerminalPushSyncRef.current =
+      pendingTerminalPushSyncRef.current || shouldTriggerPushSync;
+
+    if (shouldFlushTerminalInputImmediately(input, key)) {
+      flushPendingTerminalInput();
+      return;
+    }
+
+    if (!terminalInputFlushTimerRef.current) {
+      terminalInputFlushTimerRef.current = setTimeout(() => {
+        flushPendingTerminalInput();
+      }, TERMINAL_INPUT_BATCH_INTERVAL_MS);
+    }
+  };
 
   const focusTerminal = () => {
     dispatch({ type: 'FOCUS_SET', payload: 'terminal' });
@@ -872,6 +899,7 @@ export default function App({ controller }: AppProps) {
 
     if (focus === 'terminal') {
       if (key.escape) {
+        flushPendingTerminalInput();
         terminalCommandRef.current = '';
         dispatch({ type: 'TERMINAL_FULLSCREEN_SET', payload: false });
         dispatch({ type: 'FOCUS_SET', payload: 'board' });
@@ -915,19 +943,13 @@ export default function App({ controller }: AppProps) {
           const shouldTriggerPushSync =
             shouldTriggerTerminalPushSync(commandBeforeSubmit, key);
 
-          void controller
-            .sendInput(activeTaskId, data)
-            .then(() => {
-              if (shouldTriggerPushSync) {
-                if (postPushSyncTimerRef.current) {
-                  clearTimeout(postPushSyncTimerRef.current);
-                }
-                postPushSyncTimerRef.current = setTimeout(() => {
-                  void controller.triggerSync().catch(() => {});
-                }, 1500);
-              }
-            })
-            .catch(() => {});
+          queueTerminalInput(
+            activeTaskId,
+            data,
+            input,
+            key,
+            shouldTriggerPushSync,
+          );
         }
       }
       return;
@@ -1196,7 +1218,7 @@ export default function App({ controller }: AppProps) {
   ]);
 
   useEffect(() => {
-    if (sessionTaskIds.length === 0) {
+    if (state.focus === 'terminal' || sessionTaskIds.length === 0) {
       return;
     }
 
@@ -1221,7 +1243,7 @@ export default function App({ controller }: AppProps) {
     return () => {
       clearInterval(timer);
     };
-  }, [controller, sessionTaskIdsKey]);
+  }, [controller, sessionTaskIdsKey, state.focus]);
 
   const renderModal = () => {
     if (modal === null) return null;

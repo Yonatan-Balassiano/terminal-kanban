@@ -15,7 +15,6 @@ export interface TrackProps {
   isSelected: boolean;
   selectedTaskIndex: number;
   repoLabelsById: Map<string, string>;
-  showRepoLabel: boolean;
   height: number;
 }
 
@@ -28,7 +27,6 @@ export function Track({
   isSelected,
   selectedTaskIndex,
   repoLabelsById,
-  showRepoLabel,
   height,
 }: TrackProps): JSX.Element {
   const { pillars, focus, activeTaskId, sessionActivityByTaskId } = useAppState();
@@ -84,7 +82,6 @@ export function Track({
                 sessionActivity={sessionActivityByTaskId[task.id]}
                 pillars={pillars}
                 repoLabel={repoLabelsById.get(task.repoId) ?? task.repoId}
-                showRepoLabel={showRepoLabel}
               />
             );
           })}

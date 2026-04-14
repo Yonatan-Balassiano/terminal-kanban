@@ -62,6 +62,18 @@ cd terminal-canban
 npm install
 ```
 
+Or use the bootstrap script to do the full first-run setup in one shot:
+
+```bash
+bash scripts/bootstrap.sh
+```
+
+With an initial repo registration:
+
+```bash
+bash scripts/bootstrap.sh --repo /absolute/path/to/repo --label my-repo
+```
+
 ### 3. Build
 
 ```bash

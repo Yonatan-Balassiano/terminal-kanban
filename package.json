@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc && mkdir -p dist/db/migrations && cp src/db/migrations/*.sql dist/db/migrations/",
+    "bootstrap": "bash scripts/bootstrap.sh",
     "dev": "tsx src/bin/agentboard.tsx",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",

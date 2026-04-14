@@ -1,9 +1,11 @@
 import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
 import type {
   PillarRecord,
   SessionActivitySnapshot,
   TaskRecord,
 } from '../types/index.js';
+import { truncatePlain } from './ansi-truncate.js';
 import { UI_CHROME, getSessionBadgeModel, useSpinnerFrame } from './chrome.js';
 import { canMergeTask, getTaskCardBorderColor } from './task-card-status.js';
 
@@ -14,7 +16,6 @@ export interface TaskCardProps {
   sessionActivity?: SessionActivitySnapshot;
   pillars: PillarRecord[];
   repoLabel: string;
-  showRepoLabel: boolean;
 }
 
 const CARD_WIDTH = 32;
@@ -27,11 +28,106 @@ type InlineStatus = {
 };
 
 function truncate(str: string, max: number): string {
-  if (str.length <= max) {
+  if (max <= 0) {
+    return '';
+  }
+
+  if (stringWidth(str) <= max) {
     return str;
   }
 
-  return `${str.slice(0, Math.max(0, max - 1))}…`;
+  if (max === 1) {
+    return '…';
+  }
+
+  return `${truncatePlain(str, max - 1)}…`;
+}
+
+function normalizeSingleLine(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  return normalized.replace(/\s+/g, ' ');
+}
+
+function getDescriptionPreview(description: string | undefined): string | undefined {
+  return normalizeSingleLine(description);
+}
+
+export function getTaskCardTitleLines(title: string): string[] {
+  const normalized = normalizeSingleLine(title) ?? 'Untitled task';
+  const words = normalized.split(' ');
+  const lines: string[] = [];
+  let current = '';
+
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index] ?? '';
+    const candidate = current.length > 0 ? `${current} ${word}` : word;
+    if (stringWidth(candidate) <= CARD_CONTENT_WIDTH) {
+      current = candidate;
+      continue;
+    }
+
+    if (lines.length === 1) {
+      const remainder = words.slice(index).join(' ');
+      const tail = current.length > 0 ? `${current} ${remainder}` : remainder;
+      lines.push(truncate(tail, CARD_CONTENT_WIDTH));
+      return lines;
+    }
+
+    if (current.length === 0) {
+      lines.push(truncate(word, CARD_CONTENT_WIDTH));
+      continue;
+    }
+
+    lines.push(current);
+    current = word;
+  }
+
+  if (current.length > 0) {
+    lines.push(truncate(current, CARD_CONTENT_WIDTH));
+  }
+
+  return lines.slice(0, 2);
+}
+
+export function compactTaskBranchLabel(branchName: string | undefined): string {
+  if (!branchName) {
+    return 'branch';
+  }
+
+  const [prefix, rawSlug] = branchName.includes('/')
+    ? branchName.split('/', 2)
+    : [undefined, branchName];
+  const slug = rawSlug ?? branchName;
+  const parts = slug.split('-').filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    return branchName;
+  }
+
+  const maybeSuffix = parts[parts.length - 1];
+  const suffix = maybeSuffix && /^\d+$/.test(maybeSuffix) ? parts.pop() : undefined;
+  const headParts = parts.slice(0, 3);
+  const hasMoreWords = parts.length > headParts.length;
+  let compactSlug = headParts.join('-');
+  if (hasMoreWords) {
+    compactSlug = compactSlug.length > 0 ? `${compactSlug}…` : '…';
+  }
+  if (suffix) {
+    compactSlug = compactSlug.length > 0 ? `${compactSlug}-${suffix}` : suffix;
+  }
+
+  return prefix ? `${prefix}/${compactSlug}` : compactSlug;
 }
 
 function formatRelativeAge(timestamp: number): string {
@@ -195,7 +291,11 @@ function StatusText({ status }: { status: InlineStatus | null }): JSX.Element {
 }
 
 export function getTaskCardHeight(_task: TaskRecord, _hasPillar: boolean): number {
-  return 7;
+  return (
+    8 +
+    getTaskCardTitleLines(_task.title).length +
+    (getDescriptionPreview(_task.description) ? 1 : 0)
+  );
 }
 
 export function TaskCard({
@@ -205,27 +305,26 @@ export function TaskCard({
   sessionActivity,
   pillars,
   repoLabel,
-  showRepoLabel,
 }: TaskCardProps): JSX.Element {
   const pillar = pillars.find((candidate) => candidate.id === task.pillarId);
   const isBusySession = sessionActivity?.isBusy === true;
   const spinnerFrame = useSpinnerFrame(isBusySession);
   const borderColor = getTaskCardBorderColor(task, isSelected);
-  const headerStatus = getHeaderStatus(
+  const sessionStatus = getHeaderStatus(
     sessionActivity,
     Boolean(task.sessionId),
     isActiveSession,
   );
-  const activeHeaderIcon = isBusySession ? spinnerFrame : headerStatus.icon;
-  const branchLabel = task.branchName ? truncate(task.branchName, 14) : 'branch';
+  const activeSessionIcon = isBusySession ? spinnerFrame : sessionStatus.icon;
+  const descriptionPreview = getDescriptionPreview(task.description);
+  const titleLines = getTaskCardTitleLines(task.title);
+  const branchLabel = truncate(compactTaskBranchLabel(task.branchName), 16);
   const workspaceLabel = task.worktreePath ? 'worktree' : 'root';
-  const contextParts = [
-    pillar ? `${pillar.icon ?? '⬢'} ${truncate(pillar.label, showRepoLabel ? 10 : 18)}` : null,
-    showRepoLabel ? `◈ ${truncate(repoLabel, 10)}` : null,
-    `⎇ ${truncate(`${branchLabel}/${workspaceLabel}`, 18)}`,
-  ].filter((part): part is string => part != null);
-  const checksStatus = getChecksStatus(task) ?? getPRStatus(task);
-  const reviewStatus = getReviewStatus(task) ?? getGitStatus(task);
+  const headerLabel = truncate(`${repoLabel} > ${workspaceLabel}`, CARD_CONTENT_WIDTH);
+  const prStatus = getPRStatus(task);
+  const checksStatus = getChecksStatus(task) ?? prStatus;
+  const reviewStatus = getReviewStatus(task) ?? (checksStatus === prStatus ? null : prStatus);
+  const gitStatus = getGitStatus(task);
 
   return (
     <Box
@@ -235,38 +334,56 @@ export function TaskCard({
       borderColor={borderColor}
     >
       <Box flexDirection="column" paddingX={1} overflow="hidden">
-        <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
-          <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} overflow="hidden">
-            <Text color={isSelected ? UI_CHROME.accent : UI_CHROME.muted}>
-              {isSelected ? '▸' : ' '}
-            </Text>
-            <Box flexGrow={1} flexShrink={1} overflow="hidden">
-              <Text
-                color={UI_CHROME.text}
-                bold={isActiveSession}
-                wrap="truncate"
-              >
-                {task.title}
-              </Text>
-            </Box>
-          </Box>
-          <Box flexDirection="row" gap={1} flexShrink={0} marginLeft={1} overflow="hidden">
-            <Text color={headerStatus.color}>{activeHeaderIcon}</Text>
-            <Text color={UI_CHROME.text} bold={isActiveSession} wrap="truncate">
-              {headerStatus.label}
-            </Text>
-          </Box>
-        </Box>
+        <Text color={isSelected ? UI_CHROME.accent : UI_CHROME.blue} wrap="truncate">
+          {headerLabel}
+        </Text>
 
         <Text color={UI_CHROME.line}>{'─'.repeat(CARD_CONTENT_WIDTH)}</Text>
 
-        <Text color={UI_CHROME.muted} wrap="truncate">
-          {truncate(contextParts.join('  '), CARD_CONTENT_WIDTH)}
-        </Text>
+        {titleLines.map((line, index) => (
+          <Text
+            key={`title:${index}`}
+            color={UI_CHROME.text}
+            bold={isActiveSession && index === 0}
+            wrap="truncate"
+          >
+            {line}
+          </Text>
+        ))}
+
+        {descriptionPreview && (
+          <Text color={UI_CHROME.muted} wrap="truncate">
+            {truncate(descriptionPreview, CARD_CONTENT_WIDTH)}
+          </Text>
+        )}
+
+        <Text color={UI_CHROME.line}>{'─'.repeat(CARD_CONTENT_WIDTH)}</Text>
+
+        <Box flexDirection="row" gap={1} overflow="hidden">
+          <Text color={sessionStatus.color}>{activeSessionIcon}</Text>
+          <Text color={sessionStatus.color} wrap="truncate">
+            {sessionStatus.label}
+          </Text>
+          {pillar && (
+            <Text color={UI_CHROME.muted} wrap="truncate">
+              {`${pillar.icon ?? '⬢'} ${truncate(pillar.label, 9)}`}
+            </Text>
+          )}
+          <Text color={UI_CHROME.muted} wrap="truncate">
+            {`⎇ ${branchLabel}`}
+          </Text>
+        </Box>
 
         <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
           <Text color={UI_CHROME.muted}>{`#${task.id.slice(0, 8)}`}</Text>
-          <Text color={UI_CHROME.muted}>{formatRelativeAge(task.updatedAt)}</Text>
+          <Box flexDirection="row" gap={1} overflow="hidden">
+            {gitStatus && (
+              <Text color={gitStatus.color} wrap="truncate">
+                {`${gitStatus.icon} ${gitStatus.label}`}
+              </Text>
+            )}
+            <Text color={UI_CHROME.muted}>{formatRelativeAge(task.updatedAt)}</Text>
+          </Box>
         </Box>
 
         <Box flexDirection="row" justifyContent="space-between" overflow="hidden">

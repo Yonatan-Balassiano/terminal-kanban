@@ -231,7 +231,7 @@ export class AppController {
   }
 
   async sendInput(taskId: string, data: string): Promise<void> {
-    await this.rpc.call('sendInput', { taskId, data });
+    this.rpc.notify('sendInput', { taskId, data });
   }
 
   async resizeSession(params: ResizeSessionParams): Promise<void> {
