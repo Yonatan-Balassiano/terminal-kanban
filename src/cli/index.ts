@@ -22,6 +22,7 @@ import type {
   TaskRecord,
   RepoRecord,
   DaemonStatus,
+  UpdateRepoParams,
 } from '../types/index.js';
 
 // ============================================================
@@ -37,6 +38,55 @@ function daemonOpts(paths: ConfigPaths) {
     logFile: paths.logFile,
     stateDir: paths.stateDir,
   };
+}
+
+function shouldFallbackToDirectRepoUpdate(error: unknown): boolean {
+  if (error instanceof Error && error.message === 'Not implemented') {
+    return true;
+  }
+
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+
+  return (
+    code === 'ENOENT' ||
+    code === 'ECONNREFUSED' ||
+    code === 'EPIPE' ||
+    code === 'EPERM' ||
+    code === 'EACCES'
+  );
+}
+
+async function updateRepoWithFallback(
+  paths: ConfigPaths,
+  params: UpdateRepoParams,
+): Promise<RepoRecord> {
+  try {
+    const rpc = await createRPCClient(paths.socketPath);
+    try {
+      return await rpc.call<RepoRecord>('updateRepo', params);
+    } finally {
+      rpc.disconnect();
+    }
+  } catch (error) {
+    if (!shouldFallbackToDirectRepoUpdate(error)) {
+      throw error;
+    }
+  }
+
+  const { openDb } = await import('../db/index.js');
+  const { WorkspaceService } = await import('../services/workspace.js');
+  const db = openDb(paths.dbFile);
+
+  try {
+    const workspace = new WorkspaceService(db);
+    const { id, ...patch } = params;
+    return workspace.updateRepo(id, patch);
+  } finally {
+    db.close();
+  }
 }
 
 function statusSymbol(status: DoctorCheck['status']): string {
@@ -350,13 +400,10 @@ export function buildCli(): Command {
     .action(async (id: string, branch: string) => {
       try {
         const paths = configPaths();
-        await ensureRunning(daemonOpts(paths));
-        const rpc = await createRPCClient(paths.socketPath);
-        const repo = await rpc.call<RepoRecord>('updateRepo', {
+        const repo = await updateRepoWithFallback(paths, {
           id,
           defaultBaseBranch: branch,
         });
-        rpc.disconnect();
         console.log(JSON.stringify(repo, null, 2));
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);

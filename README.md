@@ -436,6 +436,12 @@ To change the stored default base branch for an already-registered repo:
 agentboard repos set-default-base-branch <repo-id> <branch>
 ```
 
+Example for repos whose default branch is `master`:
+
+```bash
+agentboard repos set-default-base-branch <repo-id> master
+```
+
 ## Development
 
 ### Local dev loop
