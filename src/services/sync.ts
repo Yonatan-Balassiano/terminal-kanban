@@ -1,8 +1,8 @@
 import { EventEmitter } from 'events';
 import type { Db } from '../db/index.js';
-import type { SyncResult, TaskRecord } from '../types/index.js';
+import type { SyncResult, TaskRecord, TaskSyncPatch } from '../types/index.js';
 import type { BoardService } from './board.js';
-import type { GitHubService, PRInfo } from './github.js';
+import { GitHubServiceError, type GitHubService, type PRInfo } from './github.js';
 import type { GitService } from './git.js';
 
 function buildAutoPRTitle(taskId: string, taskTitle: string): string {
@@ -13,10 +13,34 @@ function buildAutoPRBody(taskId: string): string {
   return `Created by AgentBoard for task ${taskId}.`;
 }
 
-const MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS = 8;
-const MANUAL_REMOTE_BRANCH_RETRY_DELAY_MS = 400;
-const POST_PUSH_PR_RETRY_ATTEMPTS = 24;
-const POST_PUSH_PR_RETRY_INTERVAL_MS = 5000;
+const REMOTE_BRANCH_RETRY_ATTEMPTS = 8;
+const REMOTE_BRANCH_RETRY_DELAY_MS = 400;
+const DELAYED_REMOTE_BRANCH_RETRY_ATTEMPTS = 12;
+const DELAYED_REMOTE_BRANCH_RETRY_INTERVAL_MS = 5000;
+
+type SyncCause = 'startup' | 'periodic' | 'manual' | 'push' | 'ensure_pr' | 'merge';
+
+interface ReconcileOptions {
+  cause: SyncCause;
+  waitForRemoteBranch?: boolean;
+}
+
+interface TaskSyncEvent {
+  kind: 'status' | 'result';
+  status?: 'started' | 'done';
+  result?: SyncResult;
+}
+
+interface QueuedTaskJob {
+  pending: boolean;
+  opts: ReconcileOptions;
+  waiters: Array<{ resolve: (result: SyncResult) => void; reject: (error: Error) => void }>;
+}
+
+interface TaskReconcileResult extends SyncResult {
+  prInfo?: PRInfo | null;
+  requestDelayedRetry?: boolean;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -24,11 +48,30 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function emptySyncResult(): SyncResult {
+  return { tasksUpdated: 0, errors: [] };
+}
+
+function mergeSyncResults(results: SyncResult[]): SyncResult {
+  return results.reduce<SyncResult>(
+    (acc, result) => ({
+      tasksUpdated: acc.tasksUpdated + result.tasksUpdated,
+      errors: [...acc.errors, ...result.errors],
+    }),
+    emptySyncResult(),
+  );
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  return left === right;
+}
+
 export class SyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
-  private running = false;
-  private postPushAttemptsRemainingByTaskId = new Map<string, number>();
-  private postPushLoopActiveByTaskId = new Set<string>();
+  private readonly queuedJobs = new Map<string, QueuedTaskJob>();
+  private readonly delayedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly delayedRetryBudgetByTaskId = new Map<string, number>();
+  private activeJobCount = 0;
   readonly syncEvent = new EventEmitter();
 
   constructor(
@@ -36,18 +79,22 @@ export class SyncService {
     private github: GitHubService,
     private git: GitService,
     private db: Db,
-    private wait = sleep
+    private wait = sleep,
   ) {}
 
   start(intervalMs: number): void {
-    if (this.timer !== null) return;
+    if (this.timer !== null) {
+      return;
+    }
+
     this.timer = setInterval(() => {
-      void this.runSync();
+      void this.enqueueAll({ cause: 'periodic' });
     }, intervalMs);
-    // Allow Node to exit even if the timer is still running
     if (this.timer.unref) {
       this.timer.unref();
     }
+
+    void this.enqueueAll({ cause: 'startup' });
   }
 
   stop(): void {
@@ -55,173 +102,83 @@ export class SyncService {
       clearInterval(this.timer);
       this.timer = null;
     }
+
+    for (const timer of this.delayedRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.delayedRetryTimers.clear();
+    this.delayedRetryBudgetByTaskId.clear();
   }
 
   async trigger(): Promise<SyncResult> {
-    return this.runSync({ retryPendingRemoteBranches: true });
+    return this.enqueueAll({ cause: 'manual', waitForRemoteBranch: true });
   }
 
   schedulePostPushSync(taskId: string): { scheduled: true } {
-    this.postPushAttemptsRemainingByTaskId.set(taskId, POST_PUSH_PR_RETRY_ATTEMPTS);
-
-    if (this.postPushLoopActiveByTaskId.has(taskId)) {
-      return { scheduled: true };
-    }
-
-    this.postPushLoopActiveByTaskId.add(taskId);
-    void this.runPostPushLoop(taskId);
+    this.bumpDelayedRetryBudget(taskId);
+    void this.enqueueTask(taskId, { cause: 'push', waitForRemoteBranch: true });
     return { scheduled: true };
   }
 
   async createTaskPR(taskId: string): Promise<PRInfo> {
+    this.bumpDelayedRetryBudget(taskId);
+    const result = await this.enqueueTask(taskId, { cause: 'ensure_pr', waitForRemoteBranch: true });
     const task = this.board.getTask(taskId);
+
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
-    if (!task.branchName) {
-      throw new Error(`Task ${taskId} has no branch name`);
+
+    if (task.prNumber == null || (task.prState !== 'draft' && task.prState !== 'open')) {
+      const errorMessage =
+        task.githubSyncError ??
+        result.errors[0] ??
+        `Task branch ${task.branchName ?? taskId} is not ready for pull request creation`;
+      throw new Error(errorMessage);
     }
 
-    const repoRow = this.db
-      .prepare<[string], Record<string, unknown>>('SELECT * FROM repos WHERE id = ?')
-      .get(task.repoId);
-    if (!repoRow) {
-      throw new Error(`Repo not found for task ${taskId}`);
-    }
-
-    const githubOwner = (repoRow['github_owner'] as string | null) ?? undefined;
-    const githubRepo = (repoRow['github_repo'] as string | null) ?? undefined;
-    if (!githubOwner || !githubRepo) {
-      throw new Error(`Repo for task ${taskId} is missing GitHub identity`);
-    }
-
-    const repoPath = repoRow['path'] as string;
-    const storedBaseBranch = (repoRow['default_base_branch'] as string | null) ?? 'main';
-    const detectedBaseBranch = await this.git.defaultBranch(repoPath);
-    const baseBranch = detectedBaseBranch || storedBaseBranch;
-    const fullRepo = `${githubOwner}/${githubRepo}`;
-    const existing = await this.github.getPR(repoPath, task.branchName, fullRepo);
-    if (existing) {
-      this.applyTaskSyncPatch(task, existing);
-      return existing;
-    }
-
-    const remoteBranchPresent = await this.waitForRemoteBranch(repoPath, task.branchName, true);
-    if (!remoteBranchPresent) {
-      throw new Error(`Task branch ${task.branchName} is not pushed to origin`);
-    }
-
-    const prInfo = await this.github.createPR(repoPath, {
-      githubRepo: fullRepo,
-      branch: task.branchName,
-      baseBranch,
-      title: buildAutoPRTitle(task.id, task.title),
-      body: buildAutoPRBody(task.id),
-    });
-    this.applyTaskSyncPatch(task, prInfo);
-    if (task.trackId === 'backlog') {
-      this.board.moveTask({ id: task.id, trackId: 'in-progress' });
-    }
-    return prInfo;
+    return this.taskPRInfo(task);
   }
 
-  private applyTaskSyncPatch(
-    task: TaskRecord,
-    prInfo?: PRInfo,
-    gitStatus?: Awaited<ReturnType<GitService['getWorkspaceStatus']>> | null
-  ): boolean {
-    const patch: Parameters<BoardService['updateTaskSync']>[1] = {};
-
-    if (prInfo) {
-      if (task.prNumber !== prInfo.number) patch.prNumber = prInfo.number;
-      if (task.prState !== prInfo.prState) patch.prState = prInfo.prState;
-      const prDraft = prInfo.prState === 'draft';
-      if (task.prDraft !== prDraft) patch.prDraft = prDraft;
-      if (task.prUrl !== prInfo.url) patch.prUrl = prInfo.url;
-      if (task.ciState !== prInfo.ciState) patch.ciState = prInfo.ciState;
-      if (task.ciSummary !== prInfo.ciSummary) patch.ciSummary = prInfo.ciSummary;
-      if (task.failingCheckName !== prInfo.failingCheckName) {
-        patch.failingCheckName = prInfo.failingCheckName;
-      }
-      if (task.reviewState !== prInfo.reviewState) patch.reviewState = prInfo.reviewState;
-      if (task.reviewSummary !== prInfo.reviewSummary) patch.reviewSummary = prInfo.reviewSummary;
-      if (task.unresolvedThreadCount !== prInfo.unresolvedThreadCount) {
-        patch.unresolvedThreadCount = prInfo.unresolvedThreadCount;
-      }
-    }
-
-    if (gitStatus) {
-      if (task.gitState !== gitStatus.gitState) patch.gitState = gitStatus.gitState;
-      if (task.gitAheadCount !== gitStatus.aheadCount) patch.gitAheadCount = gitStatus.aheadCount;
-      if (task.gitBehindCount !== gitStatus.behindCount)
-        patch.gitBehindCount = gitStatus.behindCount;
-      if (task.hasUntracked !== gitStatus.hasUntracked) patch.hasUntracked = gitStatus.hasUntracked;
-      if (task.hasConflicts !== gitStatus.hasConflicts) patch.hasConflicts = gitStatus.hasConflicts;
-    }
-
-    if (Object.keys(patch).length === 0) {
-      return false;
-    }
-
-    this.board.updateTaskSync(task.id, patch);
-    return true;
+  private emitSyncEvent(event: TaskSyncEvent): void {
+    this.syncEvent.emit('sync', event);
   }
 
-  private async waitForRemoteBranch(
-    repoPath: string,
-    branch: string,
-    retryPendingRemoteBranches: boolean
-  ): Promise<boolean> {
-    const attempts = retryPendingRemoteBranches ? MANUAL_REMOTE_BRANCH_RETRY_ATTEMPTS : 1;
-
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      if (await this.git.remoteBranchExists(repoPath, branch)) {
-        return true;
-      }
-
-      if (attempt < attempts - 1) {
-        await this.wait(MANUAL_REMOTE_BRANCH_RETRY_DELAY_MS);
-      }
+  private beginJob(): void {
+    this.activeJobCount += 1;
+    if (this.activeJobCount === 1) {
+      this.emitSyncEvent({ kind: 'status', status: 'started' });
     }
-
-    return false;
   }
 
-  private shouldStopPostPushLoop(task: TaskRecord | null): boolean {
-    if (!task || task.archivedAt != null || !task.branchName) {
-      return true;
+  private endJob(): void {
+    this.activeJobCount = Math.max(0, this.activeJobCount - 1);
+    if (this.activeJobCount === 0) {
+      this.emitSyncEvent({ kind: 'status', status: 'done' });
     }
-
-    return task.prState !== 'none' || task.prNumber != null;
   }
 
-  private async runPostPushLoop(taskId: string): Promise<void> {
-    try {
-      while ((this.postPushAttemptsRemainingByTaskId.get(taskId) ?? 0) > 0) {
-        this.postPushAttemptsRemainingByTaskId.set(
-          taskId,
-          (this.postPushAttemptsRemainingByTaskId.get(taskId) ?? 1) - 1
-        );
-
-        await this.runSync({
-          retryPendingRemoteBranches: false,
-          taskIds: [taskId],
-        });
-
-        if (this.shouldStopPostPushLoop(this.board.getTask(taskId))) {
-          return;
-        }
-
-        if ((this.postPushAttemptsRemainingByTaskId.get(taskId) ?? 0) <= 0) {
-          return;
-        }
-
-        await this.wait(POST_PUSH_PR_RETRY_INTERVAL_MS);
-      }
-    } finally {
-      this.postPushAttemptsRemainingByTaskId.delete(taskId);
-      this.postPushLoopActiveByTaskId.delete(taskId);
+  private taskPRInfo(task: TaskRecord): PRInfo {
+    if (task.prNumber == null) {
+      throw new Error(`Task ${task.id} has no pull request`);
     }
+
+    return {
+      number: task.prNumber,
+      title: task.title,
+      url: task.prUrl ?? '',
+      prState: task.prState,
+      ciState: task.ciState,
+      ciSummary: task.ciSummary,
+      failingCheckName: task.failingCheckName,
+      ciRequiredTotal: task.ciRequiredTotal,
+      ciRequiredPassed: task.ciRequiredPassed,
+      ciRequiredFailed: task.ciRequiredFailed,
+      ciRequiredPending: task.ciRequiredPending,
+      reviewState: task.reviewState,
+      reviewSummary: task.reviewSummary,
+      unresolvedThreadCount: task.unresolvedThreadCount,
+    };
   }
 
   private loadRepoRow(repoId: string): Record<string, unknown> | undefined {
@@ -230,51 +187,300 @@ export class SyncService {
       .get(repoId);
   }
 
-  private async syncTask(
-    task: TaskRecord,
-    opts: { retryPendingRemoteBranches?: boolean } | undefined,
-    result: SyncResult
-  ): Promise<void> {
-    if (!task.branchName) {
+  private bumpDelayedRetryBudget(taskId: string): void {
+    const current = this.delayedRetryBudgetByTaskId.get(taskId) ?? 0;
+    this.delayedRetryBudgetByTaskId.set(
+      taskId,
+      Math.max(current, DELAYED_REMOTE_BRANCH_RETRY_ATTEMPTS),
+    );
+  }
+
+  private clearDelayedRetry(taskId: string): void {
+    const timer = this.delayedRetryTimers.get(taskId);
+    if (timer) {
+      clearTimeout(timer);
+      this.delayedRetryTimers.delete(taskId);
+    }
+    this.delayedRetryBudgetByTaskId.delete(taskId);
+  }
+
+  private scheduleDelayedRetry(taskId: string): void {
+    if (this.delayedRetryTimers.has(taskId)) {
       return;
+    }
+
+    const remaining = this.delayedRetryBudgetByTaskId.get(taskId) ?? 0;
+    if (remaining <= 0) {
+      return;
+    }
+
+    this.delayedRetryBudgetByTaskId.set(taskId, remaining - 1);
+    const timer = setTimeout(() => {
+      this.delayedRetryTimers.delete(taskId);
+      void this.enqueueTask(taskId, { cause: 'push' });
+    }, DELAYED_REMOTE_BRANCH_RETRY_INTERVAL_MS);
+
+    if (timer.unref) {
+      timer.unref();
+    }
+
+    this.delayedRetryTimers.set(taskId, timer);
+  }
+
+  private mergeReconcileOptions(current: ReconcileOptions, next: ReconcileOptions): ReconcileOptions {
+    return {
+      cause: next.cause,
+      waitForRemoteBranch: current.waitForRemoteBranch || next.waitForRemoteBranch,
+    };
+  }
+
+  private enqueueTask(taskId: string, opts: ReconcileOptions): Promise<SyncResult> {
+    const existing = this.queuedJobs.get(taskId);
+    if (existing) {
+      existing.pending = true;
+      existing.opts = this.mergeReconcileOptions(existing.opts, opts);
+      return new Promise<SyncResult>((resolve, reject) => {
+        existing.waiters.push({ resolve, reject });
+      });
+    }
+
+    const job: QueuedTaskJob = {
+      pending: false,
+      opts,
+      waiters: [],
+    };
+    this.queuedJobs.set(taskId, job);
+
+    const promise = new Promise<SyncResult>((resolve, reject) => {
+      job.waiters.push({ resolve, reject });
+    });
+
+    void this.runQueuedTask(taskId, job);
+    return promise;
+  }
+
+  private async enqueueAll(opts: ReconcileOptions): Promise<SyncResult> {
+    const taskIds = this.board
+      .getTasks({ includeArchived: false })
+      .map((task) => task.id);
+
+    if (taskIds.length === 0) {
+      return emptySyncResult();
+    }
+
+    const results = await Promise.all(taskIds.map((taskId) => this.enqueueTask(taskId, opts)));
+    return mergeSyncResults(results);
+  }
+
+  private async runQueuedTask(taskId: string, job: QueuedTaskJob): Promise<void> {
+    const aggregate = emptySyncResult();
+    this.beginJob();
+
+    try {
+      while (true) {
+        const opts = job.opts;
+        job.opts = { cause: 'periodic' };
+        job.pending = false;
+
+        const result = await this.reconcileTaskById(taskId, opts);
+        aggregate.tasksUpdated += result.tasksUpdated;
+        aggregate.errors.push(...result.errors);
+
+        if (result.tasksUpdated > 0 || result.errors.length > 0) {
+          this.emitSyncEvent({ kind: 'result', result });
+        }
+
+        if (result.requestDelayedRetry) {
+          this.scheduleDelayedRetry(taskId);
+        }
+
+        if (!job.pending) {
+          break;
+        }
+      }
+
+      for (const waiter of job.waiters.splice(0)) {
+        waiter.resolve(aggregate);
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error : new Error(String(error));
+      for (const waiter of job.waiters.splice(0)) {
+        waiter.reject(message);
+      }
+    } finally {
+      this.queuedJobs.delete(taskId);
+      this.endJob();
+    }
+  }
+
+  private applyTaskSyncPatch(task: TaskRecord, patch: TaskSyncPatch): boolean {
+    const nextPatch: TaskSyncPatch = {};
+    let changed = false;
+
+    const maybeAssign = <K extends keyof TaskSyncPatch>(key: K): void => {
+      if (!Object.prototype.hasOwnProperty.call(patch, key)) {
+        return;
+      }
+
+      const nextValue = patch[key];
+      const normalizedNext = nextValue === null ? undefined : nextValue;
+      const currentValue = (task as unknown as Record<string, unknown>)[key as string];
+
+      if (sameValue(currentValue, normalizedNext)) {
+        return;
+      }
+
+      changed = true;
+      (nextPatch as Record<string, unknown>)[key as string] = nextValue as unknown;
+      (task as unknown as Record<string, unknown>)[key as string] = normalizedNext as unknown;
+    };
+
+    maybeAssign('prNumber');
+    maybeAssign('prState');
+    maybeAssign('prDraft');
+    maybeAssign('prUrl');
+    maybeAssign('ciState');
+    maybeAssign('ciSummary');
+    maybeAssign('failingCheckName');
+    maybeAssign('ciRequiredTotal');
+    maybeAssign('ciRequiredPassed');
+    maybeAssign('ciRequiredFailed');
+    maybeAssign('ciRequiredPending');
+    maybeAssign('reviewState');
+    maybeAssign('reviewSummary');
+    maybeAssign('unresolvedThreadCount');
+    maybeAssign('githubSyncStatus');
+    maybeAssign('githubSyncError');
+    maybeAssign('githubLastSyncedAt');
+    maybeAssign('gitState');
+    maybeAssign('gitAheadCount');
+    maybeAssign('gitBehindCount');
+    maybeAssign('hasUntracked');
+    maybeAssign('hasConflicts');
+
+    if (!changed) {
+      return false;
+    }
+
+    this.board.updateTaskSync(task.id, nextPatch);
+    return true;
+  }
+
+  private async waitForRemoteBranch(
+    repoPath: string,
+    branch: string,
+    shouldWait: boolean,
+  ): Promise<boolean> {
+    const attempts = shouldWait ? REMOTE_BRANCH_RETRY_ATTEMPTS : 1;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (await this.git.remoteBranchExists(repoPath, branch)) {
+        return true;
+      }
+
+      if (attempt < attempts - 1) {
+        await this.wait(REMOTE_BRANCH_RETRY_DELAY_MS);
+      }
+    }
+
+    return false;
+  }
+
+  private async syncGitStatus(task: TaskRecord, repoPath: string): Promise<TaskSyncPatch | null> {
+    try {
+      const gitStatus = await this.git.getWorkspaceStatus(task.worktreePath ?? repoPath);
+      return {
+        gitState: gitStatus.gitState,
+        gitAheadCount: gitStatus.aheadCount,
+        gitBehindCount: gitStatus.behindCount,
+        hasUntracked: gitStatus.hasUntracked,
+        hasConflicts: gitStatus.hasConflicts,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async reconcileTaskById(taskId: string, opts: ReconcileOptions): Promise<TaskReconcileResult> {
+    const result: TaskReconcileResult = emptySyncResult();
+    const task = this.board.getTask(taskId);
+
+    if (!task || task.archivedAt != null || !task.branchName) {
+      this.clearDelayedRetry(taskId);
+      return result;
     }
 
     const repoRow = this.loadRepoRow(task.repoId);
     if (!repoRow) {
-      return;
+      if (
+        this.applyTaskSyncPatch(task, {
+          githubSyncStatus: 'error',
+          githubSyncError: `Repo not found for task ${task.id}`,
+          githubLastSyncedAt: Date.now(),
+        })
+      ) {
+        result.tasksUpdated += 1;
+        result.errors.push(`Task ${task.id}: Repo not found for task ${task.id}`);
+      }
+      return result;
     }
 
+    if (task.githubSyncStatus !== 'syncing') {
+      this.applyTaskSyncPatch(task, { githubSyncStatus: 'syncing' });
+    }
+
+    const repoPath = repoRow['path'] as string;
     const githubOwner = (repoRow['github_owner'] as string | null) ?? undefined;
     const githubRepo = (repoRow['github_repo'] as string | null) ?? undefined;
-    const repoPath = repoRow['path'] as string;
     const storedBaseBranch = (repoRow['default_base_branch'] as string | null) ?? 'main';
     const detectedBaseBranch = await this.git.defaultBranch(repoPath);
     const baseBranch = detectedBaseBranch || storedBaseBranch;
 
     if (baseBranch !== storedBaseBranch) {
       this.db
-        .prepare<
-          [string, number, string],
-          void
-        >('UPDATE repos SET default_base_branch = ?, updated_at = ? WHERE id = ?')
+        .prepare<[string, number, string], void>(
+          'UPDATE repos SET default_base_branch = ?, updated_at = ? WHERE id = ?',
+        )
         .run(baseBranch, Date.now(), task.repoId);
     }
 
+    const gitPatch = await this.syncGitStatus(task, repoPath);
+
     if (!githubOwner || !githubRepo) {
-      return;
+      const patch: TaskSyncPatch = {
+        githubSyncStatus: 'error',
+        githubSyncError: `Repo for task ${task.id} is missing GitHub identity`,
+        githubLastSyncedAt: Date.now(),
+      };
+      if (gitPatch) {
+        Object.assign(patch, gitPatch);
+      }
+      if (this.applyTaskSyncPatch(task, patch)) {
+        result.tasksUpdated += 1;
+      }
+      result.errors.push(`Task ${task.id}: Repo for task ${task.id} is missing GitHub identity`);
+      return result;
     }
 
     const fullRepo = `${githubOwner}/${githubRepo}`;
-    let taskChanged = false;
 
     try {
-      let prInfo = await this.github.getPR(repoPath, task.branchName, fullRepo);
+      let prInfo: PRInfo | null = null;
+      const existing = await this.github.findBranchPR(repoPath, task.branchName, fullRepo);
 
-      if (!prInfo) {
+      if (existing) {
+        prInfo = await this.github.getPR(repoPath, task.branchName, fullRepo);
+        if (!prInfo) {
+          throw new GitHubServiceError(
+            'not_found',
+            `Pull request for branch ${task.branchName} disappeared during sync`,
+          );
+        }
+      } else {
         const remoteBranchPresent = await this.waitForRemoteBranch(
           repoPath,
           task.branchName,
-          opts?.retryPendingRemoteBranches === true
+          opts.waitForRemoteBranch === true,
         );
 
         if (remoteBranchPresent) {
@@ -285,73 +491,93 @@ export class SyncService {
             title: buildAutoPRTitle(task.id, task.title),
             body: buildAutoPRBody(task.id),
           });
+        } else if (opts.cause === 'push' || opts.cause === 'ensure_pr' || opts.cause === 'manual') {
+          result.requestDelayedRetry = true;
         }
       }
 
-      const gitStatus = await this.git
-        .getWorkspaceStatus(task.worktreePath ?? repoPath)
-        .catch(() => null);
+      const patch: TaskSyncPatch = {
+        githubSyncStatus: prInfo ? 'ok' : task.prNumber != null ? 'ok' : 'idle',
+        githubSyncError: null,
+        githubLastSyncedAt: Date.now(),
+      };
 
-      if (this.applyTaskSyncPatch(task, prInfo ?? undefined, gitStatus)) {
-        taskChanged = true;
+      if (prInfo) {
+        patch.prNumber = prInfo.number;
+        patch.prState = prInfo.prState;
+        patch.prDraft = prInfo.prState === 'draft';
+        patch.prUrl = prInfo.url;
+        patch.ciState = prInfo.ciState;
+        patch.ciSummary = prInfo.ciSummary ?? null;
+        patch.failingCheckName = prInfo.failingCheckName ?? null;
+        patch.ciRequiredTotal = prInfo.ciRequiredTotal;
+        patch.ciRequiredPassed = prInfo.ciRequiredPassed;
+        patch.ciRequiredFailed = prInfo.ciRequiredFailed;
+        patch.ciRequiredPending = prInfo.ciRequiredPending;
+        patch.reviewState = prInfo.reviewState;
+        patch.reviewSummary = prInfo.reviewSummary ?? null;
+        patch.unresolvedThreadCount = prInfo.unresolvedThreadCount;
+      }
+
+      if (gitPatch) {
+        Object.assign(patch, gitPatch);
+      }
+
+      if (this.applyTaskSyncPatch(task, patch)) {
+        result.tasksUpdated += 1;
+      }
+
+      if (prInfo) {
+        this.clearDelayedRetry(taskId);
+      }
+
+      if (prInfo && task.trackId === 'backlog' && (prInfo.prState === 'draft' || prInfo.prState === 'open')) {
+        this.board.moveTask({ id: task.id, trackId: 'in-progress' });
+        task.trackId = 'in-progress';
+        result.tasksUpdated += 1;
       }
 
       if (prInfo && task.trackId !== 'done' && prInfo.prState === 'merged') {
         this.board.moveTask({ id: task.id, trackId: 'done' });
-        taskChanged = true;
+        task.trackId = 'done';
+        result.tasksUpdated += 1;
       }
 
-      // Only move a backlog card once a PR is confirmed, so board state and PR metadata stay aligned.
-      if (
-        prInfo &&
-        task.trackId === 'backlog' &&
-        (prInfo.prState === 'draft' || prInfo.prState === 'open')
-      ) {
-        this.board.moveTask({ id: task.id, trackId: 'in-progress' });
-        taskChanged = true;
+      if (prInfo?.prState === 'closed') {
+        const errorMessage = `Branch ${task.branchName} already has a closed pull request; reopen it or push a new branch`;
+        if (
+          this.applyTaskSyncPatch(task, {
+            githubSyncStatus: 'error',
+            githubSyncError: errorMessage,
+            githubLastSyncedAt: Date.now(),
+          })
+        ) {
+          result.tasksUpdated += 1;
+        }
+        result.errors.push(`Task ${task.id}: ${errorMessage}`);
+        this.clearDelayedRetry(taskId);
       }
 
-      if (taskChanged) {
-        result.tasksUpdated++;
+      result.prInfo = prInfo;
+      return result;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      const patch: TaskSyncPatch = {
+        githubSyncStatus: 'error',
+        githubSyncError: message,
+        githubLastSyncedAt: Date.now(),
+      };
+
+      if (gitPatch) {
+        Object.assign(patch, gitPatch);
       }
-    } catch (err: unknown) {
-      if (taskChanged) {
-        result.tasksUpdated++;
+
+      if (this.applyTaskSyncPatch(task, patch)) {
+        result.tasksUpdated += 1;
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      result.errors.push(`Task ${task.id}: ${msg}`);
+
+      result.errors.push(`Task ${task.id}: ${message}`);
+      return result;
     }
-  }
-
-  private async runSync(opts?: {
-    retryPendingRemoteBranches?: boolean;
-    taskIds?: string[];
-  }): Promise<SyncResult> {
-    if (this.running) {
-      return { tasksUpdated: 0, errors: [] };
-    }
-
-    this.running = true;
-    const result: SyncResult = { tasksUpdated: 0, errors: [] };
-
-    try {
-      const tasks =
-        opts?.taskIds
-          ?.map((taskId) => this.board.getTask(taskId))
-          .filter((task): task is TaskRecord => task != null && task.archivedAt == null) ??
-        this.board.getTasks({ includeArchived: false });
-
-      for (const task of tasks) {
-        await this.syncTask(task, opts, result);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      result.errors.push(`Sync error: ${msg}`);
-    } finally {
-      this.running = false;
-    }
-
-    this.syncEvent.emit('sync', result);
-    return result;
   }
 }

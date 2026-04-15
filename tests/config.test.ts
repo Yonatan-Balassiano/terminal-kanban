@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { defaultConfig } from '../src/config/index.js';
 
 describe('defaultConfig', () => {
-  it('syncs GitHub every 30 seconds by default', () => {
-    expect(defaultConfig().pollIntervalMs).toBe(30000);
+  it('syncs GitHub every 60 seconds by default', () => {
+    expect(defaultConfig().pollIntervalMs).toBe(60000);
   });
 
   it('uses backlog, in-progress, and done as the default board tracks', () => {

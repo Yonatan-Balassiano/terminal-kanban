@@ -1,0 +1,7 @@
+ALTER TABLE tasks ADD COLUMN github_sync_status TEXT NOT NULL DEFAULT 'idle';
+ALTER TABLE tasks ADD COLUMN github_sync_error TEXT;
+ALTER TABLE tasks ADD COLUMN github_last_synced_at INTEGER;
+ALTER TABLE tasks ADD COLUMN ci_required_total INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN ci_required_passed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN ci_required_failed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN ci_required_pending INTEGER NOT NULL DEFAULT 0;

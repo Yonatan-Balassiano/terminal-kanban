@@ -8,6 +8,7 @@
 export type PRState = 'none' | 'draft' | 'open' | 'merged' | 'closed';
 export type CIState = 'none' | 'pending' | 'failed' | 'passed';
 export type ReviewState = 'none' | 'approved' | 'changes_requested' | 'commented';
+export type GitHubSyncStatus = 'idle' | 'syncing' | 'ok' | 'error';
 export type SessionStatus = 'active' | 'idle' | 'orphaned' | 'terminated';
 export type SessionBackendType = 'tmux' | 'pty';
 export type RepoHealth = 'ok' | 'missing' | 'not-git';
@@ -96,9 +97,16 @@ export interface TaskRecord {
   ciState: CIState;
   ciSummary?: string;
   failingCheckName?: string;
+  ciRequiredTotal: number;
+  ciRequiredPassed: number;
+  ciRequiredFailed: number;
+  ciRequiredPending: number;
   reviewState: ReviewState;
   reviewSummary?: string;
   unresolvedThreadCount: number;
+  githubSyncStatus: GitHubSyncStatus;
+  githubSyncError?: string;
+  githubLastSyncedAt?: number;
   gitState: GitState;
   gitAheadCount: number;
   gitBehindCount: number;
@@ -426,6 +434,31 @@ export interface SchedulePostPushSyncParams {
 
 export interface MergeTaskPRParams {
   taskId: string;
+}
+
+export interface TaskSyncPatch {
+  prNumber?: number | null;
+  prState?: PRState;
+  prDraft?: boolean;
+  prUrl?: string | null;
+  ciState?: CIState;
+  ciSummary?: string | null;
+  failingCheckName?: string | null;
+  ciRequiredTotal?: number;
+  ciRequiredPassed?: number;
+  ciRequiredFailed?: number;
+  ciRequiredPending?: number;
+  reviewState?: ReviewState;
+  reviewSummary?: string | null;
+  unresolvedThreadCount?: number;
+  githubSyncStatus?: GitHubSyncStatus;
+  githubSyncError?: string | null;
+  githubLastSyncedAt?: number | null;
+  gitState?: GitState;
+  gitAheadCount?: number;
+  gitBehindCount?: number;
+  hasUntracked?: boolean;
+  hasConflicts?: boolean;
 }
 
 export interface GetBufferResult {
