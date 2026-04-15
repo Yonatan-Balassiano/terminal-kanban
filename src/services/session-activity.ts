@@ -1,4 +1,5 @@
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import type {
   SessionActivityKind,
   SessionActivitySnapshot,
@@ -12,6 +13,8 @@ export interface ProcessRow {
   command: string;
   args: string;
 }
+
+const execFileAsync = promisify(execFile);
 
 const AGENT_RECENT_OUTPUT_WINDOW_MS = 2500;
 
@@ -194,6 +197,43 @@ function selectBusyProcess(
   };
 }
 
+export function deriveFallbackSessionActivity(
+  taskId: string,
+  sessionId: string | undefined,
+  sessionStatus: SessionStatus,
+  lastOutputAt?: number,
+  currentCommand?: string,
+): SessionActivitySnapshot {
+  const now = Date.now();
+  const isAgentCommand =
+    currentCommand !== undefined && !isShellProcess(currentCommand)
+      ? detectActivityKind(currentCommand, currentCommand) === 'agent'
+      : false;
+
+  return {
+    taskId,
+    sessionId,
+    sessionStatus,
+    isBusy:
+      currentCommand !== undefined &&
+      !isShellProcess(currentCommand) &&
+      (!isAgentCommand || hasRecentOutput(lastOutputAt, now)),
+    kind:
+      currentCommand !== undefined && !isShellProcess(currentCommand)
+        ? detectActivityKind(currentCommand, currentCommand)
+        : undefined,
+    command:
+      currentCommand !== undefined && !isShellProcess(currentCommand)
+        ? baseCommandName(currentCommand)
+        : undefined,
+    label:
+      currentCommand !== undefined && !isShellProcess(currentCommand)
+        ? formatProcessLabel(currentCommand)
+        : undefined,
+    updatedAt: now,
+  };
+}
+
 export function deriveSessionActivity(
   taskId: string,
   sessionId: string | undefined,
@@ -227,64 +267,13 @@ export function deriveSessionActivity(
   };
 }
 
-export function inspectSessionActivity(
-  taskId: string,
-  sessionId: string | undefined,
-  sessionStatus: SessionStatus,
-  shellPid?: number,
-  lastOutputAt?: number,
-  currentCommand?: string,
-): SessionActivitySnapshot {
-  if (shellPid === undefined || shellPid <= 0 || sessionStatus !== 'active') {
-    return {
-      taskId,
-      sessionId,
-      sessionStatus,
-      isBusy: false,
-      updatedAt: Date.now(),
-    };
-  }
-
+export async function loadProcessTable(): Promise<ProcessRow[] | null> {
   try {
-    const output = execFileSync('ps', ['-axo', 'pid=,ppid=,stat=,comm=,args='], {
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,stat=,comm=,args='], {
       encoding: 'utf8',
     });
-    return deriveSessionActivity(
-      taskId,
-      sessionId,
-      sessionStatus,
-      parseProcessTable(output),
-      shellPid,
-      lastOutputAt,
-      currentCommand,
-    );
+    return parseProcessTable(String(stdout));
   } catch {
-    const isAgentCommand =
-      currentCommand !== undefined && !isShellProcess(currentCommand)
-        ? detectActivityKind(currentCommand, currentCommand) === 'agent'
-        : false;
-
-    return {
-      taskId,
-      sessionId,
-      sessionStatus,
-      isBusy:
-        currentCommand !== undefined &&
-        !isShellProcess(currentCommand) &&
-        (!isAgentCommand || hasRecentOutput(lastOutputAt, Date.now())),
-      kind:
-        currentCommand !== undefined && !isShellProcess(currentCommand)
-          ? detectActivityKind(currentCommand, currentCommand)
-          : undefined,
-      command:
-        currentCommand !== undefined && !isShellProcess(currentCommand)
-          ? baseCommandName(currentCommand)
-          : undefined,
-      label:
-        currentCommand !== undefined && !isShellProcess(currentCommand)
-          ? formatProcessLabel(currentCommand)
-          : undefined,
-      updatedAt: Date.now(),
-    };
+    return null;
   }
 }

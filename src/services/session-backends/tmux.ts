@@ -1,8 +1,9 @@
-import { execFileSync, execSync } from 'child_process';
+import { execFile, execFileSync, execSync } from 'child_process';
 import { closeSync, openSync, readSync, statSync, unlinkSync, watch, writeFileSync } from 'fs';
 import type { FSWatcher } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { promisify } from 'util';
 import type {
   SessionBackend,
   SessionRecord,
@@ -19,6 +20,7 @@ import { buildBackendSessionName } from '../session-name.js';
 import { renderAnsiCapture } from '../terminal-render.js';
 
 const TMUX_SCROLLBACK_LINES = 2000;
+const execFileAsync = promisify(execFile);
 
 export function tmuxKeyName(data: string): string | null {
   switch (data) {
@@ -292,7 +294,7 @@ export class TmuxBackend implements SessionBackend {
 
   async inspect(backendSessionId: string): Promise<BackendSessionInfo | null> {
     try {
-      const metadata = execFileSync(
+      const { stdout } = await execFileAsync(
         'tmux',
         [
           'display-message',
@@ -302,7 +304,8 @@ export class TmuxBackend implements SessionBackend {
           '#{pane_pid} #{pane_current_command}',
         ],
         { encoding: 'utf8' },
-      ).trim();
+      );
+      const metadata = String(stdout).trim();
       const [pidRaw, currentCommand] = metadata.split(/\s+/, 2);
       const shellPid = Number.parseInt(pidRaw ?? '', 10);
       return {

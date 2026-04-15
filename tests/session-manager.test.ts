@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../src/db/index.js';
 import { BoardService } from '../src/services/board.js';
 import { SessionManager } from '../src/services/session-manager.js';
+import type { ProcessRow } from '../src/services/session-activity.js';
 import type { TaskWorkspaceInfo } from '../src/services/worktree.js';
 import type {
   AttachMetadata,
@@ -34,6 +35,35 @@ class TestSessionManager extends SessionManager {
 
   override getBackend(): SessionBackend {
     return this.backend;
+  }
+}
+
+class ProcessTableSessionManager extends TestSessionManager {
+  processTableLoads = 0;
+
+  constructor(
+    db: Db,
+    board: BoardService,
+    buffers: {
+      write(taskId: string, data: string): void;
+      has(taskId: string): boolean;
+      getBuffer(taskId: string): GetBufferResult;
+      subscribeAll(cb: (taskId: string, buffer: GetBufferResult) => void): () => void;
+      destroy(taskId: string): void;
+    },
+    worktrees: {
+      prepareTaskWorkspace(taskId: string): TaskWorkspaceInfo;
+    },
+    backend: SessionBackend,
+    private processRows: ProcessRow[] | null,
+  ) {
+    super(db, board, buffers, worktrees, backend);
+  }
+
+  protected override async loadProcessTableRows(): Promise<ProcessRow[] | null> {
+    this.processTableLoads += 1;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    return this.processRows;
   }
 }
 
@@ -557,5 +587,146 @@ describe('SessionManager branch fallback', () => {
     expect(attentionChanged).toBe(true);
     expect(sendInput).toHaveBeenCalledWith('ab_continue_me', "continue\n");
     expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(false);
+  });
+
+  it('shares one async process-table load across concurrent session inspections', async () => {
+    const first = board.createTask({ title: 'First session', repoId: 'repo-1' });
+    const second = board.createTask({ title: 'Second session', repoId: 'repo-1' });
+    board.linkSession(first.id, 'session-1');
+    board.linkSession(second.id, 'session-2');
+
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'session-1',
+      first.id,
+      'pty',
+      'ab_first_session',
+      null,
+      'active',
+      '/tmp/repo-1',
+      first.branchName,
+      1,
+      1,
+      1,
+    );
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'session-2',
+      second.id,
+      'pty',
+      'ab_second_session',
+      null,
+      'active',
+      '/tmp/repo-1',
+      second.branchName,
+      1,
+      1,
+      1,
+    );
+
+    const inspect = vi.fn<[string], Promise<BackendSessionInfo | null>>(async (backendSessionId) => {
+      if (backendSessionId === 'ab_first_session') {
+        return {
+          backendSessionId,
+          status: 'active',
+          shellPid: 100,
+          currentCommand: 'zsh',
+        };
+      }
+
+      return {
+        backendSessionId,
+        status: 'active',
+        shellPid: 200,
+        currentCommand: 'zsh',
+      };
+    });
+
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
+        throw new Error('should not create a new session');
+      }),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect,
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new ProcessTableSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+      [
+        {
+          pid: 100,
+          ppid: 1,
+          stat: 'Ss',
+          command: '/bin/zsh',
+          args: '-zsh',
+        },
+        {
+          pid: 101,
+          ppid: 100,
+          stat: 'S+',
+          command: 'npm',
+          args: 'npm test',
+        },
+        {
+          pid: 200,
+          ppid: 1,
+          stat: 'Ss',
+          command: '/bin/zsh',
+          args: '-zsh',
+        },
+        {
+          pid: 201,
+          ppid: 200,
+          stat: 'S+',
+          command: 'node',
+          args: 'node server.js',
+        },
+      ],
+    );
+
+    const [firstResult, secondResult] = await Promise.all([
+      manager.inspectSessionState(first.id),
+      manager.inspectSessionState(second.id),
+    ]);
+
+    expect(manager.processTableLoads).toBe(1);
+    expect(firstResult.activity?.isBusy).toBe(true);
+    expect(secondResult.activity?.isBusy).toBe(true);
+    expect(inspect).toHaveBeenCalledTimes(2);
   });
 });
