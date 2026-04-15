@@ -419,6 +419,10 @@ export class SessionManager {
     return this.clearTaskAttention(taskId);
   }
 
+  acknowledgeSessionAttention(taskId: string): boolean {
+    return this.clearTaskAttention(taskId);
+  }
+
   async resizeSession(taskId: string, cols: number, rows: number): Promise<void> {
     const session = this.getSession(taskId);
     if (!session?.backendSessionId) {

@@ -185,7 +185,12 @@ export class WorkspaceService {
         | 'worktreeRoot'
       >
     >,
-  ): void {
+  ): RepoRecord {
+    const existing = this.getRepo(id);
+    if (!existing) {
+      throw new Error(`Repo not found: ${id}`);
+    }
+
     const setClauses: string[] = [];
     const values: unknown[] = [];
 
@@ -206,8 +211,12 @@ export class WorkspaceService {
       values.push(patch.githubUrl);
     }
     if (patch.defaultBaseBranch !== undefined) {
+      const defaultBaseBranch = patch.defaultBaseBranch.trim();
+      if (!defaultBaseBranch) {
+        throw new Error('Default base branch cannot be empty');
+      }
       setClauses.push('default_base_branch = ?');
-      values.push(patch.defaultBaseBranch);
+      values.push(defaultBaseBranch);
     }
     if (patch.defaultPillarId !== undefined) {
       setClauses.push('default_pillar_id = ?');
@@ -230,7 +239,9 @@ export class WorkspaceService {
       values.push(patch.worktreeRoot);
     }
 
-    if (setClauses.length === 0) return;
+    if (setClauses.length === 0) {
+      return existing;
+    }
 
     setClauses.push('updated_at = ?');
     values.push(Date.now());
@@ -239,6 +250,8 @@ export class WorkspaceService {
     this.db
       .prepare<unknown[], void>(`UPDATE repos SET ${setClauses.join(', ')} WHERE id = ?`)
       .run(...values);
+
+    return this.getRepo(id)!;
   }
 
   removeRepo(id: string): void {

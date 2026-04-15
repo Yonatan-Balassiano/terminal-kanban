@@ -284,6 +284,7 @@ export type RPCMethod =
   | 'archiveTask'
   | 'deleteTask'
   | 'addRepo'
+  | 'updateRepo'
   | 'listRepos'
   | 'removeRepo'
   | 'listSavedViews'
@@ -291,6 +292,7 @@ export type RPCMethod =
   | 'deleteSavedView'
   | 'openSession'
   | 'recreateSession'
+  | 'acknowledgeSessionAttention'
   | 'sendInput'
   | 'resizeSession'
   | 'getBuffer'
@@ -377,6 +379,21 @@ export interface AddRepoParams {
 }
 export type AddRepoResult = RepoRecord;
 
+export interface UpdateRepoParams {
+  id: string;
+  label?: string;
+  githubOwner?: string;
+  githubRepo?: string;
+  githubUrl?: string;
+  defaultBaseBranch?: string;
+  defaultPillarId?: string;
+  preferredIde?: PreferredIDE;
+  ideCommand?: string;
+  worktreeMode?: WorktreeMode;
+  worktreeRoot?: string;
+}
+export type UpdateRepoResult = RepoRecord;
+
 export interface RemoveRepoParams {
   id: string;
 }
@@ -395,6 +412,10 @@ export interface OpenSessionParams {
   taskId: string;
 }
 export type OpenSessionResult = SessionRecord;
+
+export interface AcknowledgeSessionAttentionParams {
+  taskId: string;
+}
 
 export interface SendInputParams {
   taskId: string;

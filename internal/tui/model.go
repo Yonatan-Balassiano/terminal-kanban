@@ -397,18 +397,13 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 			m.statusMessage = "No session open for the selected task."
 			return nil
 		}
-		m.terminalPaneVisible = true
-		m.focus = FocusTerminal
-		return m.resizeActiveSessionCmd()
+		return m.focusActiveTerminalCmd(false)
 	case "z":
 		if m.activeTaskID == "" {
 			m.statusMessage = "No session open to expand."
 			return nil
 		}
-		m.terminalPaneVisible = true
-		m.terminalFullscreen = true
-		m.focus = FocusTerminal
-		return m.resizeActiveSessionCmd()
+		return m.focusActiveTerminalCmd(true)
 	case "[":
 		task := m.selectedTask()
 		if task != nil {
@@ -790,6 +785,21 @@ func (m *Model) openSessionCmd(taskID string, recreate bool) tea.Cmd {
 	}
 }
 
+func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
+	if m.activeTaskID == "" {
+		return nil
+	}
+
+	m.terminalPaneVisible = true
+	m.terminalFullscreen = fullscreen
+	m.focus = FocusTerminal
+
+	return tea.Batch(
+		m.resizeActiveSessionCmd(),
+		m.acknowledgeSessionAttentionCmd(m.activeTaskID),
+	)
+}
+
 func (m *Model) loadBufferCmd(taskID string) tea.Cmd {
 	return func() tea.Msg {
 		var buffer GetBufferResult
@@ -810,6 +820,19 @@ func (m *Model) inspectSessionCmd(taskID string) tea.Cmd {
 			return sessionActivityMsg{taskID: taskID, activity: nil}
 		}
 		return sessionActivityMsg{taskID: taskID, activity: &activity}
+	}
+}
+
+func (m *Model) acknowledgeSessionAttentionCmd(taskID string) tea.Cmd {
+	if taskID == "" || m.client == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		if err := m.client.Call("acknowledgeSessionAttention", map[string]string{"taskId": taskID}, nil); err != nil {
+			return asyncErrorMsg{err: err}
+		}
+		return nil
 	}
 }
 

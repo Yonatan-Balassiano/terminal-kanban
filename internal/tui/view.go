@@ -180,7 +180,7 @@ func renderHeader(m *Model) string {
 		if attentionTasks != 1 {
 			label = fmt.Sprintf("%d attention", attentionTasks)
 		}
-		row1Right = append(row1Right, badge(label, "danger", "!", false))
+		row1Right = append(row1Right, badge(label, "info", "!", false))
 	}
 	if busySessions > 0 {
 		label := "1 running"
@@ -559,7 +559,7 @@ func renderStatusBar(m *Model) string {
 	if activityLabel != "" {
 		leftParts = append(leftParts, badge(activityLabel, "warning", "", false))
 	} else if contextTask != nil && contextTask.SessionAttentionNeeded {
-		leftParts = append(leftParts, badge("attention", "danger", "!", false))
+		leftParts = append(leftParts, badge("attention", "info", "!", false))
 	}
 	if m.statusMessage != "" {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(m.statusMessage, max(1, m.width/2))))
@@ -619,7 +619,7 @@ func sessionBadgeModel(task TaskRecord, activity *SessionActivitySnapshot, isAct
 		return "ended", "muted", false, "×"
 	}
 	if task.SessionAttentionNeeded {
-		return "attention", "danger", false, "!"
+		return "attention", "info", false, "!"
 	}
 	if activity != nil && activity.IsBusy {
 		label := strings.TrimSpace(strings.TrimSpace(activity.Label + " " + activity.Command))
@@ -720,9 +720,9 @@ func toneColor(tone string) string {
 func taskCardBorderColor(task TaskRecord, isSelected bool) string {
 	if task.SessionAttentionNeeded {
 		if isSelected {
-			return uiChrome.Danger
+			return uiChrome.Blue
 		}
-		return "#ef4444"
+		return "#3b82f6"
 	}
 	if task.PRState == "merged" {
 		if isSelected {
