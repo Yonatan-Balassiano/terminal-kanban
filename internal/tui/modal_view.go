@@ -69,6 +69,7 @@ func renderCreateTaskModal(m *Model) string {
 	if len(options) > 0 {
 		selectedPillar = options[clamp(state.PillarIndex, 0, len(options)-1)].Label
 	}
+	selectedAgent := createTaskAgentOptionAt(state.AgentIndex).Label
 
 	linePrefix := func(line createTaskLine) string {
 		if state.ActiveLine == line {
@@ -90,6 +91,7 @@ func renderCreateTaskModal(m *Model) string {
 		lineColor(createTaskTitleLine).Render(fmt.Sprintf("%s Title: %s%s", linePrefix(createTaskTitleLine), state.Value, ternaryString(state.ActiveLine == createTaskTitleLine, "|", ""))),
 		lineColor(createTaskRepoLine).Render(fmt.Sprintf("%s Repo: %s", linePrefix(createTaskRepoLine), selectedRepo)),
 		lineColor(createTaskPillarLine).Render(fmt.Sprintf("%s Pillar: %s", linePrefix(createTaskPillarLine), selectedPillar)),
+		lineColor(createTaskAgentLine).Render(fmt.Sprintf("%s Agent: %s", linePrefix(createTaskAgentLine), selectedAgent)),
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[↑/↓ lines]  [←/→ change current field]"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),

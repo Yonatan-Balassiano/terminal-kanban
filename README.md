@@ -42,7 +42,7 @@ Recommended:
 
 - `gh` for PR creation, PR status sync, checks, and merge
 - `tmux` if you want tmux-backed sessions available
-- `claude` in your shell `PATH` if you want new task sessions to launch Claude Code automatically
+- `claude` and/or `codex` in your shell `PATH` if you want task sessions to launch those agent CLIs automatically
 
 Optional:
 
@@ -298,19 +298,23 @@ When a task session is created, AgentBoard resolves the workspace first:
 - if needed, it prepares a git worktree for the task
 - otherwise it uses the repo root
 
-New sessions then bootstrap the shell and end by launching:
+New sessions now run the configured bootstrap script, which by default lives at:
 
 ```bash
-claude
+scripts/session-bootstrap.sh
 ```
 
-For non-worktree repo-root sessions, the bootstrap flow is:
+The default script:
 
-1. checkout repo base branch
-2. pull latest changes
-3. checkout or create the task branch
-4. clear terminal
-5. launch `claude`
+1. reads the selected task agent (`claude` or `codex`)
+2. checks out the repo base branch and pulls when launching from the repo root
+3. checks out or creates the task branch
+4. clears the terminal
+5. launches the selected agent CLI
+
+New tasks prompt for the agent choice in the create-task modal and store it on the task, so reopening that task uses the same CLI again.
+
+You can override the default script with the global `sessionBootstrapScript` config field.
 
 ## Worktrees
 
@@ -472,7 +476,7 @@ npm run reset-daemon
 - If you change daemon-side code, restart the daemon.
 - If you change TUI-side code, restart the TUI client.
 - If `gh` is unavailable or unauthenticated, GitHub features will not work.
-- If `claude` is unavailable in `PATH`, new session bootstrap will fail at the final launch step.
+- If the selected task agent CLI is unavailable in `PATH`, the bootstrap script prints an error and leaves the shell open.
 
 ## Project Status
 

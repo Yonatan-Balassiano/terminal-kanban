@@ -28,6 +28,7 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     title: row['title'] as string,
     description: (row['description'] as string | null) ?? undefined,
     repoId: row['repo_id'] as string,
+    agentCli: (row['agent_cli'] as 'claude' | 'codex' | null) ?? 'claude',
     trackId: row['track_id'] as string,
     pillarId: (row['pillar_id'] as string | null) ?? undefined,
     labels: [],
@@ -147,6 +148,7 @@ export class BoardService {
     const now = Date.now();
     const trackId = params.trackId ?? 'backlog';
     const branchName = createTaskBranchName(params.title);
+    const agentCli = params.agentCli ?? 'claude';
 
     // Compute next sortKey = max existing + 1000 (or 1000 if track is empty)
     const maxRow = this.db
@@ -159,16 +161,17 @@ export class BoardService {
     this.db
       .prepare<unknown[], void>(
         `INSERT INTO tasks
-           (id, title, repo_id, track_id, pillar_id, branch_name, sort_key,
+           (id, title, repo_id, agent_cli, track_id, pillar_id, branch_name, sort_key,
             pr_state, pr_draft, ci_state, review_state, unresolved_thread_count,
             github_sync_status, ci_required_total, ci_required_passed, ci_required_failed,
             ci_required_pending, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
       )
       .run(
         id,
         params.title,
         params.repoId,
+        agentCli,
         trackId,
         params.pillarId ?? null,
         branchName,

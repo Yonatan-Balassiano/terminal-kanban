@@ -7,6 +7,7 @@ function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
     id: 'task-1',
     title: 'My task',
     repoId: 'repo-1',
+    agentCli: 'claude',
     trackId: 'in-progress',
     labels: [],
     branchName: 'ab/task-1',
@@ -45,6 +46,49 @@ function makeRepo(patch: Partial<RepoRecord> = {}): RepoRecord {
 
 afterEach(() => {
   serverEvents.removeAllListeners();
+});
+
+describe('daemon createTask dispatch', () => {
+  it('passes agent selection through and emits a board patch', async () => {
+    const task = makeTask({ agentCli: 'codex', trackId: 'backlog', prNumber: undefined, prState: 'none', ciState: 'none', reviewState: 'none' });
+    const createTask = vi.fn().mockReturnValue(task);
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [task] });
+
+    const boardPatchEvent = new Promise<unknown>((resolve) => {
+      serverEvents.once('event', resolve);
+    });
+
+    const response = await dispatch(
+      {
+        id: 'req-create',
+        method: 'createTask',
+        params: {
+          title: 'Use codex',
+          repoId: 'repo-1',
+          agentCli: 'codex',
+        },
+      },
+      {
+        board: { createTask },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock'
+    );
+
+    expect(createTask).toHaveBeenCalledWith({
+      title: 'Use codex',
+      repoId: 'repo-1',
+      agentCli: 'codex',
+    });
+    expect(response).toEqual({
+      id: 'req-create',
+      result: task,
+    });
+    await expect(boardPatchEvent).resolves.toEqual({
+      type: 'board_patch',
+      payload: { tasks: [task] },
+    });
+  });
 });
 
 describe('daemon mergeTaskPR dispatch', () => {

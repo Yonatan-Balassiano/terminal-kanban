@@ -200,14 +200,16 @@ export class TmuxBackend implements SessionBackend {
 
     execSync(`tmux new-session -d -s ${JSON.stringify(name)} -c ${JSON.stringify(cwd)}`);
 
-    const checkoutCmd = buildNewSessionBootstrapCommand(
-      opts.repoPath,
-      opts.branch,
-      opts.baseBranch,
-      opts.usesWorktree,
-      opts.cwd,
-      opts.bootstrapNotice,
-    );
+    const checkoutCmd = buildNewSessionBootstrapCommand({
+      repoPath: opts.repoPath,
+      branch: opts.branch,
+      baseBranch: opts.baseBranch,
+      agentCli: opts.agentCli,
+      usesWorktree: opts.usesWorktree,
+      cwd: opts.cwd,
+      bootstrapNotice: opts.bootstrapNotice,
+      sessionBootstrapScript: opts.sessionBootstrapScript,
+    });
 
     execSync(
       `tmux send-keys -t ${JSON.stringify(name)} ${JSON.stringify(checkoutCmd)} Enter`,

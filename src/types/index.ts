@@ -18,6 +18,7 @@ export type PreferredIDE = 'system' | 'webstorm' | 'idea' | 'cursor' | 'vscode';
 export type GitState = 'unknown' | 'clean' | 'dirty' | 'untracked' | 'conflicted' | 'detached';
 export type TerminalLayoutMode = 'side-by-side' | 'top-bottom';
 export type SessionActivityKind = 'agent' | 'process';
+export type AgentCLI = 'claude' | 'codex';
 
 export type EventType =
   | 'task.created'
@@ -80,6 +81,7 @@ export interface TaskRecord {
   title: string;
   description?: string;
   repoId: string;
+  agentCli: AgentCLI;
   trackId: string;
   pillarId?: string;
   /** Resolved label IDs (joined from task_labels) */
@@ -207,10 +209,12 @@ export interface CreateSessionOpts {
   taskTitle: string;
   repoPath: string;
   branch: string;
+  agentCli: AgentCLI;
   cwd?: string;
   baseBranch?: string;
   usesWorktree?: boolean;
   bootstrapNotice?: string;
+  sessionBootstrapScript: string;
 }
 
 export interface AttachMetadata {
@@ -320,6 +324,7 @@ export type SetUIStateParams = Partial<UIStateRecord>;
 export interface CreateTaskParams {
   title: string;
   repoId: string;
+  agentCli?: AgentCLI;
   trackId?: string;
   pillarId?: string;
 }
@@ -560,6 +565,7 @@ export interface SavedViewConfig {
 
 export interface AppConfig {
   sessionBackend: SessionBackendType;
+  sessionBootstrapScript: string;
   pollIntervalMs: number;
   githubTokenEnvVar?: string;
   tracks: TrackConfig[];

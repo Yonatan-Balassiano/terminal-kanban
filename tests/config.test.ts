@@ -14,4 +14,8 @@ describe('defaultConfig', () => {
       { id: 'done', label: 'Done', sortOrder: 3 },
     ]);
   });
+
+  it('uses the bundled session bootstrap script by default', () => {
+    expect(defaultConfig().sessionBootstrapScript).toMatch(/scripts\/session-bootstrap\.sh$/);
+  });
 });

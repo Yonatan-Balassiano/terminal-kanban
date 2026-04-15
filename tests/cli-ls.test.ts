@@ -23,6 +23,7 @@ function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
     id: 'task-1',
     title: 'My task',
     repoId: 'repo-1',
+    agentCli: 'claude',
     trackId: 'backlog',
     labels: [],
     branchName: 'ab/task-1',

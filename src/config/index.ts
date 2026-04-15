@@ -5,6 +5,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { z } from 'zod';
 import type {
   AppConfig,
@@ -90,6 +91,7 @@ const AgentMacroSchema = z.object({
 export const AppConfigSchema = z
   .object({
     sessionBackend: SessionBackendTypeSchema,
+    sessionBootstrapScript: z.string(),
     pollIntervalMs: z.number().int().positive(),
     githubTokenEnvVar: z.string().optional(),
     tracks: z.array(TrackConfigSchema),
@@ -128,9 +130,22 @@ export const RepoOverlayConfigSchema = z
 // Default config
 // ============================================================
 
+function bundledSessionBootstrapScriptPath(): string {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(moduleDir, '../../scripts/session-bootstrap.sh');
+}
+
+function resolveSessionBootstrapScriptPath(scriptPath: string, baseDir: string): string {
+  if (path.isAbsolute(scriptPath)) {
+    return scriptPath;
+  }
+  return path.resolve(baseDir, scriptPath);
+}
+
 export function defaultConfig(): AppConfig {
   return {
     sessionBackend: 'tmux' as SessionBackendType,
+    sessionBootstrapScript: bundledSessionBootstrapScriptPath(),
     pollIntervalMs: 60000,
     tracks: [
       { id: 'backlog', label: 'Backlog', sortOrder: 0 },
@@ -206,10 +221,18 @@ export function configPaths(): ConfigPaths {
 export function loadConfig(override?: Partial<AppConfig>): AppConfig {
   const { configFile } = configPaths();
   const base = defaultConfig();
+  const configDir = path.dirname(configFile);
 
   if (!fs.existsSync(configFile)) {
     // No file yet — use defaults (+ override)
-    return mergePartial(base, override);
+    const merged = mergePartial(base, override);
+    return {
+      ...merged,
+      sessionBootstrapScript: resolveSessionBootstrapScriptPath(
+        merged.sessionBootstrapScript,
+        configDir,
+      ),
+    };
   }
 
   let raw: unknown;
@@ -243,10 +266,24 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
     }
     const cleanedResult = PartialAppConfigSchema.safeParse(cleaned);
     const partial = cleanedResult.success ? cleanedResult.data : {};
-    return mergePartial(base, partial as Partial<AppConfig>, override);
+    const merged = mergePartial(base, partial as Partial<AppConfig>, override);
+    return {
+      ...merged,
+      sessionBootstrapScript: resolveSessionBootstrapScriptPath(
+        merged.sessionBootstrapScript,
+        configDir,
+      ),
+    };
   }
 
-  return mergePartial(base, result.data as Partial<AppConfig>, override);
+  const merged = mergePartial(base, result.data as Partial<AppConfig>, override);
+  return {
+    ...merged,
+    sessionBootstrapScript: resolveSessionBootstrapScriptPath(
+      merged.sessionBootstrapScript,
+      configDir,
+    ),
+  };
 }
 
 // ============================================================

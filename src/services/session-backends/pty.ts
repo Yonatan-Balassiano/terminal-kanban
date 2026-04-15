@@ -65,14 +65,16 @@ export class PtyBackend implements SessionBackend {
     });
 
     // Bootstrap on master, pull, then switch to the task branch.
-    const checkoutCmd = `${buildNewSessionBootstrapCommand(
-      opts.repoPath,
-      opts.branch,
-      opts.baseBranch,
-      opts.usesWorktree,
-      opts.cwd,
-      opts.bootstrapNotice,
-    )}\n`;
+    const checkoutCmd = `${buildNewSessionBootstrapCommand({
+      repoPath: opts.repoPath,
+      branch: opts.branch,
+      baseBranch: opts.baseBranch,
+      agentCli: opts.agentCli,
+      usesWorktree: opts.usesWorktree,
+      cwd: opts.cwd,
+      bootstrapNotice: opts.bootstrapNotice,
+      sessionBootstrapScript: opts.sessionBootstrapScript,
+    })}\n`;
     pty.write(checkoutCmd);
 
     this.ptys.set(backendSessionId, pty);

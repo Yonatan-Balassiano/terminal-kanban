@@ -152,6 +152,69 @@ describe('SessionManager branch fallback', () => {
     expect(board.getTask(task.id)?.branchName).toBe(session.branch);
   });
 
+  it('passes the stored task agent into new session creation', async () => {
+    const task = board.createTask({ title: 'Use codex', repoId: 'repo-1', agentCli: 'codex' });
+
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'tmux',
+      backendSessionId: 'ab_use_codex_1234',
+      attachCommand: 'tmux attach -t ab_use_codex_1234',
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: 'tmux attach -t ab_use_codex_1234',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    await manager.openSession(task.id);
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.id,
+        agentCli: 'codex',
+      }),
+    );
+  });
+
   it('migrates a stored legacy branch to the title-based format on reattach', async () => {
     const task = board.createTask({ title: 'RL noes', repoId: 'repo-1' });
     board.setTaskBranch(task.id, `ab/${task.id}`);

@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN agent_cli TEXT NOT NULL DEFAULT 'claude';
