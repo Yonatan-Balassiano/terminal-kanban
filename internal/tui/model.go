@@ -131,6 +131,7 @@ type Model struct {
 	createTaskModal          *createTaskModalState
 	renameTaskModal          *renameTaskModalState
 	taskDescriptionModal     *taskDescriptionModalState
+	prCommentModal           *prCommentModalState
 	archiveConfirmModal      *archiveConfirmModalState
 	deleteConfirmModal       *deleteConfirmModalState
 	createPillarModal        *createPillarModalState
@@ -369,7 +370,7 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	}
 
 	switch key.String() {
-	case "left", "h", "right", "l", "up", "k", "down", "j":
+	case "left", "h", "right", "l", "up", "k", "down":
 		m.applyBoardNavigation(boardNavigationActionForKey(key))
 	case ",":
 		m.switchRepo(-1)
@@ -445,6 +446,8 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		if task != nil {
 			return m.createTaskPRCmd(task)
 		}
+	case "j":
+		m.openPRCommentModal(m.selectedTask())
 	case "C":
 		task := m.selectedTask()
 		if task != nil {
@@ -900,6 +903,42 @@ func (m *Model) createTaskPRCmd(task *TaskRecord) tea.Cmd {
 		map[string]string{"taskId": task.ID},
 		fmt.Sprintf("Ensured PR for task %s", task.ID),
 	)
+}
+
+func (m *Model) commentTaskPRCmd(task *TaskRecord, body string) tea.Cmd {
+	if task == nil {
+		return nil
+	}
+	if blocker := getPRCommentBlockerReason(*task); blocker != "" {
+		m.statusMessage = blocker
+		return nil
+	}
+
+	body = strings.TrimSpace(body)
+	if body == "" {
+		m.statusMessage = "PR comment cannot be empty."
+		return nil
+	}
+
+	taskID := task.ID
+	prNumber := 0
+	if task.PRNumber != nil {
+		prNumber = *task.PRNumber
+	}
+
+	m.statusMessage = "Posting PR comment..."
+	return func() tea.Msg {
+		if err := m.client.Call("commentTaskPR", map[string]string{
+			"taskId": taskID,
+			"body":   body,
+		}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+		if prNumber > 0 {
+			return boardActionMsg{status: fmt.Sprintf("Commented on PR #%d.", prNumber)}
+		}
+		return boardActionMsg{status: "Commented on PR."}
+	}
 }
 
 func (m *Model) retryPushedBranchPRCreationCmd(task *TaskRecord) tea.Cmd {

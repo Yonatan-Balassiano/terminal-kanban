@@ -221,7 +221,8 @@ npm run reset-deamon
 
 ### Navigation
 
-- `hjkl` / arrows: move between columns and tasks
+- `←` / `→` / `↑` / `↓`: move between columns and tasks
+- `h` / `k` / `l`: left/up/right navigation shortcuts
 - `,` / `.`: switch repo tab
 - `Esc`: return from terminal to board
 
@@ -252,6 +253,7 @@ npm run reset-deamon
 
 ### GitHub actions
 
+- `j`: open a PR comment modal and post with `gh pr comment`
 - `c`: create/ensure PR for selected task immediately
 - `C`: retry PR creation for a pushed branch
 - `o`: open PR in browser

@@ -589,6 +589,28 @@ export class GitHubService {
     );
   }
 
+  async commentPR(
+    repoPath: string,
+    params: {
+      githubRepo: string;
+      prNumber: number;
+      body: string;
+    },
+  ): Promise<void> {
+    await this.ghAsync(
+      [
+        'pr',
+        'comment',
+        String(params.prNumber),
+        '--repo',
+        params.githubRepo,
+        '--body',
+        params.body,
+      ],
+      repoPath,
+    );
+  }
+
   getDiff(repoPath: string, prNumber: number, githubRepo: string): string {
     let rawDiff: string;
     try {

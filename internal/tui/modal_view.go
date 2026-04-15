@@ -25,6 +25,8 @@ func renderModal(m *Model) string {
 		return renderRenameTaskModal(m)
 	case ModalTaskDescription:
 		return renderTaskDescriptionModal(m)
+	case ModalPRComment:
+		return renderPRCommentModal(m)
 	case ModalArchiveConfirm:
 		return renderArchiveConfirmModal(m)
 	case ModalDeleteConfirm:
@@ -133,6 +135,36 @@ func renderTaskDescriptionModal(m *Model) string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Desc: ") + state.Value + "|",
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] save  [Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderPRCommentModal(m *Model) string {
+	state := m.prCommentModal
+	if state == nil {
+		return ""
+	}
+	task := m.taskByID(state.TaskID)
+	taskTitle := ""
+	prLabel := ""
+	if task != nil {
+		taskTitle = task.Title
+		if task.PRNumber != nil {
+			prLabel = fmt.Sprintf("PR #%d", *task.PRNumber)
+			if task.PRState == "draft" {
+				prLabel = "Draft " + prLabel
+			}
+		}
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("PR Comment"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(taskTitle, 48)),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(prLabel),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Comment: ") + state.Value + "|",
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] post  [Esc] cancel"),
 	}
 	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
 }

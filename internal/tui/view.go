@@ -574,9 +574,9 @@ func renderStatusBar(m *Model) string {
 
 func renderHelpModal() string {
 	sections := [][]string{
-		{"Navigation", "hjkl / arrow keys move between columns and tasks", ": or Ctrl+P opens the command palette", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
+		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete, a archive", "p assign pillar, P create pillar, D delete pillar and its tasks", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
-		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
+		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
 		{"Terminal", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
 		{"Setup", "If worktree setup fails because the repo uses master, run:", "agentboard repos set-default-base-branch <repo-id> master"},
@@ -1164,6 +1164,26 @@ func canMergeTask(task TaskRecord) bool {
 	return task.PRState == "open" && !task.PRDraft && task.CIState == "passed" && task.ReviewState == "approved"
 }
 
+func getPRCommentBlockerReason(task TaskRecord) string {
+	prRef := "The PR"
+	if task.PRNumber != nil {
+		prRef = fmt.Sprintf("PR #%d", *task.PRNumber)
+	}
+	if task.PRNumber == nil || task.PRState == "none" {
+		return "Selected task has no pull request."
+	}
+	if task.PRState == "merged" {
+		return prRef + " is already merged."
+	}
+	if task.PRState == "closed" {
+		return prRef + " is closed."
+	}
+	if !hasOpenPR(task) {
+		return prRef + " is not open."
+	}
+	return ""
+}
+
 func getMergeBlockerReason(task TaskRecord) string {
 	prRef := "The PR"
 	if task.PRNumber != nil {
@@ -1245,7 +1265,7 @@ func headerText(icon, value, color string) string {
 func kbdHints(focus AppFocus) string {
 	switch focus {
 	case FocusBoard:
-		return "move  : commands  Enter shell  c PR  C retry PR  m merge  n new  f filters  s sync  ? help"
+		return "move  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
 	case FocusTerminal:
 		return "Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
 	case FocusModal:

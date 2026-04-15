@@ -304,6 +304,7 @@ export type RPCMethod =
   | 'inspectSession'
   | 'prepareTaskWorkspace'
   | 'createTaskPR'
+  | 'commentTaskPR'
   | 'schedulePostPushSync'
   | 'mergeTaskPR'
   | 'triggerSync'
@@ -455,6 +456,11 @@ export interface TaskWorkspaceResult {
 
 export interface CreateTaskPRParams {
   taskId: string;
+}
+
+export interface CommentTaskPRParams {
+  taskId: string;
+  body: string;
 }
 
 export interface SchedulePostPushSyncParams {
