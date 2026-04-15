@@ -124,16 +124,18 @@ func TestHeaderStatusModelUsesSpinnerForBusySession(t *testing.T) {
 func TestGitHubStatusBadgeModelBuildPassApproved(t *testing.T) {
 	prNumber := 39
 	badge := githubStatusBadgeModel(TaskRecord{
-		PRNumber:    &prNumber,
-		PRState:     "open",
-		CIState:     "passed",
-		ReviewState: "approved",
+		PRNumber:         &prNumber,
+		PRState:          "open",
+		CIState:          "passed",
+		CIRequiredTotal:  5,
+		CIRequiredPassed: 5,
+		ReviewState:      "approved",
 	})
 
 	if badge == nil {
 		t.Fatal("githubStatusBadgeModel() = nil, want badge")
 	}
-	if badge.Label != "build pass·approved·#39" {
+	if badge.Label != "build 5/5·approved·#39" {
 		t.Fatalf("githubStatusBadgeModel() label = %q", badge.Label)
 	}
 	if badge.Tone != "success" {
@@ -144,16 +146,19 @@ func TestGitHubStatusBadgeModelBuildPassApproved(t *testing.T) {
 func TestGitHubStatusBadgeModelBuildFailChangesRequested(t *testing.T) {
 	prNumber := 41
 	badge := githubStatusBadgeModel(TaskRecord{
-		PRNumber:    &prNumber,
-		PRState:     "open",
-		CIState:     "failed",
-		ReviewState: "changes_requested",
+		PRNumber:         &prNumber,
+		PRState:          "open",
+		CIState:          "failed",
+		CIRequiredTotal:  5,
+		CIRequiredPassed: 4,
+		CIRequiredFailed: 1,
+		ReviewState:      "changes_requested",
 	})
 
 	if badge == nil {
 		t.Fatal("githubStatusBadgeModel() = nil, want badge")
 	}
-	if badge.Label != "build fail·changes req·#41" {
+	if badge.Label != "build 4/5 fail·changes req·#41" {
 		t.Fatalf("githubStatusBadgeModel() label = %q", badge.Label)
 	}
 	if badge.Tone != "danger" {
@@ -164,20 +169,39 @@ func TestGitHubStatusBadgeModelBuildFailChangesRequested(t *testing.T) {
 func TestGitHubStatusBadgeModelDraftPending(t *testing.T) {
 	prNumber := 52
 	badge := githubStatusBadgeModel(TaskRecord{
-		PRNumber: &prNumber,
-		PRState:  "draft",
-		PRDraft:  true,
-		CIState:  "pending",
+		PRNumber:          &prNumber,
+		PRState:           "draft",
+		PRDraft:           true,
+		CIState:           "pending",
+		CIRequiredTotal:   5,
+		CIRequiredPassed:  4,
+		CIRequiredPending: 1,
 	})
 
 	if badge == nil {
 		t.Fatal("githubStatusBadgeModel() = nil, want badge")
 	}
-	if badge.Label != "build pending·draft·#52" {
+	if badge.Label != "build 4/5·draft·#52" {
 		t.Fatalf("githubStatusBadgeModel() label = %q", badge.Label)
 	}
 	if badge.Tone != "warning" {
 		t.Fatalf("githubStatusBadgeModel() tone = %q, want warning", badge.Tone)
+	}
+}
+
+func TestGitHubStatusBadgeModelSyncErrorWithoutPR(t *testing.T) {
+	badge := githubStatusBadgeModel(TaskRecord{
+		GitHubSyncStatus: "error",
+	})
+
+	if badge == nil {
+		t.Fatal("githubStatusBadgeModel() = nil, want badge")
+	}
+	if badge.Label != "sync error" {
+		t.Fatalf("githubStatusBadgeModel() label = %q", badge.Label)
+	}
+	if badge.Tone != "danger" {
+		t.Fatalf("githubStatusBadgeModel() tone = %q, want danger", badge.Tone)
 	}
 }
 

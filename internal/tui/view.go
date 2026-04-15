@@ -900,6 +900,7 @@ type githubStatusBadge struct {
 
 func githubStatusBadgeModel(task TaskRecord) *githubStatusBadge {
 	segments := []string{}
+	syncStatus := githubSyncStatusLabel(task)
 
 	switch {
 	case task.PRState == "merged":
@@ -917,6 +918,9 @@ func githubStatusBadgeModel(task TaskRecord) *githubStatusBadge {
 			segments = append(segments, prState)
 		}
 	}
+	if len(segments) == 0 && syncStatus != "" {
+		segments = append(segments, syncStatus)
+	}
 
 	if task.PRNumber != nil && task.PRState != "none" {
 		segments = append(segments, fmt.Sprintf("#%d", *task.PRNumber))
@@ -933,6 +937,15 @@ func githubStatusBadgeModel(task TaskRecord) *githubStatusBadge {
 }
 
 func githubBuildStatusLabel(task TaskRecord) string {
+	if task.CIRequiredTotal > 0 {
+		switch task.CIState {
+		case "failed":
+			return fmt.Sprintf("build %d/%d fail", task.CIRequiredPassed, task.CIRequiredTotal)
+		case "pending", "passed":
+			return fmt.Sprintf("build %d/%d", task.CIRequiredPassed, task.CIRequiredTotal)
+		}
+	}
+
 	switch task.CIState {
 	case "pending":
 		return "build pending"
@@ -940,6 +953,17 @@ func githubBuildStatusLabel(task TaskRecord) string {
 		return "build pass"
 	case "failed":
 		return "build fail"
+	default:
+		return ""
+	}
+}
+
+func githubSyncStatusLabel(task TaskRecord) string {
+	switch task.GitHubSyncStatus {
+	case "syncing":
+		return "syncing"
+	case "error":
+		return "sync error"
 	default:
 		return ""
 	}
@@ -969,10 +993,14 @@ func githubPRStateLabel(task TaskRecord) string {
 
 func githubStatusTone(task TaskRecord) string {
 	switch {
+	case task.GitHubSyncStatus == "error" && (task.PRState == "" || task.PRState == "none"):
+		return "danger"
 	case task.PRState == "merged":
 		return "purple"
 	case task.CIState == "failed" || task.ReviewState == "changes_requested" || task.PRState == "closed":
 		return "danger"
+	case task.GitHubSyncStatus == "syncing":
+		return "info"
 	case task.PRDraft || task.PRState == "draft" || task.CIState == "pending":
 		return "warning"
 	case canMergeTask(task) || task.CIState == "passed" || task.ReviewState == "approved":

@@ -131,7 +131,7 @@ export const RepoOverlayConfigSchema = z
 export function defaultConfig(): AppConfig {
   return {
     sessionBackend: 'tmux' as SessionBackendType,
-    pollIntervalMs: 30000,
+    pollIntervalMs: 60000,
     tracks: [
       { id: 'backlog', label: 'Backlog', sortOrder: 0 },
       { id: 'in-progress', label: 'In Progress', sortOrder: 1 },

@@ -3,6 +3,7 @@ package tui
 type PRState string
 type CIState string
 type ReviewState string
+type GitHubSyncStatus string
 type SessionStatus string
 type SessionBackendType string
 type RepoHealth string
@@ -78,36 +79,43 @@ type TrackRecord struct {
 }
 
 type TaskRecord struct {
-	ID                    string      `json:"id"`
-	Title                 string      `json:"title"`
-	Description           string      `json:"description"`
-	RepoID                string      `json:"repoId"`
-	TrackID               string      `json:"trackId"`
-	PillarID              string      `json:"pillarId"`
-	Labels                []string    `json:"labels"`
-	BranchName            string      `json:"branchName"`
-	WorktreePath          string      `json:"worktreePath"`
-	SessionID             string      `json:"sessionId"`
-	LastSessionCWD        string      `json:"lastSessionCwd"`
-	SortKey               float64     `json:"sortKey"`
-	PRNumber              *int        `json:"prNumber"`
-	PRState               PRState     `json:"prState"`
-	PRDraft               bool        `json:"prDraft"`
-	PRURL                 string      `json:"prUrl"`
-	CIState               CIState     `json:"ciState"`
-	CISummary             string      `json:"ciSummary"`
-	FailingCheckName      string      `json:"failingCheckName"`
-	ReviewState           ReviewState `json:"reviewState"`
-	ReviewSummary         string      `json:"reviewSummary"`
-	UnresolvedThreadCount int         `json:"unresolvedThreadCount"`
-	GitState              GitState    `json:"gitState"`
-	GitAheadCount         int         `json:"gitAheadCount"`
-	GitBehindCount        int         `json:"gitBehindCount"`
-	HasUntracked          bool        `json:"hasUntracked"`
-	HasConflicts          bool        `json:"hasConflicts"`
-	ArchivedAt            *int64      `json:"archivedAt"`
-	CreatedAt             int64       `json:"createdAt"`
-	UpdatedAt             int64       `json:"updatedAt"`
+	ID                    string           `json:"id"`
+	Title                 string           `json:"title"`
+	Description           string           `json:"description"`
+	RepoID                string           `json:"repoId"`
+	TrackID               string           `json:"trackId"`
+	PillarID              string           `json:"pillarId"`
+	Labels                []string         `json:"labels"`
+	BranchName            string           `json:"branchName"`
+	WorktreePath          string           `json:"worktreePath"`
+	SessionID             string           `json:"sessionId"`
+	LastSessionCWD        string           `json:"lastSessionCwd"`
+	SortKey               float64          `json:"sortKey"`
+	PRNumber              *int             `json:"prNumber"`
+	PRState               PRState          `json:"prState"`
+	PRDraft               bool             `json:"prDraft"`
+	PRURL                 string           `json:"prUrl"`
+	CIState               CIState          `json:"ciState"`
+	CISummary             string           `json:"ciSummary"`
+	FailingCheckName      string           `json:"failingCheckName"`
+	CIRequiredTotal       int              `json:"ciRequiredTotal"`
+	CIRequiredPassed      int              `json:"ciRequiredPassed"`
+	CIRequiredFailed      int              `json:"ciRequiredFailed"`
+	CIRequiredPending     int              `json:"ciRequiredPending"`
+	ReviewState           ReviewState      `json:"reviewState"`
+	ReviewSummary         string           `json:"reviewSummary"`
+	UnresolvedThreadCount int              `json:"unresolvedThreadCount"`
+	GitHubSyncStatus      GitHubSyncStatus `json:"githubSyncStatus"`
+	GitHubSyncError       string           `json:"githubSyncError"`
+	GitHubLastSyncedAt    *int64           `json:"githubLastSyncedAt"`
+	GitState              GitState         `json:"gitState"`
+	GitAheadCount         int              `json:"gitAheadCount"`
+	GitBehindCount        int              `json:"gitBehindCount"`
+	HasUntracked          bool             `json:"hasUntracked"`
+	HasConflicts          bool             `json:"hasConflicts"`
+	ArchivedAt            *int64           `json:"archivedAt"`
+	CreatedAt             int64            `json:"createdAt"`
+	UpdatedAt             int64            `json:"updatedAt"`
 }
 
 type SessionRecord struct {

@@ -9,35 +9,139 @@ export interface PRInfo {
   ciState: CIState;
   ciSummary?: string;
   failingCheckName?: string;
+  ciRequiredTotal: number;
+  ciRequiredPassed: number;
+  ciRequiredFailed: number;
+  ciRequiredPending: number;
   reviewState: ReviewState;
   reviewSummary?: string;
   unresolvedThreadCount: number;
 }
 
-// --------------- Internal shape of gh pr view JSON output ---
+export interface RequiredCheckSummary {
+  ciState: CIState;
+  ciSummary?: string;
+  failingCheckName?: string;
+  ciRequiredTotal: number;
+  ciRequiredPassed: number;
+  ciRequiredFailed: number;
+  ciRequiredPending: number;
+}
+
+export type GitHubServiceErrorKind =
+  | 'not_found'
+  | 'auth'
+  | 'repo_config'
+  | 'rate_limit'
+  | 'closed_unmerged_pr_exists'
+  | 'transport';
+
+export class GitHubServiceError extends Error {
+  constructor(
+    readonly kind: GitHubServiceErrorKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'GitHubServiceError';
+  }
+}
 
 interface GhReview {
   state: string;
   author?: { login: string };
 }
 
-interface GhStatusCheck {
-  conclusion?: string | null;
-  status?: string | null;
-  state?: string | null;
-  name?: string | null;
-  context?: string | null;
-}
-
-interface GhPRJson {
+interface GhBranchPRJson {
   number: number;
   title: string;
   url: string;
   state: string;
-  headRefName: string;
   isDraft: boolean;
-  reviews: GhReview[];
-  statusCheckRollup: GhStatusCheck[];
+  reviewDecision?: string | null;
+  headRefName: string;
+  updatedAt?: string | null;
+}
+
+interface GhPRViewJson {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  isDraft: boolean;
+  reviewDecision?: string | null;
+  reviews?: GhReview[];
+}
+
+interface GhRequiredCheck {
+  bucket?: string | null;
+  name?: string | null;
+  state?: string | null;
+  workflow?: string | null;
+}
+
+function normalizeCheckField(value: string | null | undefined): string {
+  return value?.toUpperCase() ?? '';
+}
+
+function normalizePRState(state: string | null | undefined, isDraft: boolean): PRState {
+  if (isDraft) {
+    return 'draft';
+  }
+
+  switch (normalizeCheckField(state)) {
+    case 'OPEN':
+      return 'open';
+    case 'MERGED':
+      return 'merged';
+    case 'CLOSED':
+      return 'closed';
+    default:
+      return 'none';
+  }
+}
+
+function classifyGhError(message: string): GitHubServiceErrorKind {
+  const normalized = message.toLowerCase();
+
+  if (
+    normalized.includes('authentication') ||
+    normalized.includes('not logged into any hosts') ||
+    normalized.includes('gh auth login') ||
+    normalized.includes('requires authentication')
+  ) {
+    return 'auth';
+  }
+
+  if (
+    normalized.includes('could not resolve to a repository') ||
+    normalized.includes('repository not found') ||
+    normalized.includes('no git remotes found') ||
+    normalized.includes('missing github identity')
+  ) {
+    return 'repo_config';
+  }
+
+  if (normalized.includes('rate limit')) {
+    return 'rate_limit';
+  }
+
+  if (
+    normalized.includes('pull request not found') ||
+    normalized.includes('could not find pull request') ||
+    normalized.includes('no pull requests found')
+  ) {
+    return 'not_found';
+  }
+
+  return 'transport';
+}
+
+function createGitHubServiceError(message: string): GitHubServiceError {
+  return new GitHubServiceError(classifyGhError(message), message);
+}
+
+function checkLabel(check: GhRequiredCheck): string {
+  return check.name ?? check.workflow ?? 'check';
 }
 
 export function deriveReviewState(reviews: GhReview[]): {
@@ -80,122 +184,127 @@ export function deriveReviewState(reviews: GhReview[]): {
   return { reviewState: 'none' };
 }
 
-function normalizeCheckField(value: string | null | undefined): string {
-  return value?.toUpperCase() ?? '';
-}
-
-export function deriveCIState(checks: GhStatusCheck[]): CIState {
-  if (checks.length === 0) {
-    return 'none';
-  }
-
-  const normalized = checks.map((check) => ({
-    conclusion: normalizeCheckField(check.conclusion),
-    status: normalizeCheckField(check.status),
-    state: normalizeCheckField(check.state),
-  }));
-
-  const hasFailure = normalized.some(
-    ({ conclusion, status, state }) =>
-      ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED']
-        .includes(conclusion) ||
-      ['FAILURE', 'ERROR'].includes(status) ||
-      ['FAILURE', 'ERROR'].includes(state),
-  );
-  if (hasFailure) {
-    return 'failed';
-  }
-
-  const hasPending = normalized.some(
-    ({ conclusion, status, state }) =>
-      ['PENDING', 'IN_PROGRESS', 'QUEUED', 'WAITING', 'EXPECTED', 'REQUESTED']
-        .includes(conclusion) ||
-      ['PENDING', 'IN_PROGRESS', 'QUEUED', 'WAITING', 'EXPECTED', 'REQUESTED']
-        .includes(status) ||
-      ['PENDING', 'IN_PROGRESS', 'QUEUED', 'WAITING', 'EXPECTED', 'REQUESTED']
-        .includes(state),
-  );
-  if (hasPending) {
-    return 'pending';
-  }
-
-  const allSuccessful = normalized.every(
-    ({ conclusion, status, state }) =>
-      ['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(conclusion) ||
-      ['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(state) ||
-      (conclusion === '' && state === '' && ['COMPLETED', 'SUCCESS'].includes(status)),
-  );
-  if (allSuccessful) {
-    return 'passed';
-  }
-
-  return 'none';
-}
-
-function checkLabel(check: GhStatusCheck): string {
-  return check.name ?? check.context ?? 'check';
-}
-
-function summarizeChecks(checks: GhStatusCheck[]): {
-  ciSummary?: string;
-  failingCheckName?: string;
+function deriveReviewStateFromDecision(
+  reviewDecision: string | null | undefined,
+  reviews: GhReview[],
+): {
+  reviewState: ReviewState;
+  reviewSummary?: string;
 } {
+  switch (normalizeCheckField(reviewDecision)) {
+    case 'APPROVED':
+      return deriveReviewState(reviews).reviewState === 'approved'
+        ? deriveReviewState(reviews)
+        : { reviewState: 'approved', reviewSummary: 'approved' };
+    case 'CHANGES_REQUESTED':
+      return {
+        reviewState: 'changes_requested',
+        reviewSummary: 'changes requested',
+      };
+    case 'REVIEW_REQUIRED': {
+      const derived = deriveReviewState(reviews);
+      if (derived.reviewState === 'commented') {
+        return derived;
+      }
+      return { reviewState: 'none' };
+    }
+    default:
+      return deriveReviewState(reviews);
+  }
+}
+
+export function deriveRequiredCheckSummary(checks: GhRequiredCheck[]): RequiredCheckSummary {
   if (checks.length === 0) {
-    return {};
-  }
-
-  const failed = checks.find((check) => {
-    const conclusion = normalizeCheckField(check.conclusion);
-    const status = normalizeCheckField(check.status);
-    const state = normalizeCheckField(check.state);
-    return (
-      ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED']
-        .includes(conclusion) ||
-      ['FAILURE', 'ERROR'].includes(status) ||
-      ['FAILURE', 'ERROR'].includes(state)
-    );
-  });
-
-  if (failed) {
-    const failingCheckName = checkLabel(failed);
     return {
-      ciSummary: `${failingCheckName} fail`,
-      failingCheckName,
+      ciState: 'none',
+      ciRequiredTotal: 0,
+      ciRequiredPassed: 0,
+      ciRequiredFailed: 0,
+      ciRequiredPending: 0,
     };
   }
 
-  const pendingCount = checks.filter((check) => {
-    const conclusion = normalizeCheckField(check.conclusion);
-    const status = normalizeCheckField(check.status);
-    const state = normalizeCheckField(check.state);
-    return (
-      ['PENDING', 'IN_PROGRESS', 'QUEUED', 'WAITING', 'EXPECTED', 'REQUESTED']
-        .includes(conclusion) ||
-      ['PENDING', 'IN_PROGRESS', 'QUEUED', 'WAITING', 'EXPECTED', 'REQUESTED']
-        .includes(status) ||
-      ['PENDING', 'IN_PROGRESS', 'QUEUED', 'WAITING', 'EXPECTED', 'REQUESTED']
-        .includes(state)
-    );
-  }).length;
+  let passed = 0;
+  let failed = 0;
+  let pending = 0;
+  let failingCheckName: string | undefined;
 
-  if (pendingCount > 0) {
-    return {
-      ciSummary: `checks ${checks.length - pendingCount}/${checks.length}`,
-    };
+  for (const check of checks) {
+    const bucket = normalizeCheckField(check.bucket);
+    const state = normalizeCheckField(check.state);
+
+    switch (bucket) {
+      case 'PASS':
+      case 'SKIPPING':
+        passed += 1;
+        break;
+      case 'FAIL':
+      case 'CANCEL':
+        failed += 1;
+        failingCheckName ??= checkLabel(check);
+        break;
+      case 'PENDING':
+        pending += 1;
+        break;
+      default:
+        if (['SUCCESS', 'COMPLETED', 'SKIPPED'].includes(state)) {
+          passed += 1;
+        } else if (['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED'].includes(state)) {
+          failed += 1;
+          failingCheckName ??= checkLabel(check);
+        } else {
+          pending += 1;
+        }
+        break;
+    }
+  }
+
+  const total = checks.length;
+  const ciState: CIState =
+    failed > 0 ? 'failed' : pending > 0 ? 'pending' : total > 0 ? 'passed' : 'none';
+
+  let ciSummary: string | undefined;
+  if (total > 0) {
+    if (failed > 0 && failingCheckName) {
+      ciSummary = `${failingCheckName} fail`;
+    } else {
+      ciSummary = `checks ${passed}/${total}`;
+    }
   }
 
   return {
-    ciSummary: `checks ${checks.length}/${checks.length}`,
+    ciState,
+    ciSummary,
+    failingCheckName,
+    ciRequiredTotal: total,
+    ciRequiredPassed: passed,
+    ciRequiredFailed: failed,
+    ciRequiredPending: pending,
   };
 }
 
-// --------------- GitHubService ------------------------------
+function branchPRPriority(pr: GhBranchPRJson): number {
+  const prState = normalizePRState(pr.state, pr.isDraft);
+  switch (prState) {
+    case 'draft':
+    case 'open':
+      return 3;
+    case 'merged':
+      return 2;
+    case 'closed':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 export class GitHubService {
-  constructor() {}
-
-  // --------------- Private helper --------------------------
-
   private gh(args: string[], cwd?: string): string {
     const result = spawnSync('gh', args, {
       cwd,
@@ -210,10 +319,10 @@ export class GitHubService {
     const stderr = (result.stderr ?? '').trim();
     const stdout = (result.stdout ?? '').trim();
     const message = stderr || stdout || 'unknown gh error';
-    throw new Error(`gh command failed: gh ${args.join(' ')}\n${message}`);
+    throw createGitHubServiceError(`gh command failed: gh ${args.join(' ')}\n${message}`);
   }
 
-  private ghAsync(args: string[], cwd?: string): Promise<string> {
+  private ghAsync(args: string[], cwd?: string, allowedExitCodes: number[] = []): Promise<string> {
     return new Promise((resolve, reject) => {
       execFile(
         'gh',
@@ -230,8 +339,14 @@ export class GitHubService {
           stderr: string,
         ) => {
           if (error) {
+            const code = typeof error.code === 'number' ? error.code : null;
+            if (code !== null && allowedExitCodes.includes(code)) {
+              resolve(stdout.trim());
+              return;
+            }
+
             const message = (stderr || stdout || error.message).trim();
-            reject(new Error(`gh command failed: gh ${args.join(' ')}\n${message}`));
+            reject(createGitHubServiceError(`gh command failed: gh ${args.join(' ')}\n${message}`));
             return;
           }
 
@@ -241,7 +356,15 @@ export class GitHubService {
     });
   }
 
-  // --------------- Public API ------------------------------
+  private async loadPRInfo(repoPath: string, prNumber: number, githubRepo: string): Promise<PRInfo> {
+    const snapshot = await this.getPRSnapshot(repoPath, prNumber, githubRepo);
+    const checks = await this.getRequiredChecks(repoPath, prNumber, githubRepo);
+
+    return {
+      ...snapshot,
+      ...checks,
+    };
+  }
 
   isAvailable(): boolean {
     try {
@@ -267,106 +390,174 @@ export class GitHubService {
     }
   }
 
-  async getPR(repoPath: string, branch: string, githubRepo?: string): Promise<PRInfo | null> {
-    const fields = 'number,state,title,headRefName,isDraft,url,reviews,statusCheckRollup';
-    try {
-      const raw = await this.ghAsync(
-        ['pr', 'view', branch, '--json', fields, ...(githubRepo ? ['--repo', githubRepo] : [])],
-        repoPath,
-      );
-      const data = JSON.parse(raw) as GhPRJson;
-
-      // Derive prState
-      let prState: PRState;
-      if (data.isDraft) {
-        prState = 'draft';
-      } else {
-        switch (data.state) {
-          case 'OPEN':
-            prState = 'open';
-            break;
-          case 'MERGED':
-            prState = 'merged';
-            break;
-          case 'CLOSED':
-            prState = 'closed';
-            break;
-          default:
-            prState = 'none';
-        }
-      }
-
-      // Derive ciState from statusCheckRollup
-      const checks = data.statusCheckRollup ?? [];
-      const ciState = deriveCIState(checks);
-      const { ciSummary, failingCheckName } = summarizeChecks(checks);
-
-      const { reviewState, reviewSummary } = deriveReviewState(data.reviews ?? []);
-
-      return {
-        number: data.number,
-        title: data.title,
-        url: data.url,
-        prState,
-        ciState,
-        ciSummary,
-        failingCheckName,
-        reviewState,
-        reviewSummary,
-        unresolvedThreadCount: 0,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  createPR(
+  async findBranchPR(
     repoPath: string,
-    params: {
-      githubRepo: string;
-      branch: string;
-      baseBranch: string;
-      title: string;
-      body: string;
-    },
-  ): Promise<PRInfo> {
-    return this.createPRAsync(repoPath, params);
-  }
-
-  private async createPRAsync(
-    repoPath: string,
-    params: {
-      githubRepo: string;
-      branch: string;
-      baseBranch: string;
-      title: string;
-      body: string;
-    },
-  ): Promise<PRInfo> {
-    await this.ghAsync(
-      [
-        'pr',
-        'create',
-        '--repo',
-        params.githubRepo,
-        '--head',
-        params.branch,
-        '--base',
-        params.baseBranch,
-        '--title',
-        params.title,
-        '--body',
-        params.body,
-      ],
+    branch: string,
+    githubRepo: string,
+  ): Promise<{ number: number; prState: PRState; title: string; url: string } | null> {
+    const fields = 'number,state,title,isDraft,url,reviewDecision,headRefName,updatedAt';
+    const raw = await this.ghAsync(
+      ['pr', 'list', '--repo', githubRepo, '--head', branch, '--state', 'all', '--json', fields],
       repoPath,
     );
 
-    const prInfo = await this.getPR(repoPath, params.branch, params.githubRepo);
-    if (!prInfo) {
-      throw new Error(`PR created for branch ${params.branch}, but could not read it back`);
+    const data = raw.length > 0 ? (JSON.parse(raw) as GhBranchPRJson[]) : [];
+    const matches = data
+      .filter((candidate) => candidate.headRefName === branch)
+      .sort((left, right) => {
+        const priorityDelta = branchPRPriority(right) - branchPRPriority(left);
+        if (priorityDelta !== 0) {
+          return priorityDelta;
+        }
+
+        return Date.parse(right.updatedAt ?? '') - Date.parse(left.updatedAt ?? '');
+      });
+
+    if (matches.length === 0) {
+      return null;
     }
 
-    return prInfo;
+    const match = matches[0];
+    return {
+      number: match.number,
+      prState: normalizePRState(match.state, match.isDraft),
+      title: match.title,
+      url: match.url,
+    };
+  }
+
+  async getPRSnapshot(repoPath: string, prNumber: number, githubRepo: string): Promise<PRInfo> {
+    const fields = 'number,state,title,isDraft,url,reviewDecision,reviews';
+    const raw = await this.ghAsync(
+      ['pr', 'view', String(prNumber), '--repo', githubRepo, '--json', fields],
+      repoPath,
+    );
+    const data = JSON.parse(raw) as GhPRViewJson;
+    const { reviewState, reviewSummary } = deriveReviewStateFromDecision(
+      data.reviewDecision,
+      data.reviews ?? [],
+    );
+
+    return {
+      number: data.number,
+      title: data.title,
+      url: data.url,
+      prState: normalizePRState(data.state, data.isDraft),
+      ciState: 'none',
+      ciSummary: undefined,
+      failingCheckName: undefined,
+      ciRequiredTotal: 0,
+      ciRequiredPassed: 0,
+      ciRequiredFailed: 0,
+      ciRequiredPending: 0,
+      reviewState,
+      reviewSummary,
+      unresolvedThreadCount: 0,
+    };
+  }
+
+  async getRequiredChecks(
+    repoPath: string,
+    prNumber: number,
+    githubRepo: string,
+  ): Promise<RequiredCheckSummary> {
+    try {
+      const raw = await this.ghAsync(
+        ['pr', 'checks', String(prNumber), '--repo', githubRepo, '--required', '--json', 'bucket,name,state,workflow'],
+        repoPath,
+        [8],
+      );
+
+      if (raw.length === 0) {
+        return {
+          ciState: 'none',
+          ciRequiredTotal: 0,
+          ciRequiredPassed: 0,
+          ciRequiredFailed: 0,
+          ciRequiredPending: 0,
+        };
+      }
+
+      return deriveRequiredCheckSummary(JSON.parse(raw) as GhRequiredCheck[]);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes('no checks')) {
+        return {
+          ciState: 'none',
+          ciRequiredTotal: 0,
+          ciRequiredPassed: 0,
+          ciRequiredFailed: 0,
+          ciRequiredPending: 0,
+        };
+      }
+
+      throw error;
+    }
+  }
+
+  async getPR(repoPath: string, branch: string, githubRepo?: string): Promise<PRInfo | null> {
+    if (!githubRepo) {
+      throw new GitHubServiceError('repo_config', `Repo at ${repoPath} is missing GitHub identity`);
+    }
+
+    const match = await this.findBranchPR(repoPath, branch, githubRepo);
+    if (!match) {
+      return null;
+    }
+
+    return this.loadPRInfo(repoPath, match.number, githubRepo);
+  }
+
+  async createPR(
+    repoPath: string,
+    params: {
+      githubRepo: string;
+      branch: string;
+      baseBranch: string;
+      title: string;
+      body: string;
+    },
+  ): Promise<PRInfo> {
+    try {
+      await this.ghAsync(
+        [
+          'pr',
+          'create',
+          '--repo',
+          params.githubRepo,
+          '--head',
+          params.branch,
+          '--base',
+          params.baseBranch,
+          '--title',
+          params.title,
+          '--body',
+          params.body,
+        ],
+        repoPath,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes('already exists')) {
+        throw error;
+      }
+    }
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const match = await this.findBranchPR(repoPath, params.branch, params.githubRepo);
+      if (match) {
+        return this.loadPRInfo(repoPath, match.number, params.githubRepo);
+      }
+
+      if (attempt < 5) {
+        await sleep(500);
+      }
+    }
+
+    throw new GitHubServiceError(
+      'transport',
+      `PR created for branch ${params.branch}, but could not read it back`,
+    );
   }
 
   async mergePR(
@@ -390,7 +581,6 @@ export class GitHubService {
   }
 
   getDiff(repoPath: string, prNumber: number, githubRepo: string): string {
-    // Get raw diff via gh
     let rawDiff: string;
     try {
       const result = spawnSync('gh', ['pr', 'diff', String(prNumber), '--repo', githubRepo], {
@@ -407,7 +597,6 @@ export class GitHubService {
       throw new Error(`Failed to get PR diff: ${msg}`);
     }
 
-    // Try to pipe through delta if available
     const deltaAvailable = (() => {
       try {
         execSync('delta --version', {
@@ -429,10 +618,10 @@ export class GitHubService {
       encoding: 'utf8',
     });
 
-    if (deltaResult.status === 0) {
-      return deltaResult.stdout ?? rawDiff;
+    if (deltaResult.status !== 0) {
+      return rawDiff;
     }
 
-    return rawDiff;
+    return deltaResult.stdout ?? rawDiff;
   }
 }

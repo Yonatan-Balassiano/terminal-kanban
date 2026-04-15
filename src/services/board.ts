@@ -13,8 +13,10 @@ import type {
   PRState,
   CIState,
   ReviewState,
+  GitHubSyncStatus,
   ThemeMode,
   GitState,
+  TaskSyncPatch,
 } from '../types/index.js';
 import { createTaskBranchName, renameTaskBranchName } from './branch-name.js';
 
@@ -41,9 +43,16 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     ciState: (row['ci_state'] as CIState) ?? 'none',
     ciSummary: (row['ci_summary'] as string | null) ?? undefined,
     failingCheckName: (row['failing_check_name'] as string | null) ?? undefined,
+    ciRequiredTotal: (row['ci_required_total'] as number | null) ?? 0,
+    ciRequiredPassed: (row['ci_required_passed'] as number | null) ?? 0,
+    ciRequiredFailed: (row['ci_required_failed'] as number | null) ?? 0,
+    ciRequiredPending: (row['ci_required_pending'] as number | null) ?? 0,
     reviewState: (row['review_state'] as ReviewState) ?? 'none',
     reviewSummary: (row['review_summary'] as string | null) ?? undefined,
     unresolvedThreadCount: (row['unresolved_thread_count'] as number) ?? 0,
+    githubSyncStatus: (row['github_sync_status'] as GitHubSyncStatus | null) ?? 'idle',
+    githubSyncError: (row['github_sync_error'] as string | null) ?? undefined,
+    githubLastSyncedAt: (row['github_last_synced_at'] as number | null) ?? undefined,
     gitState: (row['git_state'] as GitState | null) ?? 'unknown',
     gitAheadCount: (row['git_ahead_count'] as number | null) ?? 0,
     gitBehindCount: (row['git_behind_count'] as number | null) ?? 0,
@@ -148,8 +157,9 @@ export class BoardService {
         `INSERT INTO tasks
            (id, title, repo_id, track_id, pillar_id, branch_name, sort_key,
             pr_state, pr_draft, ci_state, review_state, unresolved_thread_count,
-            created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, ?, ?)`,
+            github_sync_status, ci_required_total, ci_required_passed, ci_required_failed,
+            ci_required_pending, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
       )
       .run(
         id,
@@ -273,87 +283,98 @@ export class BoardService {
 
   updateTaskSync(
     id: string,
-    fields: Partial<
-      Pick<
-        TaskRecord,
-        | 'prNumber'
-        | 'prState'
-        | 'prDraft'
-        | 'prUrl'
-        | 'ciState'
-        | 'ciSummary'
-        | 'failingCheckName'
-        | 'reviewState'
-        | 'reviewSummary'
-        | 'unresolvedThreadCount'
-        | 'gitState'
-        | 'gitAheadCount'
-        | 'gitBehindCount'
-        | 'hasUntracked'
-        | 'hasConflicts'
-      >
-    >,
+    fields: TaskSyncPatch,
   ): void {
     const setClauses: string[] = [];
     const values: unknown[] = [];
+    const has = (key: keyof TaskSyncPatch): boolean =>
+      Object.prototype.hasOwnProperty.call(fields, key);
 
-    if (fields.prNumber !== undefined) {
+    if (has('prNumber')) {
       setClauses.push('pr_number = ?');
-      values.push(fields.prNumber);
+      values.push(fields.prNumber ?? null);
     }
-    if (fields.prState !== undefined) {
+    if (has('prState') && fields.prState !== undefined) {
       setClauses.push('pr_state = ?');
       values.push(fields.prState);
     }
-    if (fields.prDraft !== undefined) {
+    if (has('prDraft') && fields.prDraft !== undefined) {
       setClauses.push('pr_draft = ?');
       values.push(fields.prDraft ? 1 : 0);
     }
-    if (fields.prUrl !== undefined) {
+    if (has('prUrl')) {
       setClauses.push('pr_url = ?');
-      values.push(fields.prUrl);
+      values.push(fields.prUrl ?? null);
     }
-    if (fields.ciState !== undefined) {
+    if (has('ciState') && fields.ciState !== undefined) {
       setClauses.push('ci_state = ?');
       values.push(fields.ciState);
     }
-    if (fields.ciSummary !== undefined) {
+    if (has('ciSummary')) {
       setClauses.push('ci_summary = ?');
-      values.push(fields.ciSummary);
+      values.push(fields.ciSummary ?? null);
     }
-    if (fields.failingCheckName !== undefined) {
+    if (has('failingCheckName')) {
       setClauses.push('failing_check_name = ?');
-      values.push(fields.failingCheckName);
+      values.push(fields.failingCheckName ?? null);
     }
-    if (fields.reviewState !== undefined) {
+    if (has('ciRequiredTotal') && fields.ciRequiredTotal !== undefined) {
+      setClauses.push('ci_required_total = ?');
+      values.push(fields.ciRequiredTotal);
+    }
+    if (has('ciRequiredPassed') && fields.ciRequiredPassed !== undefined) {
+      setClauses.push('ci_required_passed = ?');
+      values.push(fields.ciRequiredPassed);
+    }
+    if (has('ciRequiredFailed') && fields.ciRequiredFailed !== undefined) {
+      setClauses.push('ci_required_failed = ?');
+      values.push(fields.ciRequiredFailed);
+    }
+    if (has('ciRequiredPending') && fields.ciRequiredPending !== undefined) {
+      setClauses.push('ci_required_pending = ?');
+      values.push(fields.ciRequiredPending);
+    }
+    if (has('reviewState') && fields.reviewState !== undefined) {
       setClauses.push('review_state = ?');
       values.push(fields.reviewState);
     }
-    if (fields.reviewSummary !== undefined) {
+    if (has('reviewSummary')) {
       setClauses.push('review_summary = ?');
-      values.push(fields.reviewSummary);
+      values.push(fields.reviewSummary ?? null);
     }
-    if (fields.unresolvedThreadCount !== undefined) {
+    if (has('unresolvedThreadCount') && fields.unresolvedThreadCount !== undefined) {
       setClauses.push('unresolved_thread_count = ?');
       values.push(fields.unresolvedThreadCount);
     }
-    if (fields.gitState !== undefined) {
+    if (has('githubSyncStatus') && fields.githubSyncStatus !== undefined) {
+      setClauses.push('github_sync_status = ?');
+      values.push(fields.githubSyncStatus);
+    }
+    if (has('githubSyncError')) {
+      setClauses.push('github_sync_error = ?');
+      values.push(fields.githubSyncError ?? null);
+    }
+    if (has('githubLastSyncedAt')) {
+      setClauses.push('github_last_synced_at = ?');
+      values.push(fields.githubLastSyncedAt ?? null);
+    }
+    if (has('gitState') && fields.gitState !== undefined) {
       setClauses.push('git_state = ?');
       values.push(fields.gitState);
     }
-    if (fields.gitAheadCount !== undefined) {
+    if (has('gitAheadCount') && fields.gitAheadCount !== undefined) {
       setClauses.push('git_ahead_count = ?');
       values.push(fields.gitAheadCount);
     }
-    if (fields.gitBehindCount !== undefined) {
+    if (has('gitBehindCount') && fields.gitBehindCount !== undefined) {
       setClauses.push('git_behind_count = ?');
       values.push(fields.gitBehindCount);
     }
-    if (fields.hasUntracked !== undefined) {
+    if (has('hasUntracked') && fields.hasUntracked !== undefined) {
       setClauses.push('has_untracked = ?');
       values.push(fields.hasUntracked ? 1 : 0);
     }
-    if (fields.hasConflicts !== undefined) {
+    if (has('hasConflicts') && fields.hasConflicts !== undefined) {
       setClauses.push('has_conflicts = ?');
       values.push(fields.hasConflicts ? 1 : 0);
     }

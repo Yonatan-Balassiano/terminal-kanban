@@ -272,10 +272,10 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
 
   // ---- Load config and seed tracks + poll interval -----------
   const { loadConfig } = await import('../config/index.js');
-  let pollIntervalMs = 30000;
+  let pollIntervalMs = 60000;
   try {
     const cfg = loadConfig();
-    pollIntervalMs = Math.max(cfg.pollIntervalMs, 30000);
+    pollIntervalMs = Math.min(Math.max(cfg.pollIntervalMs, 10_000), 60_000);
     for (const t of normalizeBoardTracks(cfg.tracks)) {
       board.upsertTrack(t.id, t.label, t.sortOrder);
     }
@@ -295,17 +295,24 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   sync.start(pollIntervalMs);
 
   // ---- Fan sync events to server subscribers -----------------
-  sync.syncEvent.on('sync', (result: unknown) => {
-    const syncResult = result as { tasksUpdated?: number; errors?: string[] };
+  sync.syncEvent.on('sync', (event: unknown) => {
+    const payload = event as
+      | { kind: 'status'; status: 'started' | 'done' }
+      | { kind: 'result'; result: { tasksUpdated?: number; errors?: string[] } };
+
+    if (payload.kind === 'status') {
+      serverEvents.emit('event', {
+        type: 'sync_status',
+        payload: { status: payload.status },
+      });
+      return;
+    }
+
+    const syncResult = payload.result;
     if ((syncResult.tasksUpdated ?? 0) === 0 && (syncResult.errors?.length ?? 0) === 0) {
       return;
     }
 
-    serverEvents.emit('event', {
-      type: 'sync_status',
-      payload: { status: 'done', result },
-    });
-    // Also push a fresh board snapshot so clients refresh automatically.
     serverEvents.emit('event', {
       type: 'board_patch',
       payload: view.getBoardSnapshot(),
