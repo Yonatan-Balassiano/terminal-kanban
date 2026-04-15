@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
-  deriveRequiredCheckSummary,
+  deriveCheckSummary,
   deriveReviewState,
 } from '../src/services/github.js';
 
-describe('deriveRequiredCheckSummary', () => {
-  it('treats all required passing checks as passed with a complete counter', () => {
+describe('deriveCheckSummary', () => {
+  it('treats all passing checks as passed with a complete counter', () => {
     expect(
-      deriveRequiredCheckSummary([
+      deriveCheckSummary([
         { bucket: 'pass', name: 'unit' },
-        { bucket: 'skipping', name: 'lint' },
+        { bucket: 'pass', name: 'lint' },
       ]),
     ).toEqual({
       ciState: 'passed',
@@ -24,7 +24,7 @@ describe('deriveRequiredCheckSummary', () => {
 
   it('treats mixed pass and pending checks as pending', () => {
     expect(
-      deriveRequiredCheckSummary([
+      deriveCheckSummary([
         { bucket: 'pass', name: 'unit' },
         { bucket: 'pending', name: 'e2e' },
       ]),
@@ -41,7 +41,7 @@ describe('deriveRequiredCheckSummary', () => {
 
   it('treats failed checks as failed and surfaces the failing check name', () => {
     expect(
-      deriveRequiredCheckSummary([
+      deriveCheckSummary([
         { bucket: 'pass', name: 'unit' },
         { bucket: 'fail', name: 'e2e' },
       ]),
@@ -52,6 +52,23 @@ describe('deriveRequiredCheckSummary', () => {
       ciRequiredTotal: 2,
       ciRequiredPassed: 1,
       ciRequiredFailed: 1,
+      ciRequiredPending: 0,
+    });
+  });
+
+  it('ignores skipped checks in the x/X counter', () => {
+    expect(
+      deriveCheckSummary([
+        { bucket: 'pass', name: 'unit' },
+        { bucket: 'skipping', name: 'docs' },
+      ]),
+    ).toEqual({
+      ciState: 'passed',
+      ciSummary: 'checks 1/1',
+      failingCheckName: undefined,
+      ciRequiredTotal: 1,
+      ciRequiredPassed: 1,
+      ciRequiredFailed: 0,
       ciRequiredPending: 0,
     });
   });

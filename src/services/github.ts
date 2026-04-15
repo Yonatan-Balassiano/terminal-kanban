@@ -72,7 +72,7 @@ interface GhPRViewJson {
   reviews?: GhReview[];
 }
 
-interface GhRequiredCheck {
+interface GhPRCheck {
   bucket?: string | null;
   name?: string | null;
   state?: string | null;
@@ -140,7 +140,7 @@ function createGitHubServiceError(message: string): GitHubServiceError {
   return new GitHubServiceError(classifyGhError(message), message);
 }
 
-function checkLabel(check: GhRequiredCheck): string {
+function checkLabel(check: GhPRCheck): string {
   return check.name ?? check.workflow ?? 'check';
 }
 
@@ -213,7 +213,7 @@ function deriveReviewStateFromDecision(
   }
 }
 
-export function deriveRequiredCheckSummary(checks: GhRequiredCheck[]): RequiredCheckSummary {
+export function deriveCheckSummary(checks: GhPRCheck[]): RequiredCheckSummary {
   if (checks.length === 0) {
     return {
       ciState: 'none',
@@ -228,6 +228,7 @@ export function deriveRequiredCheckSummary(checks: GhRequiredCheck[]): RequiredC
   let failed = 0;
   let pending = 0;
   let failingCheckName: string | undefined;
+  let total = 0;
 
   for (const check of checks) {
     const bucket = normalizeCheckField(check.bucket);
@@ -235,31 +236,39 @@ export function deriveRequiredCheckSummary(checks: GhRequiredCheck[]): RequiredC
 
     switch (bucket) {
       case 'PASS':
-      case 'SKIPPING':
         passed += 1;
+        total += 1;
         break;
       case 'FAIL':
       case 'CANCEL':
         failed += 1;
+        total += 1;
         failingCheckName ??= checkLabel(check);
         break;
       case 'PENDING':
         pending += 1;
+        total += 1;
+        break;
+      case 'SKIPPING':
         break;
       default:
-        if (['SUCCESS', 'COMPLETED', 'SKIPPED'].includes(state)) {
+        if (['SUCCESS', 'COMPLETED'].includes(state)) {
           passed += 1;
+          total += 1;
         } else if (['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED'].includes(state)) {
           failed += 1;
+          total += 1;
           failingCheckName ??= checkLabel(check);
+        } else if (state === 'SKIPPED') {
+          break;
         } else {
           pending += 1;
+          total += 1;
         }
         break;
     }
   }
 
-  const total = checks.length;
   const ciState: CIState =
     failed > 0 ? 'failed' : pending > 0 ? 'pending' : total > 0 ? 'passed' : 'none';
 
@@ -358,7 +367,7 @@ export class GitHubService {
 
   private async loadPRInfo(repoPath: string, prNumber: number, githubRepo: string): Promise<PRInfo> {
     const snapshot = await this.getPRSnapshot(repoPath, prNumber, githubRepo);
-    const checks = await this.getRequiredChecks(repoPath, prNumber, githubRepo);
+    const checks = await this.getChecks(repoPath, prNumber, githubRepo);
 
     return {
       ...snapshot,
@@ -456,14 +465,14 @@ export class GitHubService {
     };
   }
 
-  async getRequiredChecks(
+  async getChecks(
     repoPath: string,
     prNumber: number,
     githubRepo: string,
   ): Promise<RequiredCheckSummary> {
     try {
       const raw = await this.ghAsync(
-        ['pr', 'checks', String(prNumber), '--repo', githubRepo, '--required', '--json', 'bucket,name,state,workflow'],
+        ['pr', 'checks', String(prNumber), '--repo', githubRepo, '--json', 'bucket,name,state,workflow'],
         repoPath,
         [8],
       );
@@ -478,7 +487,7 @@ export class GitHubService {
         };
       }
 
-      return deriveRequiredCheckSummary(JSON.parse(raw) as GhRequiredCheck[]);
+      return deriveCheckSummary(JSON.parse(raw) as GhPRCheck[]);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.toLowerCase().includes('no checks')) {
