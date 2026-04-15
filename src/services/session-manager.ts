@@ -13,7 +13,13 @@ import type { TerminalBufferService } from './terminal-buffer.js';
 import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
 import type { WorktreeService } from './worktree.js';
-import { hasMeaningfulTerminalOutput, inspectSessionActivity } from './session-activity.js';
+import {
+  deriveFallbackSessionActivity,
+  deriveSessionActivity,
+  hasMeaningfulTerminalOutput,
+  loadProcessTable,
+  type ProcessRow,
+} from './session-activity.js';
 
 // --------------- DB row shape --------------------------------
 
@@ -52,6 +58,8 @@ export interface InspectSessionStateResult {
   attentionChanged: boolean;
 }
 
+const processTableCacheWindowMs = 250;
+
 // --------------- Helpers -------------------------------------
 
 function rowToRecord(row: SessionRow): SessionRecord {
@@ -80,6 +88,8 @@ export class SessionManager {
   private bufferPushQueued = new Set<string>();
   private lastOutputAtByTaskId = new Map<string, number>();
   private lastBusyByTaskId = new Map<string, boolean>();
+  private processTableCache?: { rows: ProcessRow[]; loadedAt: number };
+  private processTableLoadInFlight?: Promise<ProcessRow[] | null>;
 
   constructor(
     private db: Db,
@@ -134,6 +144,37 @@ export class SessionManager {
 
   private clearTaskAttention(taskId: string): boolean {
     return this.board.clearTaskSessionAttention?.(taskId) ?? false;
+  }
+
+  protected async loadProcessTableRows(): Promise<ProcessRow[] | null> {
+    return loadProcessTable();
+  }
+
+  private async getProcessTableRows(): Promise<ProcessRow[] | null> {
+    const now = Date.now();
+    if (
+      this.processTableCache &&
+      now - this.processTableCache.loadedAt <= processTableCacheWindowMs
+    ) {
+      return this.processTableCache.rows;
+    }
+
+    if (this.processTableLoadInFlight) {
+      return this.processTableLoadInFlight;
+    }
+
+    this.processTableLoadInFlight = this.loadProcessTableRows()
+      .then((rows) => {
+        if (rows) {
+          this.processTableCache = { rows, loadedAt: Date.now() };
+        }
+        return rows;
+      })
+      .finally(() => {
+        this.processTableLoadInFlight = undefined;
+      });
+
+    return this.processTableLoadInFlight;
   }
 
   private async scheduleBufferPush(taskId: string): Promise<void> {
@@ -419,7 +460,7 @@ export class SessionManager {
 
     let activity: import('../types/index.js').SessionActivitySnapshot | null;
     if (!session.backendSessionId) {
-      activity = inspectSessionActivity(taskId, session.id, session.status);
+      activity = deriveFallbackSessionActivity(taskId, session.id, session.status);
     } else {
       const backend = this.getBackend(session.backendType);
       const info = await backend.inspect(session.backendSessionId);
@@ -432,14 +473,35 @@ export class SessionManager {
           updatedAt: Date.now(),
         };
       } else {
-        activity = inspectSessionActivity(
-          taskId,
-          session.id,
-          info.status,
-          info.shellPid,
-          this.lastOutputAtByTaskId.get(taskId),
-          info.currentCommand,
-        );
+        const lastOutputAt = this.lastOutputAtByTaskId.get(taskId);
+        if (info.status !== 'active' || info.shellPid === undefined || info.shellPid <= 0) {
+          activity = deriveFallbackSessionActivity(
+            taskId,
+            session.id,
+            info.status,
+            lastOutputAt,
+            info.currentCommand,
+          );
+        } else {
+          const processRows = await this.getProcessTableRows();
+          activity = processRows
+            ? deriveSessionActivity(
+                taskId,
+                session.id,
+                info.status,
+                processRows,
+                info.shellPid,
+                lastOutputAt,
+                info.currentCommand,
+              )
+            : deriveFallbackSessionActivity(
+                taskId,
+                session.id,
+                info.status,
+                lastOutputAt,
+                info.currentCommand,
+              );
+        }
       }
     }
 
