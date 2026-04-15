@@ -2,27 +2,47 @@ import { describe, expect, it } from 'vitest';
 import { buildNewSessionBootstrapCommand } from '../src/services/session-bootstrap.js';
 
 describe('buildNewSessionBootstrapCommand', () => {
-  it('checks out the base branch, pulls, switches to the task branch, clears, then launches claude', () => {
-    expect(buildNewSessionBootstrapCommand('/repo', 'ab/task-1234')).toBe(
-      'git -C "/repo" checkout "main" && ' +
-        'git -C "/repo" pull && ' +
-        '(git -C "/repo" checkout "ab/task-1234" 2>/dev/null || ' +
-        'git -C "/repo" checkout -b "ab/task-1234") && ' +
-        'clear && ' +
-        'claude',
+  it('runs the configured bootstrap script with claude task context', () => {
+    expect(
+      buildNewSessionBootstrapCommand({
+        repoPath: '/repo',
+        branch: 'ab/task-1234',
+        agentCli: 'claude',
+        sessionBootstrapScript: '/scripts/session-bootstrap.sh',
+      }),
+    ).toBe(
+      'AGENTBOARD_REPO_PATH="/repo" ' +
+        'AGENTBOARD_TASK_BRANCH="ab/task-1234" ' +
+        'AGENTBOARD_BASE_BRANCH="main" ' +
+        'AGENTBOARD_SESSION_CWD="/repo" ' +
+        'AGENTBOARD_AGENT="claude" ' +
+        'AGENTBOARD_USES_WORKTREE="0" ' +
+        'AGENTBOARD_BOOTSTRAP_NOTICE="" ' +
+        '"/scripts/session-bootstrap.sh"',
     );
   });
 
-  it('prints the setup failure and leaves the shell in the requested cwd for manual recovery', () => {
+  it('passes codex agent selection and bootstrap notice through to the script', () => {
     expect(
-      buildNewSessionBootstrapCommand(
-        '/repo',
-        'ab/task-1234',
-        'main',
-        false,
-        '/repo',
-        'Git command failed: git worktree add',
-      ),
-    ).toBe(`printf '%b\\n\\n' "Git command failed: git worktree add" && cd "/repo"`);
+      buildNewSessionBootstrapCommand({
+        repoPath: '/repo',
+        branch: 'ab/task-1234',
+        baseBranch: 'master',
+        agentCli: 'codex',
+        usesWorktree: true,
+        cwd: '/repo/worktree',
+        bootstrapNotice: 'Git command failed: git worktree add',
+        sessionBootstrapScript: '/scripts/session-bootstrap.sh',
+      }),
+    ).toBe(
+      'AGENTBOARD_REPO_PATH="/repo" ' +
+        'AGENTBOARD_TASK_BRANCH="ab/task-1234" ' +
+        'AGENTBOARD_BASE_BRANCH="master" ' +
+        'AGENTBOARD_SESSION_CWD="/repo/worktree" ' +
+        'AGENTBOARD_AGENT="codex" ' +
+        'AGENTBOARD_USES_WORKTREE="1" ' +
+        'AGENTBOARD_BOOTSTRAP_NOTICE="Git command failed: git worktree add" ' +
+        '"/scripts/session-bootstrap.sh"',
+    );
   });
 });

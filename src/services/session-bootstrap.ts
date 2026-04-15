@@ -1,35 +1,42 @@
-export function buildNewSessionBootstrapCommand(
-  repoPath: string,
-  branch: string,
+import type { AgentCLI } from '../types/index.js';
+
+export interface SessionBootstrapCommandOptions {
+  repoPath: string;
+  branch: string;
+  baseBranch?: string;
+  agentCli: AgentCLI;
+  usesWorktree?: boolean;
+  cwd?: string;
+  bootstrapNotice?: string;
+  sessionBootstrapScript: string;
+}
+
+function shellString(value: string): string {
+  return JSON.stringify(value);
+}
+
+export function buildNewSessionBootstrapCommand({
+  repoPath,
+  branch,
   baseBranch = 'main',
+  agentCli,
   usesWorktree = false,
-  cwd?: string,
-  bootstrapNotice?: string,
-): string {
-  const quotedRepoPath = JSON.stringify(repoPath);
-  const quotedBranch = JSON.stringify(branch);
-  const quotedBaseBranch = JSON.stringify(baseBranch);
-  const changeDirCmd = cwd ? `cd ${JSON.stringify(cwd)}` : '';
-  const cdPrefix = changeDirCmd ? `${changeDirCmd} && ` : '';
+  cwd,
+  bootstrapNotice,
+  sessionBootstrapScript,
+}: SessionBootstrapCommandOptions): string {
+  const envVars: Array<[string, string]> = [
+    ['AGENTBOARD_REPO_PATH', repoPath],
+    ['AGENTBOARD_TASK_BRANCH', branch],
+    ['AGENTBOARD_BASE_BRANCH', baseBranch],
+    ['AGENTBOARD_SESSION_CWD', cwd ?? repoPath],
+    ['AGENTBOARD_AGENT', agentCli],
+    ['AGENTBOARD_USES_WORKTREE', usesWorktree ? '1' : '0'],
+    ['AGENTBOARD_BOOTSTRAP_NOTICE', bootstrapNotice ?? ''],
+  ];
 
-  if (bootstrapNotice) {
-    const noticeCmd = `printf '%b\\n\\n' ${JSON.stringify(bootstrapNotice)}`;
-    return changeDirCmd ? `${noticeCmd} && ${changeDirCmd}` : noticeCmd;
-  }
-
-  if (usesWorktree) {
-    return `${cdPrefix}clear && claude`;
-  }
-
-  return (
-    `git -C ${quotedRepoPath} checkout ${quotedBaseBranch} && ` +
-    `git -C ${quotedRepoPath} pull && ` +
-    `(` +
-    `git -C ${quotedRepoPath} checkout ${quotedBranch} 2>/dev/null || ` +
-    `git -C ${quotedRepoPath} checkout -b ${quotedBranch}` +
-    `) && ` +
-    cdPrefix +
-    `clear && ` +
-    `claude`
-  );
+  return [
+    ...envVars.map(([key, value]) => `${key}=${shellString(value)}`),
+    shellString(sessionBootstrapScript),
+  ].join(' ');
 }

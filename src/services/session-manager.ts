@@ -42,6 +42,7 @@ interface TaskRow {
   id: string;
   title: string;
   repo_id: string;
+  agent_cli: 'claude' | 'codex' | null;
   branch_name: string | null;
   worktree_path: string | null;
   session_id: string | null;
@@ -107,6 +108,7 @@ export class SessionManager {
     private worktrees: WorktreeService,
     private buffers: TerminalBufferService,
     private onBufferUpdate?: (taskId: string, buffer: GetBufferResult) => void,
+    private sessionBootstrapScript = '',
   ) {
     this.buffers.subscribeAll((taskId, buffer) => {
       this.onBufferUpdate?.(taskId, buffer);
@@ -276,7 +278,7 @@ export class SessionManager {
     // 1. Load task
     const taskRow = this.db
       .prepare<[string], TaskRow>(
-        'SELECT id, title, repo_id, branch_name, worktree_path, session_id FROM tasks WHERE id = ?',
+        'SELECT id, title, repo_id, agent_cli, branch_name, worktree_path, session_id FROM tasks WHERE id = ?',
       )
       .get(taskId);
 
@@ -379,10 +381,12 @@ export class SessionManager {
       taskTitle: taskRow.title,
       repoPath: repoRow.path,
       branch,
+      agentCli: taskRow.agent_cli ?? 'claude',
       cwd: workspace.path,
       baseBranch: repoRow.default_base_branch ?? 'main',
       usesWorktree: workspace.usedWorktree,
       bootstrapNotice: workspace.bootstrapNotice,
+      sessionBootstrapScript: this.sessionBootstrapScript,
     });
 
     // 6. Persist to DB

@@ -13,6 +13,7 @@ type PreferredIDE string
 type GitState string
 type TerminalLayoutMode string
 type SessionActivityKind string
+type AgentCLI string
 
 type AppFocus string
 type ModalType string
@@ -83,6 +84,7 @@ type TaskRecord struct {
 	Title                     string           `json:"title"`
 	Description               string           `json:"description"`
 	RepoID                    string           `json:"repoId"`
+	AgentCLI                  AgentCLI         `json:"agentCli"`
 	TrackID                   string           `json:"trackId"`
 	PillarID                  string           `json:"pillarId"`
 	Labels                    []string         `json:"labels"`

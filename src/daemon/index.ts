@@ -255,6 +255,14 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const { WorktreeService } = await import('../services/worktree.js');
   const { TaskLifecycleService } = await import('../services/task-lifecycle.js');
   const { serverEvents, startServer } = await import('./server.js');
+  const { loadConfig, defaultConfig } = await import('../config/index.js');
+
+  let cfg = defaultConfig();
+  try {
+    cfg = loadConfig();
+  } catch {
+    // Fall back to defaults when config loading fails.
+  }
 
   const board = new BoardService(db);
   const workspace = new WorkspaceService(db);
@@ -270,15 +278,13 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
       type: 'session_update',
       payload: { taskId, ...buffer },
     });
-  });
+  }, cfg.sessionBootstrapScript);
   const taskLifecycle = new TaskLifecycleService(db, board, git, session);
   const sync = new SyncService(board, github, git, db);
 
   // ---- Load config and seed tracks + poll interval -----------
-  const { loadConfig } = await import('../config/index.js');
   let pollIntervalMs = 60000;
   try {
-    const cfg = loadConfig();
     pollIntervalMs = Math.min(Math.max(cfg.pollIntervalMs, 10_000), 60_000);
     for (const t of normalizeBoardTracks(cfg.tracks)) {
       board.upsertTrack(t.id, t.label, t.sortOrder);

@@ -15,6 +15,7 @@ const (
 	createTaskTitleLine  createTaskLine = "title"
 	createTaskRepoLine   createTaskLine = "repo"
 	createTaskPillarLine createTaskLine = "pillar"
+	createTaskAgentLine  createTaskLine = "agent"
 
 	filterRepoColumn   filterColumn = "repo"
 	filterPillarColumn filterColumn = "pillar"
@@ -24,6 +25,7 @@ type createTaskModalState struct {
 	Value       string
 	RepoIndex   int
 	PillarIndex int
+	AgentIndex  int
 	ActiveLine  createTaskLine
 }
 
@@ -83,9 +85,23 @@ type createTaskPillarOption struct {
 	Label string
 }
 
+type createTaskAgentOption struct {
+	Value AgentCLI
+	Label string
+}
+
 type filterOption struct {
 	ID    string
 	Label string
+}
+
+var createTaskAgentOptions = []createTaskAgentOption{
+	{Value: AgentCLI("claude"), Label: "Claude"},
+	{Value: AgentCLI("codex"), Label: "Codex"},
+}
+
+func createTaskAgentOptionAt(index int) createTaskAgentOption {
+	return createTaskAgentOptions[clamp(index, 0, len(createTaskAgentOptions)-1)]
 }
 
 func (m *Model) closeModal() {
@@ -141,6 +157,7 @@ func (m *Model) openCreateTaskModal() {
 	m.createTaskModal = &createTaskModalState{
 		RepoIndex:   initialRepoIndex,
 		PillarIndex: initialPillarIndex,
+		AgentIndex:  0,
 		ActiveLine:  createTaskTitleLine,
 	}
 }
@@ -370,6 +387,7 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 		if len(options) > 0 {
 			pillarID = options[clamp(state.PillarIndex, 0, len(options)-1)].ID
 		}
+		agentCLI := string(createTaskAgentOptionAt(state.AgentIndex).Value)
 		if repoID == "" {
 			m.statusMessage = "Add a repo before creating tasks."
 			return nil
@@ -380,9 +398,11 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 			m.selectedTrackIndex = backlogIndex
 			m.selectedTaskIndex = 0
 		}
-		return m.createTaskCmd(title, repoID, pillarID)
+		return m.createTaskCmd(title, repoID, pillarID, agentCLI)
 	case tea.KeyUp:
 		switch state.ActiveLine {
+		case createTaskAgentLine:
+			state.ActiveLine = createTaskPillarLine
 		case createTaskPillarLine:
 			state.ActiveLine = createTaskRepoLine
 		case createTaskRepoLine:
@@ -395,6 +415,8 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 			state.ActiveLine = createTaskRepoLine
 		case createTaskRepoLine:
 			state.ActiveLine = createTaskPillarLine
+		case createTaskPillarLine:
+			state.ActiveLine = createTaskAgentLine
 		}
 		return nil
 	case tea.KeyLeft:
@@ -408,6 +430,10 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 			if len(options) > 1 {
 				state.PillarIndex = wrapIndex(state.PillarIndex, len(options), -1)
 			}
+		case createTaskAgentLine:
+			if len(createTaskAgentOptions) > 1 {
+				state.AgentIndex = wrapIndex(state.AgentIndex, len(createTaskAgentOptions), -1)
+			}
 		}
 		return nil
 	case tea.KeyRight:
@@ -420,6 +446,10 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 			options := m.createTaskPillarOptions()
 			if len(options) > 1 {
 				state.PillarIndex = wrapIndex(state.PillarIndex, len(options), 1)
+			}
+		case createTaskAgentLine:
+			if len(createTaskAgentOptions) > 1 {
+				state.AgentIndex = wrapIndex(state.AgentIndex, len(createTaskAgentOptions), 1)
 			}
 		}
 		return nil
@@ -1010,10 +1040,11 @@ func (m *Model) filteredCommandPaletteCommands(query string) []CommandPaletteIte
 	return filtered
 }
 
-func (m *Model) createTaskCmd(title, repoID, pillarID string) tea.Cmd {
+func (m *Model) createTaskCmd(title, repoID, pillarID, agentCLI string) tea.Cmd {
 	params := map[string]interface{}{
-		"title":  title,
-		"repoId": repoID,
+		"title":    title,
+		"repoId":   repoID,
+		"agentCli": agentCLI,
 	}
 	if pillarID != "" {
 		params["pillarId"] = pillarID

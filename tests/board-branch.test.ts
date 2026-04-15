@@ -31,6 +31,13 @@ describe('BoardService branch persistence', () => {
     const task = board.createTask({ title: 'Friday thing', repoId: 'repo-1' });
 
     expect(task.trackId).toBe('backlog');
+    expect(task.agentCli).toBe('claude');
+  });
+
+  it('persists an explicit agent selection', () => {
+    const task = board.createTask({ title: 'Friday thing', repoId: 'repo-1', agentCli: 'codex' });
+
+    expect(task.agentCli).toBe('codex');
   });
 
   it('updates the stored branch slug when an unstarted task is renamed', () => {
