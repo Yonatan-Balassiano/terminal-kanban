@@ -563,7 +563,7 @@ func renderHelpModal() string {
 	sections := [][]string{
 		{"Navigation", "hjkl / arrow keys move between columns and tasks", ": or Ctrl+P opens the command palette", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete, a archive", "p assign pillar, P create pillar, D delete pillar and its tasks", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
-		{"GitHub", "c create PR, o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
+		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
 		{"Terminal", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
 	}
@@ -1194,7 +1194,7 @@ func headerText(icon, value, color string) string {
 func kbdHints(focus AppFocus) string {
 	switch focus {
 	case FocusBoard:
-		return "move  : commands  Enter shell  n new  f filters  s sync  ? help"
+		return "move  : commands  Enter shell  c PR  C retry PR  m merge  n new  f filters  s sync  ? help"
 	case FocusTerminal:
 		return "Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
 	case FocusModal:

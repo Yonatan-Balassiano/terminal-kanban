@@ -268,7 +268,7 @@ describe('SyncService', () => {
     });
   });
 
-  it('moves backlog to in-progress when the remote branch exists even if PR creation fails', async () => {
+  it('does not move backlog to in-progress when PR creation fails before a PR is confirmed', async () => {
     const board = {
       getTasks: vi.fn().mockReturnValue([makeTask()]),
       updateTaskSync: vi.fn(),
@@ -302,12 +302,9 @@ describe('SyncService', () => {
 
     const result = await sync.trigger();
 
-    expect(board.moveTask).toHaveBeenCalledWith({
-      id: 'task-1',
-      trackId: 'in-progress',
-    });
+    expect(board.moveTask).not.toHaveBeenCalled();
     expect(board.updateTaskSync).not.toHaveBeenCalled();
-    expect(result.tasksUpdated).toBe(1);
+    expect(result.tasksUpdated).toBe(0);
     expect(result.errors).toEqual(['Task task-1: gh pr create failed']);
   });
 
@@ -412,5 +409,71 @@ describe('SyncService', () => {
       id: 'task-1',
       trackId: 'in-progress',
     });
+  });
+
+  it('waits for a confirmed PR before moving backlog during the post-push retry loop', async () => {
+    let task = makeTask();
+    const board = {
+      getTask: vi.fn().mockImplementation(() => task),
+      updateTaskSync: vi.fn().mockImplementation((_id: string, patch: Partial<TaskRecord>) => {
+        task = { ...task, ...patch };
+      }),
+      moveTask: vi.fn().mockImplementation(({ trackId }: { trackId: string }) => {
+        task = { ...task, trackId };
+      }),
+    };
+    const prInfo = makePrInfo();
+    const github = {
+      getPR: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(prInfo),
+      createPR: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('PR created for branch ab/task-1, but could not read it back')
+        ),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+      }),
+    };
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never, wait);
+
+    expect(sync.schedulePostPushSync('task-1')).toEqual({ scheduled: true });
+
+    await waitForAssertion(() => {
+      expect(board.updateTaskSync).toHaveBeenCalledWith(
+        'task-1',
+        expect.objectContaining({
+          prNumber: 42,
+          prState: 'open',
+          prUrl: 'https://example.test/pr/42',
+        })
+      );
+      expect(board.moveTask).toHaveBeenCalledWith({
+        id: 'task-1',
+        trackId: 'in-progress',
+      });
+      expect(task.prNumber).toBe(42);
+      expect(task.prState).toBe('open');
+      expect(task.trackId).toBe('in-progress');
+    });
+
+    expect(github.createPR).toHaveBeenCalledTimes(1);
+    expect(github.getPR).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalled();
   });
 });

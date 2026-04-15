@@ -906,7 +906,13 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "create-pr":
 		m.closeModal()
 		if contextTask != nil {
-			return m.boardActionCmd("createTaskPR", map[string]string{"taskId": contextTask.ID}, fmt.Sprintf("Ensured PR for task %s", contextTask.ID))
+			return m.createTaskPRCmd(contextTask)
+		}
+		return nil
+	case "retry-pushed-pr-creation":
+		m.closeModal()
+		if contextTask != nil {
+			return m.retryPushedBranchPRCreationCmd(contextTask)
 		}
 		return nil
 	case "open-pr":
@@ -924,11 +930,7 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "merge-pr":
 		m.closeModal()
 		if contextTask != nil {
-			if blocker := getMergeBlockerReason(*contextTask); blocker != "" {
-				m.statusMessage = blocker
-				return nil
-			}
-			return m.boardActionCmd("mergeTaskPR", map[string]string{"taskId": contextTask.ID}, fmt.Sprintf("Merged PR #%d", derefInt(contextTask.PRNumber)))
+			return m.mergeTaskPRCmd(contextTask)
 		}
 		return nil
 	case "filters":
@@ -982,7 +984,8 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "fullscreen-terminal", Title: "Expand terminal workspace", Section: "Session", Detail: "Make the terminal take over the workspace.", Shortcut: "z", Keywords: []string{"terminal", "fullscreen", "expand"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before expanding the terminal."},
 		{ID: "open-ide", Title: "Open workspace in IDE", Section: "Workspace", Detail: "Open the current task workspace in the configured IDE.", Shortcut: "i", Keywords: []string{"editor", "workspace"}, Disabled: contextTask == nil, DisabledReason: "Select a task to open its workspace."},
 		{ID: "open-workspace", Title: "Reveal workspace", Section: "Workspace", Detail: "Open the current task workspace in Finder or Explorer.", Shortcut: "x", Keywords: []string{"finder", "explorer", "folder"}, Disabled: contextTask == nil, DisabledReason: "Select a task to reveal its workspace."},
-		{ID: "create-pr", Title: "Create or ensure pull request", Section: "GitHub", Detail: "Create the PR flow for the current task branch.", Shortcut: "c", Keywords: []string{"github", "pull request"}, Disabled: contextTask == nil, DisabledReason: "Select a task to create a pull request."},
+		{ID: "create-pr", Title: "Create or ensure pull request", Section: "GitHub", Detail: "Create the PR immediately for the current task branch.", Shortcut: "c", Keywords: []string{"github", "pull request"}, Disabled: contextTask == nil, DisabledReason: "Select a task to create a pull request."},
+		{ID: "retry-pushed-pr-creation", Title: "Retry pushed-branch PR creation", Section: "GitHub", Detail: "Restart the background PR creation watcher after a branch push.", Shortcut: "C", Keywords: []string{"github", "pull request", "push", "retry"}, Disabled: contextTask == nil || contextTask.BranchName == "", DisabledReason: "Select a task with a branch to watch for PR creation."},
 		{ID: "open-pr", Title: "Open pull request", Section: "GitHub", Detail: "Open the current task PR in the browser.", Shortcut: "o", Keywords: []string{"github", "browser", "pr"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: "The current task does not have an open pull request."},
 		{ID: "open-checks", Title: "Open pull request checks", Section: "GitHub", Detail: "Open CI checks for the current task PR.", Shortcut: "v", Keywords: []string{"github", "checks", "ci"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: "The current task does not have an open pull request."},
 		{ID: "merge-pr", Title: "Merge pull request", Section: "GitHub", Detail: "Squash merge the current task PR when it is ready.", Shortcut: "m", Keywords: []string{"github", "merge"}, Disabled: contextTask == nil || !canMergeTask(*contextTask), DisabledReason: "Open PR, approved review, and passing build are required."},

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -180,6 +181,65 @@ func TestGitHubStatusBadgeModelDraftPending(t *testing.T) {
 	}
 }
 
+func TestCreateTaskPRCmdSetsProgressMessage(t *testing.T) {
+	model := &Model{}
+
+	cmd := model.createTaskPRCmd(&TaskRecord{ID: "task-1"})
+
+	if cmd == nil {
+		t.Fatal("createTaskPRCmd() = nil, want command")
+	}
+	if model.statusMessage != "PR creation in progress..." {
+		t.Fatalf("statusMessage = %q, want PR creation in progress...", model.statusMessage)
+	}
+}
+
+func TestRetryPushedBranchPRCreationCmdRequiresBranch(t *testing.T) {
+	model := &Model{}
+
+	cmd := model.retryPushedBranchPRCreationCmd(&TaskRecord{ID: "task-1"})
+
+	if cmd != nil {
+		t.Fatal("retryPushedBranchPRCreationCmd() returned command without a branch")
+	}
+	if model.statusMessage != "Selected task has no branch to watch for PR creation." {
+		t.Fatalf("statusMessage = %q", model.statusMessage)
+	}
+}
+
+func TestRetryPushedBranchPRCreationCmdSetsProgressMessage(t *testing.T) {
+	model := &Model{}
+
+	cmd := model.retryPushedBranchPRCreationCmd(&TaskRecord{ID: "task-1", BranchName: "feature/task-1"})
+
+	if cmd == nil {
+		t.Fatal("retryPushedBranchPRCreationCmd() = nil, want command")
+	}
+	if model.statusMessage != "PR creation in progress..." {
+		t.Fatalf("statusMessage = %q, want PR creation in progress...", model.statusMessage)
+	}
+}
+
+func TestMergeTaskPRCmdSetsProgressMessage(t *testing.T) {
+	model := &Model{}
+	prNumber := 24
+
+	cmd := model.mergeTaskPRCmd(&TaskRecord{
+		ID:          "task-1",
+		PRNumber:    &prNumber,
+		PRState:     "open",
+		CIState:     "passed",
+		ReviewState: "approved",
+	})
+
+	if cmd == nil {
+		t.Fatal("mergeTaskPRCmd() = nil, want command")
+	}
+	if model.statusMessage != "Merge in progress..." {
+		t.Fatalf("statusMessage = %q, want Merge in progress...", model.statusMessage)
+	}
+}
+
 func TestTaskCardBorderColorTreatsChangesRequestedAsRed(t *testing.T) {
 	color := taskCardBorderColor(TaskRecord{
 		PRState:     "open",
@@ -227,6 +287,17 @@ func TestTaskCardBorderColorUsesAccentForSelectedNeutralCard(t *testing.T) {
 
 	if color != uiChrome.Accent {
 		t.Fatalf("taskCardBorderColor() = %q, want %q", color, uiChrome.Accent)
+	}
+}
+
+func TestBoardKeyboardHintsIncludeManualPRRetry(t *testing.T) {
+	hints := kbdHints(FocusBoard)
+
+	if !strings.Contains(hints, "c PR") {
+		t.Fatalf("kbdHints(FocusBoard) = %q, want create PR hint", hints)
+	}
+	if !strings.Contains(hints, "C retry PR") {
+		t.Fatalf("kbdHints(FocusBoard) = %q, want retry PR hint", hints)
 	}
 }
 
