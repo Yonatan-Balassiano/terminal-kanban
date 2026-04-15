@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatch, serverEvents } from '../src/daemon/server.js';
-import type { TaskRecord } from '../src/types/index.js';
+import type { RepoRecord, TaskRecord } from '../src/types/index.js';
 
 function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
   return {
@@ -23,6 +23,20 @@ function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
     sessionAttentionNeeded: false,
     reviewState: 'approved',
     unresolvedThreadCount: 0,
+    createdAt: 1,
+    updatedAt: 1,
+    ...patch,
+  };
+}
+
+function makeRepo(patch: Partial<RepoRecord> = {}): RepoRecord {
+  return {
+    id: 'repo-1',
+    label: 'Repo',
+    path: '/repo',
+    defaultBaseBranch: 'main',
+    worktreeMode: 'auto',
+    health: 'ok',
     createdAt: 1,
     updatedAt: 1,
     ...patch,
@@ -124,6 +138,82 @@ describe('daemon schedulePostPushSync dispatch', () => {
     expect(response).toEqual({
       id: 'req-2',
       result: { scheduled: true },
+    });
+  });
+});
+
+describe('daemon updateRepo dispatch', () => {
+  it('updates the repo and emits a board patch', async () => {
+    const repo = makeRepo({ defaultBaseBranch: 'master' });
+    const updateRepo = vi.fn().mockReturnValue(repo);
+    const getBoardSnapshot = vi.fn().mockReturnValue({ repos: [repo] });
+
+    const boardPatchEvent = new Promise<unknown>((resolve) => {
+      serverEvents.once('event', resolve);
+    });
+
+    const response = await dispatch(
+      {
+        id: 'req-3',
+        method: 'updateRepo',
+        params: {
+          id: 'repo-1',
+          defaultBaseBranch: 'master',
+        },
+      },
+      {
+        workspace: { updateRepo },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock'
+    );
+
+    expect(updateRepo).toHaveBeenCalledWith('repo-1', {
+      defaultBaseBranch: 'master',
+    });
+    expect(response).toEqual({
+      id: 'req-3',
+      result: repo,
+    });
+    await expect(boardPatchEvent).resolves.toEqual({
+      type: 'board_patch',
+      payload: { repos: [repo] },
+    });
+  });
+});
+
+describe('daemon acknowledgeSessionAttention dispatch', () => {
+  it('clears session attention and emits a board patch', async () => {
+    const acknowledgeSessionAttention = vi.fn().mockReturnValue(true);
+    const getBoardSnapshot = vi.fn().mockReturnValue({
+      tasks: [{ id: 'task-1', sessionAttentionNeeded: false }],
+    });
+
+    const boardPatchEvent = new Promise<unknown>((resolve) => {
+      serverEvents.once('event', resolve);
+    });
+
+    const response = await dispatch(
+      {
+        id: 'req-4',
+        method: 'acknowledgeSessionAttention',
+        params: { taskId: 'task-1' },
+      },
+      {
+        session: { acknowledgeSessionAttention },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock'
+    );
+
+    expect(acknowledgeSessionAttention).toHaveBeenCalledWith('task-1');
+    expect(response).toEqual({
+      id: 'req-4',
+      result: null,
+    });
+    await expect(boardPatchEvent).resolves.toEqual({
+      type: 'board_patch',
+      payload: { tasks: [{ id: 'task-1', sessionAttentionNeeded: false }] },
     });
   });
 });

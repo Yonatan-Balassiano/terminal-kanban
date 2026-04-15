@@ -430,6 +430,12 @@ Example:
 }
 ```
 
+To change the stored default base branch for an already-registered repo:
+
+```bash
+agentboard repos set-default-base-branch <repo-id> <branch>
+```
+
 ## Development
 
 ### Local dev loop

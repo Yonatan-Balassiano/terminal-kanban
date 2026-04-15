@@ -133,8 +133,8 @@ func TestSessionBadgeModelUsesAttentionState(t *testing.T) {
 	if label != "attention" {
 		t.Fatalf("sessionBadgeModel() label = %q, want attention", label)
 	}
-	if tone != "danger" {
-		t.Fatalf("sessionBadgeModel() tone = %q, want danger", tone)
+	if tone != "info" {
+		t.Fatalf("sessionBadgeModel() tone = %q, want info", tone)
 	}
 	if spinning {
 		t.Fatal("sessionBadgeModel() spinning = true, want false")
@@ -339,13 +339,16 @@ func TestTaskCardBorderColorTreatsChangesRequestedAsRed(t *testing.T) {
 	}
 }
 
-func TestTaskCardBorderColorUsesDangerForAttention(t *testing.T) {
-	color := taskCardBorderColor(TaskRecord{
+func TestTaskCardBorderColorUsesBlueForAttention(t *testing.T) {
+	if color := taskCardBorderColor(TaskRecord{
 		SessionAttentionNeeded: true,
-	}, false)
-
-	if color != "#ef4444" {
-		t.Fatalf("taskCardBorderColor() = %q, want #ef4444", color)
+	}, false); color != "#3b82f6" {
+		t.Fatalf("taskCardBorderColor() = %q, want #3b82f6", color)
+	}
+	if color := taskCardBorderColor(TaskRecord{
+		SessionAttentionNeeded: true,
+	}, true); color != uiChrome.Blue {
+		t.Fatalf("taskCardBorderColor() = %q, want %q", color, uiChrome.Blue)
 	}
 }
 

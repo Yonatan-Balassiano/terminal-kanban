@@ -25,11 +25,13 @@ import type {
   SetLabelsParams,
   MergeTaskPRParams,
   AddRepoParams,
+  UpdateRepoParams,
   CreateSavedViewParams,
   SavedViewRecord,
   FilterModel,
   ResizeSessionParams,
   InspectSessionParams,
+  AcknowledgeSessionAttentionParams,
   PrepareTaskWorkspaceParams,
   CreateTaskPRParams,
   SchedulePostPushSyncParams,
@@ -225,6 +227,16 @@ export async function dispatch(
         return { id: req.id, result: repo };
       }
 
+      case 'updateRepo': {
+        const { id, ...patch } = p as unknown as UpdateRepoParams;
+        const repo = services.workspace.updateRepo(id, patch);
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        return { id: req.id, result: repo };
+      }
+
       case 'listRepos': {
         const repos = services.workspace.listRepos();
         return { id: req.id, result: repos };
@@ -276,6 +288,19 @@ export async function dispatch(
           payload: services.view.getBoardSnapshot(),
         });
         return { id: req.id, result: session };
+      }
+
+      case 'acknowledgeSessionAttention': {
+        const attentionChanged = services.session.acknowledgeSessionAttention(
+          (p as unknown as AcknowledgeSessionAttentionParams).taskId
+        );
+        if (attentionChanged) {
+          serverEvents.emit('event', {
+            type: 'board_patch',
+            payload: services.view.getBoardSnapshot(),
+          });
+        }
+        return { id: req.id, result: null };
       }
 
       case 'sendInput': {

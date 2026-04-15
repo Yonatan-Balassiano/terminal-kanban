@@ -878,19 +878,14 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 			m.statusMessage = "Open a task shell before focusing the terminal pane."
 			return nil
 		}
-		m.terminalPaneVisible = true
-		m.focus = FocusTerminal
-		return m.resizeActiveSessionCmd()
+		return m.focusActiveTerminalCmd(false)
 	case "fullscreen-terminal":
 		m.closeModal()
 		if m.activeTaskID == "" {
 			m.statusMessage = "Open a task shell before expanding the terminal."
 			return nil
 		}
-		m.terminalPaneVisible = true
-		m.terminalFullscreen = true
-		m.focus = FocusTerminal
-		return m.resizeActiveSessionCmd()
+		return m.focusActiveTerminalCmd(true)
 	case "open-ide":
 		m.closeModal()
 		if contextTask != nil {

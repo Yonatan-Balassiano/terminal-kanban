@@ -96,8 +96,8 @@ function printRepoTable(repos: RepoRecord[]): void {
     console.log('No repos registered.');
     return;
   }
-  const header = ['ID', 'Label', 'Path', 'Health'];
-  const rows = repos.map((r) => [r.id, r.label, r.path, r.health]);
+  const header = ['ID', 'Label', 'Path', 'Base', 'Health'];
+  const rows = repos.map((r) => [r.id, r.label, r.path, r.defaultBaseBranch, r.health]);
   const widths = header.map((h, i) =>
     Math.max(h.length, ...rows.map((r) => String(r[i]).length)),
   );
@@ -338,6 +338,26 @@ export function buildCli(): Command {
         } else {
           printRepoTable(repoList);
         }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  repos
+    .command('set-default-base-branch <id> <branch>')
+    .description("Update a repository's default base branch")
+    .action(async (id: string, branch: string) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const repo = await rpc.call<RepoRecord>('updateRepo', {
+          id,
+          defaultBaseBranch: branch,
+        });
+        rpc.disconnect();
+        console.log(JSON.stringify(repo, null, 2));
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);
         process.exit(1);

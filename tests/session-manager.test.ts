@@ -589,6 +589,55 @@ describe('SessionManager branch fallback', () => {
     expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(false);
   });
 
+  it('clears attention when a session is acknowledged without sending input', () => {
+    const task = board.createTask({ title: 'Seen it', repoId: 'repo-1' });
+    board.setTaskSessionAttention(task.id);
+
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
+        throw new Error('should not create a new session');
+      }),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    const attentionChanged = manager.acknowledgeSessionAttention(task.id);
+
+    expect(attentionChanged).toBe(true);
+    expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(false);
+  });
+
   it('shares one async process-table load across concurrent session inspections', async () => {
     const first = board.createTask({ title: 'First session', repoId: 'repo-1' });
     const second = board.createTask({ title: 'Second session', repoId: 'repo-1' });
