@@ -101,7 +101,8 @@ function appendLog(logFile: string, message: string): void {
 const BOARD_TRACKS = [
   { id: 'backlog', label: 'Backlog', sortOrder: 0 },
   { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
-  { id: 'done', label: 'Done', sortOrder: 2 },
+  { id: 'pr', label: 'PR', sortOrder: 2 },
+  { id: 'done', label: 'Done', sortOrder: 3 },
 ] as const;
 
 function normalizeBoardTracks(
@@ -289,7 +290,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     .getTasks({ includeArchived: true })
     .filter((task) => task.trackId === 'review');
   for (const task of reviewTasks) {
-    board.moveTask({ id: task.id, trackId: 'in-progress' });
+    board.moveTask({ id: task.id, trackId: 'pr' });
   }
   board.deleteTrack('review');
   sync.start(pollIntervalMs);

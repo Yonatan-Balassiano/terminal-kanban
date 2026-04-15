@@ -6,11 +6,12 @@ describe('defaultConfig', () => {
     expect(defaultConfig().pollIntervalMs).toBe(60000);
   });
 
-  it('uses backlog, in-progress, and done as the default board tracks', () => {
+  it('uses backlog, in-progress, pr, and done as the default board tracks', () => {
     expect(defaultConfig().tracks).toEqual([
       { id: 'backlog', label: 'Backlog', sortOrder: 0 },
       { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
-      { id: 'done', label: 'Done', sortOrder: 2 },
+      { id: 'pr', label: 'PR', sortOrder: 2 },
+      { id: 'done', label: 'Done', sortOrder: 3 },
     ]);
   });
 });

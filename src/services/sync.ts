@@ -531,9 +531,14 @@ export class SyncService {
         this.clearDelayedRetry(taskId);
       }
 
-      if (prInfo && task.trackId === 'backlog' && (prInfo.prState === 'draft' || prInfo.prState === 'open')) {
-        this.board.moveTask({ id: task.id, trackId: 'in-progress' });
-        task.trackId = 'in-progress';
+      if (
+        prInfo &&
+        task.trackId !== 'pr' &&
+        task.trackId !== 'done' &&
+        (prInfo.prState === 'draft' || prInfo.prState === 'open')
+      ) {
+        this.board.moveTask({ id: task.id, trackId: 'pr' });
+        task.trackId = 'pr';
         result.tasksUpdated += 1;
       }
 

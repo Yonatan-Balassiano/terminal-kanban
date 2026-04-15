@@ -13,12 +13,13 @@ func TestBoardRenderWidthMatchesRenderedTrackColumns(t *testing.T) {
 		tracks: []TrackRecord{
 			{ID: "backlog", SortOrder: 1},
 			{ID: "in-progress", SortOrder: 2},
-			{ID: "done", SortOrder: 3},
+			{ID: "pr", SortOrder: 3},
+			{ID: "done", SortOrder: 4},
 		},
 	}
 
 	got := model.boardRenderWidth()
-	want := 3 * trackColumnRenderWidth
+	want := 4 * trackColumnRenderWidth
 	if got != want {
 		t.Fatalf("boardRenderWidth() = %d, want %d", got, want)
 	}
@@ -26,18 +27,19 @@ func TestBoardRenderWidthMatchesRenderedTrackColumns(t *testing.T) {
 
 func TestTerminalContentWidthUsesRenderedBoardWidth(t *testing.T) {
 	model := &Model{
-		width:               125,
+		width:               180,
 		terminalPaneVisible: true,
 		activeTaskID:        "task-1",
 		tracks: []TrackRecord{
 			{ID: "backlog", SortOrder: 1},
 			{ID: "in-progress", SortOrder: 2},
-			{ID: "done", SortOrder: 3},
+			{ID: "pr", SortOrder: 3},
+			{ID: "done", SortOrder: 4},
 		},
 	}
 
 	got := model.terminalContentWidth()
-	want := 125 - (3 * trackColumnRenderWidth) - terminalDividerWidth
+	want := 180 - (4 * trackColumnRenderWidth) - terminalDividerWidth
 	if got != want {
 		t.Fatalf("terminalContentWidth() = %d, want %d", got, want)
 	}

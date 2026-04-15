@@ -10,7 +10,7 @@ AgentBoard gives you a local board for coding tasks and connects each task to a 
 
 Core ideas:
 
-- tasks live on a board (`Backlog`, `In Progress`, `Done`)
+- tasks live on a board (`Backlog`, `In Progress`, `PR`, `Done`)
 - each task belongs to a repo and can optionally belong to a pillar
 - opening a task opens a shell session for that task
 - same-repo tasks can use separate git worktrees
@@ -333,6 +333,7 @@ With `gh` configured, AgentBoard can:
 
 - detect existing PRs for task branches
 - create PRs
+- move tasks with open or draft PRs into the `PR` column automatically
 - retry post-push PR creation from the board with `C` if the automatic watcher misses a push
 - show PR number and URL
 - show build status
