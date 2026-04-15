@@ -123,6 +123,67 @@ func TestHeaderStatusModelUsesSpinnerForBusySession(t *testing.T) {
 	}
 }
 
+func TestSessionBadgeModelUsesAttentionState(t *testing.T) {
+	label, tone, spinning, icon := sessionBadgeModel(
+		TaskRecord{ID: "task-1", SessionID: "session-1", SessionAttentionNeeded: true},
+		nil,
+		true,
+	)
+
+	if label != "attention" {
+		t.Fatalf("sessionBadgeModel() label = %q, want attention", label)
+	}
+	if tone != "danger" {
+		t.Fatalf("sessionBadgeModel() tone = %q, want danger", tone)
+	}
+	if spinning {
+		t.Fatal("sessionBadgeModel() spinning = true, want false")
+	}
+	if icon != "!" {
+		t.Fatalf("sessionBadgeModel() icon = %q, want !", icon)
+	}
+}
+
+func TestRenderHeaderShowsAttentionCounter(t *testing.T) {
+	model := &Model{
+		width: 120,
+		tasks: []TaskRecord{
+			{ID: "task-1", SessionAttentionNeeded: true},
+			{ID: "task-2"},
+		},
+		daemonConnected: true,
+	}
+
+	plain := ansiPattern.ReplaceAllString(renderHeader(model), "")
+	if !strings.Contains(plain, "1 attention") {
+		t.Fatalf("renderHeader() = %q, want attention counter", plain)
+	}
+}
+
+func TestRenderStatusBarShowsAttentionBadge(t *testing.T) {
+	model := &Model{
+		width:              120,
+		focus:              FocusBoard,
+		selectedTrackIndex: 0,
+		selectedTaskIndex:  0,
+		tracks:             []TrackRecord{{ID: "in-progress", SortOrder: 1}},
+		tasks: []TaskRecord{
+			{
+				ID:                     "task-1",
+				TrackID:                "in-progress",
+				SortKey:                1,
+				Title:                  "Review output",
+				SessionAttentionNeeded: true,
+			},
+		},
+	}
+
+	plain := ansiPattern.ReplaceAllString(renderStatusBar(model), "")
+	if !strings.Contains(plain, "attention") {
+		t.Fatalf("renderStatusBar() = %q, want attention badge", plain)
+	}
+}
+
 func TestGitHubStatusBadgeModelBuildPassApproved(t *testing.T) {
 	prNumber := 39
 	badge := githubStatusBadgeModel(TaskRecord{
@@ -271,6 +332,16 @@ func TestTaskCardBorderColorTreatsChangesRequestedAsRed(t *testing.T) {
 		PRState:     "open",
 		CIState:     "passed",
 		ReviewState: "changes_requested",
+	}, false)
+
+	if color != "#ef4444" {
+		t.Fatalf("taskCardBorderColor() = %q, want #ef4444", color)
+	}
+}
+
+func TestTaskCardBorderColorUsesDangerForAttention(t *testing.T) {
+	color := taskCardBorderColor(TaskRecord{
+		SessionAttentionNeeded: true,
 	}, false)
 
 	if color != "#ef4444" {

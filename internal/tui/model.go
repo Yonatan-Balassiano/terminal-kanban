@@ -213,7 +213,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionPollTickMsg:
 		taskIDs := m.sessionTaskIDs()
-		if len(taskIDs) == 0 || m.focus == FocusTerminal {
+		if len(taskIDs) == 0 {
 			return m, sessionPollTickCmd()
 		}
 

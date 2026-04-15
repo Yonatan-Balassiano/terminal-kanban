@@ -13,6 +13,7 @@ export interface ServiceContainer {
   board: import('../services/board.js').BoardService;
   workspace: import('../services/workspace.js').WorkspaceService;
   worktrees: import('../services/worktree.js').WorktreeService;
+  taskLifecycle: import('../services/task-lifecycle.js').TaskLifecycleService;
   session: import('../services/session-manager.js').SessionManager;
   git: import('../services/git.js').GitService;
   github: import('../services/github.js').GitHubService;
@@ -252,6 +253,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const { TerminalBufferService } = await import('../services/terminal-buffer.js');
   const { SessionManager } = await import('../services/session-manager.js');
   const { WorktreeService } = await import('../services/worktree.js');
+  const { TaskLifecycleService } = await import('../services/task-lifecycle.js');
   const { serverEvents, startServer } = await import('./server.js');
 
   const board = new BoardService(db);
@@ -269,6 +271,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
       payload: { taskId, ...buffer },
     });
   });
+  const taskLifecycle = new TaskLifecycleService(db, board, git, session);
   const sync = new SyncService(board, github, git, db);
 
   // ---- Load config and seed tracks + poll interval -----------
@@ -320,7 +323,21 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     });
   });
 
-  const services: ServiceContainer = { db, dbPath: opts.dbPath, board, workspace, worktrees, session, git, github, sync, view, events, doctor };
+  const services: ServiceContainer = {
+    db,
+    dbPath: opts.dbPath,
+    board,
+    workspace,
+    worktrees,
+    taskLifecycle,
+    session,
+    git,
+    github,
+    sync,
+    view,
+    events,
+    doctor,
+  };
 
   const server = startServer(opts.socketPath, services);
 

@@ -149,7 +149,11 @@ func renderHeader(m *Model) string {
 	}
 
 	busySessions := 0
+	attentionTasks := 0
 	for _, task := range m.tasks {
+		if task.SessionAttentionNeeded {
+			attentionTasks++
+		}
 		if task.SessionID != "" {
 			if activity := m.sessionActivityByTaskID[task.ID]; activity != nil && activity.IsBusy {
 				busySessions++
@@ -171,6 +175,13 @@ func renderHeader(m *Model) string {
 	}
 
 	row1Right := []string{}
+	if attentionTasks > 0 {
+		label := "1 attention"
+		if attentionTasks != 1 {
+			label = fmt.Sprintf("%d attention", attentionTasks)
+		}
+		row1Right = append(row1Right, badge(label, "danger", "!", false))
+	}
 	if busySessions > 0 {
 		label := "1 running"
 		if busySessions != 1 {
@@ -547,6 +558,8 @@ func renderStatusBar(m *Model) string {
 	leftParts := []string{badge(strings.ToUpper(string(m.focus)), ternaryString(m.focus == FocusTerminal, "accent", "neutral"), "", false)}
 	if activityLabel != "" {
 		leftParts = append(leftParts, badge(activityLabel, "warning", "", false))
+	} else if contextTask != nil && contextTask.SessionAttentionNeeded {
+		leftParts = append(leftParts, badge("attention", "danger", "!", false))
 	}
 	if m.statusMessage != "" {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(m.statusMessage, max(1, m.width/2))))
@@ -591,19 +604,22 @@ func renderHelpModal() string {
 }
 
 func renderSessionActivityBadge(m *Model, task *TaskRecord, isActiveSession bool) string {
-	label, tone, spinning, icon := sessionBadgeModel(m.sessionActivityByTaskID[task.ID], task.SessionID != "", isActiveSession)
+	label, tone, spinning, icon := sessionBadgeModel(*task, m.sessionActivityByTaskID[task.ID], isActiveSession)
 	if spinning {
 		icon = spinnerFrames[m.spinnerIndex]
 	}
 	return badge(label, tone, icon, false)
 }
 
-func sessionBadgeModel(activity *SessionActivitySnapshot, hasSession, isActiveSession bool) (string, string, bool, string) {
+func sessionBadgeModel(task TaskRecord, activity *SessionActivitySnapshot, isActiveSession bool) (string, string, bool, string) {
 	if activity != nil && activity.SessionStatus == "orphaned" {
 		return "orphaned", "danger", false, "!"
 	}
 	if activity != nil && activity.SessionStatus == "terminated" {
 		return "ended", "muted", false, "×"
+	}
+	if task.SessionAttentionNeeded {
+		return "attention", "danger", false, "!"
 	}
 	if activity != nil && activity.IsBusy {
 		label := strings.TrimSpace(strings.TrimSpace(activity.Label + " " + activity.Command))
@@ -619,7 +635,7 @@ func sessionBadgeModel(activity *SessionActivitySnapshot, hasSession, isActiveSe
 	if isActiveSession {
 		return "live", "accent", false, "●"
 	}
-	if hasSession || (activity != nil && activity.SessionStatus == "idle") {
+	if task.SessionID != "" || (activity != nil && activity.SessionStatus == "idle") {
 		return "idle", "success", false, "◦"
 	}
 	return "shell", "muted", false, "○"
@@ -630,7 +646,7 @@ func headerStatusModel(m *Model, task TaskRecord, activity *SessionActivitySnaps
 	Icon  string
 	Label string
 } {
-	label, tone, spinning, icon := sessionBadgeModel(activity, task.SessionID != "", isActiveSession)
+	label, tone, spinning, icon := sessionBadgeModel(task, activity, isActiveSession)
 	if spinning {
 		icon = spinnerFrames[m.spinnerIndex]
 	}
@@ -702,6 +718,12 @@ func toneColor(tone string) string {
 }
 
 func taskCardBorderColor(task TaskRecord, isSelected bool) string {
+	if task.SessionAttentionNeeded {
+		if isSelected {
+			return uiChrome.Danger
+		}
+		return "#ef4444"
+	}
 	if task.PRState == "merged" {
 		if isSelected {
 			return uiChrome.Purple

@@ -58,6 +58,10 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     gitBehindCount: (row['git_behind_count'] as number | null) ?? 0,
     hasUntracked: row['has_untracked'] === 1 || row['has_untracked'] === true,
     hasConflicts: row['has_conflicts'] === 1 || row['has_conflicts'] === true,
+    sessionAttentionNeeded:
+      row['session_attention_needed'] === 1 || row['session_attention_needed'] === true,
+    sessionAttentionUpdatedAt:
+      (row['session_attention_updated_at'] as number | null) ?? undefined,
     archivedAt: (row['archived_at'] as number | null) ?? undefined,
     createdAt: row['created_at'] as number,
     updatedAt: row['updated_at'] as number,
@@ -420,6 +424,36 @@ export class BoardService {
         'UPDATE tasks SET last_session_cwd = ?, updated_at = ? WHERE id = ?',
       )
       .run(cwd, Date.now(), taskId);
+  }
+
+  setTaskSessionAttention(taskId: string): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare<[number, number, number, string]>(
+        `UPDATE tasks
+         SET session_attention_needed = ?,
+             session_attention_updated_at = ?,
+             updated_at = ?
+         WHERE id = ?
+           AND session_attention_needed = 0`,
+      )
+      .run(1, now, now, taskId);
+    return result.changes > 0;
+  }
+
+  clearTaskSessionAttention(taskId: string): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare<[number, string]>(
+        `UPDATE tasks
+         SET session_attention_needed = 0,
+             session_attention_updated_at = NULL,
+             updated_at = ?
+         WHERE id = ?
+           AND session_attention_needed = 1`,
+      )
+      .run(now, taskId);
+    return result.changes > 0;
   }
 
   // ---- Track methods -----------------------------------------

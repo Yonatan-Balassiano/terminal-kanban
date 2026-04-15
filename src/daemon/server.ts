@@ -202,7 +202,7 @@ export async function dispatch(
       }
 
       case 'archiveTask': {
-        services.board.archiveTask(p['id'] as string);
+        await services.taskLifecycle.archiveTask(p['id'] as string);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
@@ -211,7 +211,7 @@ export async function dispatch(
       }
 
       case 'deleteTask': {
-        services.board.deleteTask(p['id'] as string);
+        await services.taskLifecycle.deleteTask(p['id'] as string);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
@@ -279,7 +279,16 @@ export async function dispatch(
       }
 
       case 'sendInput': {
-        await services.session.sendInput(p['taskId'] as string, p['data'] as string);
+        const attentionChanged = await services.session.sendInput(
+          p['taskId'] as string,
+          p['data'] as string
+        );
+        if (attentionChanged) {
+          serverEvents.emit('event', {
+            type: 'board_patch',
+            payload: services.view.getBoardSnapshot(),
+          });
+        }
         return { id: req.id, result: null };
       }
 
@@ -295,9 +304,15 @@ export async function dispatch(
       }
 
       case 'inspectSession': {
-        const activity = await services.session.inspectSession(
+        const { activity, attentionChanged } = await services.session.inspectSessionState(
           (p as unknown as InspectSessionParams).taskId
         );
+        if (attentionChanged) {
+          serverEvents.emit('event', {
+            type: 'board_patch',
+            payload: services.view.getBoardSnapshot(),
+          });
+        }
         return { id: req.id, result: activity };
       }
 

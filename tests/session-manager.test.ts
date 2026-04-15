@@ -360,4 +360,202 @@ describe('SessionManager branch fallback', () => {
     expect(session.id).toBe('session-2');
     expect(board.getTask(task.id)?.sessionId).toBe('session-2');
   });
+
+  it('marks attention when an active session transitions from busy to idle', async () => {
+    const task = board.createTask({ title: 'Watch me finish', repoId: 'repo-1' });
+    board.linkSession(task.id, 'session-1');
+
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'session-1',
+      task.id,
+      'pty',
+      null,
+      null,
+      'active',
+      '/tmp/repo-1',
+      task.branchName,
+      1,
+      1,
+      1,
+    );
+
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
+        throw new Error('should not create a new session');
+      }),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    (manager as { lastBusyByTaskId: Map<string, boolean> }).lastBusyByTaskId.set(task.id, true);
+
+    const result = await manager.inspectSessionState(task.id);
+
+    expect(result.activity?.isBusy).toBe(false);
+    expect(result.attentionChanged).toBe(true);
+    expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(true);
+  });
+
+  it('clears attention when opening a new session', async () => {
+    const task = board.createTask({ title: 'Resume me', repoId: 'repo-1' });
+    board.setTaskSessionAttention(task.id);
+
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+        id: 'session-1',
+        taskId: opts.taskId,
+        backendType: 'pty',
+        backendSessionId: 'ab_resume_me',
+        status: 'active',
+        cwd: opts.cwd ?? opts.repoPath,
+        branch: opts.branch,
+        createdAt: 1,
+        updatedAt: 1,
+      })),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    await manager.openSession(task.id);
+
+    expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(false);
+  });
+
+  it('clears attention when sending input back into a session', async () => {
+    const task = board.createTask({ title: 'Continue me', repoId: 'repo-1' });
+    board.setTaskSessionAttention(task.id);
+    board.linkSession(task.id, 'session-1');
+
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'session-1',
+      task.id,
+      'pty',
+      'ab_continue_me',
+      null,
+      'active',
+      '/tmp/repo-1',
+      task.branchName,
+      1,
+      1,
+      1,
+    );
+
+    const sendInput = vi.fn<[string, string], Promise<void>>(async () => {});
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
+        throw new Error('should not create a new session');
+      }),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput,
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    const attentionChanged = await manager.sendInput(task.id, "continue\n");
+
+    expect(attentionChanged).toBe(true);
+    expect(sendInput).toHaveBeenCalledWith('ab_continue_me', "continue\n");
+    expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(false);
+  });
 });
