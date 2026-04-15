@@ -12,4 +12,17 @@ describe('buildNewSessionBootstrapCommand', () => {
         'claude',
     );
   });
+
+  it('prints the setup failure and leaves the shell in the requested cwd for manual recovery', () => {
+    expect(
+      buildNewSessionBootstrapCommand(
+        '/repo',
+        'ab/task-1234',
+        'main',
+        false,
+        '/repo',
+        'Git command failed: git worktree add',
+      ),
+    ).toBe(`printf '%b\\n\\n' "Git command failed: git worktree add" && cd "/repo"`);
+  });
 });

@@ -71,6 +71,7 @@ export class PtyBackend implements SessionBackend {
       opts.baseBranch,
       opts.usesWorktree,
       opts.cwd,
+      opts.bootstrapNotice,
     )}\n`;
     pty.write(checkoutCmd);
 
