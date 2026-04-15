@@ -14,9 +14,17 @@ type GitState string
 type TerminalLayoutMode string
 type SessionActivityKind string
 type AgentCLI string
+type AppTab string
+type MissionStatus string
+type MissionStepStatus string
 
 type AppFocus string
 type ModalType string
+
+const (
+	AppTabBoard    AppTab = "board"
+	AppTabMissions AppTab = "missions"
+)
 
 const (
 	FocusBoard     AppFocus = "board"
@@ -28,6 +36,8 @@ const (
 
 const (
 	ModalCreateTask      ModalType = "create-task"
+	ModalCreateMission   ModalType = "create-mission"
+	ModalAddMissionStep  ModalType = "add-mission-step"
 	ModalCommandPalette  ModalType = "command-palette"
 	ModalRenameTask      ModalType = "rename-task"
 	ModalTaskDescription ModalType = "task-description"
@@ -123,6 +133,46 @@ type TaskRecord struct {
 	UpdatedAt                 int64            `json:"updatedAt"`
 }
 
+type MissionRecord struct {
+	ID          string        `json:"id"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	Status      MissionStatus `json:"status"`
+	CompletedAt *int64        `json:"completedAt"`
+	CreatedAt   int64         `json:"createdAt"`
+	UpdatedAt   int64         `json:"updatedAt"`
+}
+
+type MissionStepRecord struct {
+	ID              string            `json:"id"`
+	MissionID       string            `json:"missionId"`
+	Title           string            `json:"title"`
+	Description     string            `json:"description"`
+	RepoID          string            `json:"repoId"`
+	SortOrder       int               `json:"sortOrder"`
+	Status          MissionStepStatus `json:"status"`
+	DependsOnStepID string            `json:"dependsOnStepId"`
+	LinkedTaskID    string            `json:"linkedTaskId"`
+	CreatedAt       int64             `json:"createdAt"`
+	UpdatedAt       int64             `json:"updatedAt"`
+}
+
+type MissionSummaryRecord struct {
+	MissionRecord
+	TotalSteps     int      `json:"totalSteps"`
+	CompletedSteps int      `json:"completedSteps"`
+	ReadySteps     int      `json:"readySteps"`
+	ActiveSteps    int      `json:"activeSteps"`
+	BlockedSteps   int      `json:"blockedSteps"`
+	SkippedSteps   int      `json:"skippedSteps"`
+	RepoIDs        []string `json:"repoIds"`
+}
+
+type MissionDetail struct {
+	Mission MissionSummaryRecord `json:"mission"`
+	Steps   []MissionStepRecord  `json:"steps"`
+}
+
 type SessionRecord struct {
 	ID               string             `json:"id"`
 	TaskID           string             `json:"taskId"`
@@ -147,6 +197,7 @@ type SavedViewRecord struct {
 }
 
 type UIStateRecord struct {
+	ActiveTab           AppTab             `json:"activeTab"`
 	ActiveRepoID        string             `json:"activeRepoId"`
 	ActiveViewID        string             `json:"activeViewId"`
 	Filters             *FilterModel       `json:"filters"`

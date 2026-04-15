@@ -592,6 +592,8 @@ export class BoardService {
 
     const state: UIStateRecord = {};
 
+    if (map.has('activeTab'))
+      state.activeTab = map.get('activeTab') as import('../types/index.js').AppTab;
     if (map.has('activeRepoId')) state.activeRepoId = map.get('activeRepoId') as string;
     if (map.has('activeViewId')) state.activeViewId = map.get('activeViewId') as string;
     if (map.has('filters')) state.filters = map.get('filters') as FilterModel;

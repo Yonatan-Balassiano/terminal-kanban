@@ -9,6 +9,7 @@ import (
 )
 
 type createTaskLine string
+type addMissionStepLine string
 type filterColumn string
 
 const (
@@ -16,6 +17,10 @@ const (
 	createTaskRepoLine   createTaskLine = "repo"
 	createTaskPillarLine createTaskLine = "pillar"
 	createTaskAgentLine  createTaskLine = "agent"
+
+	addMissionStepTitleLine     addMissionStepLine = "title"
+	addMissionStepRepoLine      addMissionStepLine = "repo"
+	addMissionStepDependsOnLine addMissionStepLine = "depends-on"
 
 	filterRepoColumn   filterColumn = "repo"
 	filterPillarColumn filterColumn = "pillar"
@@ -27,6 +32,17 @@ type createTaskModalState struct {
 	PillarIndex int
 	AgentIndex  int
 	ActiveLine  createTaskLine
+}
+
+type createMissionModalState struct {
+	Value string
+}
+
+type addMissionStepModalState struct {
+	Value          string
+	RepoIndex      int
+	DependsOnIndex int
+	ActiveLine     addMissionStepLine
 }
 
 type renameTaskModalState struct {
@@ -113,6 +129,8 @@ func (m *Model) closeModal() {
 	m.modal = ModalNone
 	m.focus = FocusBoard
 	m.createTaskModal = nil
+	m.createMissionModal = nil
+	m.addMissionStepModal = nil
 	m.renameTaskModal = nil
 	m.taskDescriptionModal = nil
 	m.prCommentModal = nil
@@ -165,6 +183,38 @@ func (m *Model) openCreateTaskModal() {
 		PillarIndex: initialPillarIndex,
 		AgentIndex:  0,
 		ActiveLine:  createTaskTitleLine,
+	}
+}
+
+func (m *Model) openCreateMissionModal() {
+	m.closeModal()
+	m.modal = ModalCreateMission
+	m.focus = FocusModal
+	m.createMissionModal = &createMissionModalState{}
+}
+
+func (m *Model) openAddMissionStepModal() {
+	if m.selectedMission() == nil {
+		m.statusMessage = "Select a mission before adding a step."
+		return
+	}
+	initialRepoIndex := 0
+	if m.activeRepoID != "" {
+		for index, repo := range m.repos {
+			if repo.ID == m.activeRepoID {
+				initialRepoIndex = index
+				break
+			}
+		}
+	}
+
+	m.closeModal()
+	m.modal = ModalAddMissionStep
+	m.focus = FocusModal
+	m.addMissionStepModal = &addMissionStepModalState{
+		RepoIndex:      initialRepoIndex,
+		DependsOnIndex: 0,
+		ActiveLine:     addMissionStepTitleLine,
 	}
 }
 
@@ -355,6 +405,10 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	case ModalCreateTask:
 		return m.handleCreateTaskModalKey(key)
+	case ModalCreateMission:
+		return m.handleCreateMissionModalKey(key)
+	case ModalAddMissionStep:
+		return m.handleAddMissionStepModalKey(key)
 	case ModalRenameTask:
 		return m.handleRenameTaskModalKey(key)
 	case ModalTaskDescription:
@@ -522,6 +576,144 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 		}
 	}
 
+	return nil
+}
+
+func (m *Model) handleCreateMissionModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.createMissionModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		title := strings.TrimSpace(state.Value)
+		if title == "" {
+			return nil
+		}
+		m.closeModal()
+		m.activeTab = AppTabMissions
+		return tea.Batch(m.persistActiveTabCmd(), m.createMissionCmd(title))
+	case tea.KeyBackspace, tea.KeyDelete:
+		state.Value = trimLastRune(state.Value)
+		return nil
+	}
+	if next, changed := appendPrintableInput(state.Value, key); changed {
+		state.Value = next
+	}
+	return nil
+}
+
+func (m *Model) handleAddMissionStepModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.addMissionStepModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		title := strings.TrimSpace(state.Value)
+		if title == "" {
+			return nil
+		}
+		if len(m.repos) == 0 {
+			m.statusMessage = "Add a repo before creating mission steps."
+			return nil
+		}
+		repoID := m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].ID
+		dependencyOptions := m.missionDependencyOptions()
+		dependsOnStepID := ""
+		if len(dependencyOptions) > 0 {
+			dependsOnStepID = dependencyOptions[clamp(state.DependsOnIndex, 0, len(dependencyOptions)-1)].ID
+		}
+		m.closeModal()
+		return m.addMissionStepCmd(title, repoID, dependsOnStepID)
+	case tea.KeyUp:
+		switch state.ActiveLine {
+		case addMissionStepDependsOnLine:
+			state.ActiveLine = addMissionStepRepoLine
+		case addMissionStepRepoLine:
+			state.ActiveLine = addMissionStepTitleLine
+		}
+		return nil
+	case tea.KeyDown:
+		switch state.ActiveLine {
+		case addMissionStepTitleLine:
+			state.ActiveLine = addMissionStepRepoLine
+		case addMissionStepRepoLine:
+			state.ActiveLine = addMissionStepDependsOnLine
+		}
+		return nil
+	case tea.KeyLeft:
+		switch state.ActiveLine {
+		case addMissionStepRepoLine:
+			if len(m.repos) > 1 {
+				state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), -1)
+			}
+		case addMissionStepDependsOnLine:
+			options := m.missionDependencyOptions()
+			if len(options) > 1 {
+				state.DependsOnIndex = wrapIndex(state.DependsOnIndex, len(options), -1)
+			}
+		}
+		return nil
+	case tea.KeyRight:
+		switch state.ActiveLine {
+		case addMissionStepRepoLine:
+			if len(m.repos) > 1 {
+				state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), 1)
+			}
+		case addMissionStepDependsOnLine:
+			options := m.missionDependencyOptions()
+			if len(options) > 1 {
+				state.DependsOnIndex = wrapIndex(state.DependsOnIndex, len(options), 1)
+			}
+		}
+		return nil
+	case tea.KeyBackspace, tea.KeyDelete:
+		if state.ActiveLine == addMissionStepTitleLine {
+			state.Value = trimLastRune(state.Value)
+		}
+		return nil
+	}
+
+	switch key.String() {
+	case ",":
+		if state.ActiveLine == addMissionStepRepoLine && len(m.repos) > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), -1)
+		}
+	case ".":
+		if state.ActiveLine == addMissionStepRepoLine && len(m.repos) > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), 1)
+		}
+	case "[":
+		if state.ActiveLine == addMissionStepDependsOnLine {
+			options := m.missionDependencyOptions()
+			if len(options) > 1 {
+				state.DependsOnIndex = wrapIndex(state.DependsOnIndex, len(options), -1)
+			}
+		}
+	case "]":
+		if state.ActiveLine == addMissionStepDependsOnLine {
+			options := m.missionDependencyOptions()
+			if len(options) > 1 {
+				state.DependsOnIndex = wrapIndex(state.DependsOnIndex, len(options), 1)
+			}
+		}
+	default:
+		if state.ActiveLine == addMissionStepTitleLine {
+			if next, changed := appendPrintableInput(state.Value, key); changed {
+				state.Value = next
+			}
+		}
+	}
 	return nil
 }
 
@@ -894,12 +1086,41 @@ func (m *Model) toggleFilterSelection() {
 
 func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	contextTask := m.contextTask()
+	contextMission := m.selectedMission()
+	contextStep := m.selectedMissionStep()
 	contextTrackIndex := -1
 	if contextTask != nil {
 		contextTrackIndex = indexTrack(m.sortedTracks(), contextTask.TrackID)
 	}
 
 	switch commandID {
+	case "create-mission":
+		m.openCreateMissionModal()
+		return nil
+	case "add-mission-step":
+		m.openAddMissionStepModal()
+		return nil
+	case "start-mission-step":
+		m.closeModal()
+		if contextStep != nil {
+			if contextStep.LinkedTaskID != "" {
+				return m.openSessionCmd(contextStep.LinkedTaskID, false)
+			}
+			return m.startMissionStepCmd(contextStep.ID, contextStep.MissionID)
+		}
+		return nil
+	case "start-next-mission-step":
+		m.closeModal()
+		if contextMission != nil {
+			return m.startNextMissionStepCmd(contextMission.ID)
+		}
+		return nil
+	case "start-all-ready-mission-steps":
+		m.closeModal()
+		if contextMission != nil {
+			return m.startAllReadyMissionStepsCmd(contextMission.ID)
+		}
+		return nil
 	case "create-task":
 		m.openCreateTaskModal()
 		return nil
@@ -1043,11 +1264,18 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 
 func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 	contextTask := m.contextTask()
+	contextMission := m.selectedMission()
+	contextStep := m.selectedMissionStep()
 	contextTrackIndex := -1
 	if contextTask != nil {
 		contextTrackIndex = indexTrack(m.sortedTracks(), contextTask.TrackID)
 	}
 	return []CommandPaletteItem{
+		{ID: "create-mission", Title: "Create mission", Section: "Mission", Detail: "Create a new multi-step mission.", Shortcut: "n", Keywords: []string{"mission", "plan", "new"}},
+		{ID: "add-mission-step", Title: "Add mission step", Section: "Mission", Detail: "Add a new step to the selected mission.", Shortcut: "A", Keywords: []string{"mission", "step", "add"}, Disabled: contextMission == nil, DisabledReason: "Select a mission before adding a step."},
+		{ID: "start-mission-step", Title: "Start selected mission step", Section: "Mission", Detail: "Start the selected mission step or open its linked task shell.", Shortcut: "Enter", Keywords: []string{"mission", "step", "start"}, Disabled: contextStep == nil || (contextStep.Status != "ready" && contextStep.LinkedTaskID == ""), DisabledReason: "Select a ready mission step or one with a linked task."},
+		{ID: "start-next-mission-step", Title: "Start next ready mission step", Section: "Mission", Detail: "Create the next ready task from the selected mission.", Shortcut: "S", Keywords: []string{"mission", "step", "next"}, Disabled: contextMission == nil || contextMission.ReadySteps == 0, DisabledReason: "The selected mission has no ready steps."},
+		{ID: "start-all-ready-mission-steps", Title: "Start all ready mission steps", Section: "Mission", Detail: "Fan out every ready mission step into normal tasks.", Shortcut: "G", Keywords: []string{"mission", "step", "all"}, Disabled: contextMission == nil || contextMission.ReadySteps == 0, DisabledReason: "The selected mission has no ready steps."},
 		{ID: "create-task", Title: "Create task", Section: "Task", Detail: "Add a new task into the backlog track.", Shortcut: "n", Keywords: []string{"new", "backlog", "add"}},
 		{ID: "rename-task", Title: "Rename current task", Section: "Task", Detail: detailOrFallback(contextTask, "Rename %s", "Rename the current task."), Shortcut: "r", Keywords: []string{"title", "edit"}, Disabled: contextTask == nil, DisabledReason: "Select a task to rename it."},
 		{ID: "edit-description", Title: "Edit task description", Section: "Task", Detail: "Open the long-form task description editor.", Shortcut: "Ctrl+D", Keywords: []string{"notes", "description"}, Disabled: contextTask == nil, DisabledReason: "Select a task to edit its description."},
@@ -1187,6 +1415,24 @@ func (m *Model) createTaskPillarOptions() []createTaskPillarOption {
 			label = pillar.Icon + " " + label
 		}
 		options = append(options, createTaskPillarOption{ID: pillar.ID, Label: label})
+	}
+	return options
+}
+
+func (m *Model) missionDependencyOptions() []createTaskPillarOption {
+	options := []createTaskPillarOption{{ID: "", Label: "None"}}
+	if m.missionDetail == nil {
+		return options
+	}
+	for _, step := range m.missionDetail.Steps {
+		label := step.Title
+		if repo := m.repoByID(step.RepoID); repo != nil {
+			label = fmt.Sprintf("%s (%s)", step.Title, repo.Label)
+		}
+		options = append(options, createTaskPillarOption{
+			ID:    step.ID,
+			Label: truncateText(label, 32),
+		})
 	}
 	return options
 }

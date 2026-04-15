@@ -156,7 +156,7 @@ func rpcTimeout(method string) time.Duration {
 	switch method {
 	case "createTaskPR", "commentTaskPR", "mergeTaskPR", "triggerSync":
 		return 45 * time.Second
-	case "openSession", "recreateSession":
+	case "openSession", "recreateSession", "startAllReadyMissionSteps":
 		return 20 * time.Second
 	default:
 		return 10 * time.Second

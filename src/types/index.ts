@@ -19,6 +19,9 @@ export type GitState = 'unknown' | 'clean' | 'dirty' | 'untracked' | 'conflicted
 export type TerminalLayoutMode = 'side-by-side' | 'top-bottom';
 export type SessionActivityKind = 'agent' | 'process';
 export type AgentCLI = 'claude' | 'codex';
+export type AppTab = 'board' | 'missions';
+export type MissionStatus = 'open' | 'done';
+export type MissionStepStatus = 'planned' | 'ready' | 'active' | 'done' | 'skipped';
 
 export type EventType =
   | 'task.created'
@@ -121,6 +124,45 @@ export interface TaskRecord {
   updatedAt: number;
 }
 
+export interface MissionRecord {
+  id: string;
+  title: string;
+  description?: string;
+  status: MissionStatus;
+  completedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MissionStepRecord {
+  id: string;
+  missionId: string;
+  title: string;
+  description?: string;
+  repoId: string;
+  sortOrder: number;
+  status: MissionStepStatus;
+  dependsOnStepId?: string;
+  linkedTaskId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MissionSummaryRecord extends MissionRecord {
+  totalSteps: number;
+  completedSteps: number;
+  readySteps: number;
+  activeSteps: number;
+  blockedSteps: number;
+  skippedSteps: number;
+  repoIds: string[];
+}
+
+export interface MissionDetail {
+  mission: MissionSummaryRecord;
+  steps: MissionStepRecord[];
+}
+
 export interface SessionRecord {
   id: string;
   taskId: string;
@@ -155,6 +197,7 @@ export interface EventRecord {
 }
 
 export interface UIStateRecord {
+  activeTab?: AppTab;
   activeRepoId?: string;
   activeViewId?: string;
   filters?: FilterModel;
@@ -276,8 +319,19 @@ export interface RPCEvent {
 
 export type RPCMethod =
   | 'getBoard'
+  | 'listMissions'
+  | 'getMission'
   | 'setUIState'
   | 'createTask'
+  | 'createMission'
+  | 'updateMission'
+  | 'addMissionStep'
+  | 'updateMissionStep'
+  | 'reorderMissionStep'
+  | 'startMissionStep'
+  | 'startNextMissionStep'
+  | 'startAllReadyMissionSteps'
+  | 'setMissionStepStatus'
   | 'renameTask'
   | 'updateTaskDescription'
   | 'moveTask'
@@ -322,6 +376,13 @@ export type GetBoardResult = BoardSnapshot;
 
 export type SetUIStateParams = Partial<UIStateRecord>;
 
+export type ListMissionsResult = MissionSummaryRecord[];
+
+export interface GetMissionParams {
+  id: string;
+}
+export type GetMissionResult = MissionDetail;
+
 export interface CreateTaskParams {
   title: string;
   repoId: string;
@@ -330,6 +391,60 @@ export interface CreateTaskParams {
   pillarId?: string;
 }
 export type CreateTaskResult = TaskRecord;
+
+export interface CreateMissionParams {
+  title: string;
+  description?: string;
+}
+export type CreateMissionResult = MissionRecord;
+
+export interface UpdateMissionParams {
+  id: string;
+  title?: string;
+  description?: string;
+}
+
+export interface AddMissionStepParams {
+  missionId: string;
+  title: string;
+  description?: string;
+  repoId: string;
+  dependsOnStepId?: string;
+}
+export type AddMissionStepResult = MissionStepRecord;
+
+export interface UpdateMissionStepParams {
+  id: string;
+  title?: string;
+  description?: string;
+  repoId?: string;
+  dependsOnStepId?: string | null;
+}
+
+export interface ReorderMissionStepParams {
+  id: string;
+  sortOrder: number;
+}
+
+export interface StartMissionStepParams {
+  id: string;
+}
+export type StartMissionStepResult = TaskRecord;
+
+export interface StartNextMissionStepParams {
+  missionId: string;
+}
+export type StartNextMissionStepResult = TaskRecord;
+
+export interface StartAllReadyMissionStepsParams {
+  missionId: string;
+}
+export type StartAllReadyMissionStepsResult = TaskRecord[];
+
+export interface SetMissionStepStatusParams {
+  id: string;
+  status: MissionStepStatus;
+}
 
 export interface RenameTaskParams {
   id: string;
