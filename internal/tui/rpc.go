@@ -154,7 +154,7 @@ func (c *RPCClient) nextID() string {
 
 func rpcTimeout(method string) time.Duration {
 	switch method {
-	case "createTaskPR", "mergeTaskPR", "triggerSync":
+	case "createTaskPR", "commentTaskPR", "mergeTaskPR", "triggerSync":
 		return 45 * time.Second
 	case "openSession", "recreateSession":
 		return 20 * time.Second

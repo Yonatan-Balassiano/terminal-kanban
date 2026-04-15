@@ -142,6 +142,45 @@ describe('daemon schedulePostPushSync dispatch', () => {
   });
 });
 
+describe('daemon commentTaskPR dispatch', () => {
+  it('posts a PR comment through the GitHub service', async () => {
+    const commentPR = vi.fn().mockResolvedValue(undefined);
+
+    const response = await dispatch(
+      {
+        id: 'req-comment',
+        method: 'commentTaskPR',
+        params: { taskId: 'task-1', body: 'Looks good to me' },
+      },
+      {
+        board: {
+          getTask: vi.fn().mockReturnValue(makeTask()),
+        },
+        workspace: {
+          getRepo: vi.fn().mockReturnValue({
+            id: 'repo-1',
+            path: '/repo',
+            githubOwner: 'org',
+            githubRepo: 'proj',
+          }),
+        },
+        github: { commentPR },
+      } as never,
+      '/tmp/agentboard.sock'
+    );
+
+    expect(commentPR).toHaveBeenCalledWith('/repo', {
+      githubRepo: 'org/proj',
+      prNumber: 42,
+      body: 'Looks good to me',
+    });
+    expect(response).toEqual({
+      id: 'req-comment',
+      result: { commented: true },
+    });
+  });
+});
+
 describe('daemon updateRepo dispatch', () => {
   it('updates the repo and emits a board patch', async () => {
     const repo = makeRepo({ defaultBaseBranch: 'master' });

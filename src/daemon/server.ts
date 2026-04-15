@@ -34,6 +34,7 @@ import type {
   AcknowledgeSessionAttentionParams,
   PrepareTaskWorkspaceParams,
   CreateTaskPRParams,
+  CommentTaskPRParams,
   SchedulePostPushSyncParams,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
@@ -359,6 +360,39 @@ export async function dispatch(
           payload: services.view.getBoardSnapshot(),
         });
         return { id: req.id, result: pr };
+      }
+
+      case 'commentTaskPR': {
+        const params = p as unknown as CommentTaskPRParams;
+        const task = services.board.getTask(params.taskId);
+        if (!task) {
+          throw new Error(`Task not found: ${params.taskId}`);
+        }
+        if (task.prNumber === undefined) {
+          throw new Error(`Task ${params.taskId} has no PR number`);
+        }
+        if (task.prState !== 'open' && task.prState !== 'draft') {
+          throw new Error(`Task ${params.taskId} does not have an open or draft PR`);
+        }
+        if (!params.body.trim()) {
+          throw new Error('PR comment body cannot be empty');
+        }
+
+        const repo = services.workspace.getRepo(task.repoId);
+        if (!repo) {
+          throw new Error(`Repo not found for task ${params.taskId}`);
+        }
+        if (!repo.githubOwner || !repo.githubRepo) {
+          throw new Error(`Repo ${repo.id} is missing GitHub identity`);
+        }
+
+        await services.github.commentPR(repo.path, {
+          githubRepo: `${repo.githubOwner}/${repo.githubRepo}`,
+          prNumber: task.prNumber,
+          body: params.body,
+        });
+
+        return { id: req.id, result: { commented: true } };
       }
 
       case 'schedulePostPushSync': {

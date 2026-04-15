@@ -281,6 +281,24 @@ func TestCreateTaskPRCmdSetsProgressMessage(t *testing.T) {
 	}
 }
 
+func TestCommentTaskPRCmdSetsProgressMessage(t *testing.T) {
+	model := &Model{}
+	prNumber := 42
+
+	cmd := model.commentTaskPRCmd(&TaskRecord{
+		ID:       "task-1",
+		PRNumber: &prNumber,
+		PRState:  "open",
+	}, "Looks good")
+
+	if cmd == nil {
+		t.Fatal("commentTaskPRCmd() = nil, want command")
+	}
+	if model.statusMessage != "Posting PR comment..." {
+		t.Fatalf("statusMessage = %q, want Posting PR comment...", model.statusMessage)
+	}
+}
+
 func TestRetryPushedBranchPRCreationCmdRequiresBranch(t *testing.T) {
 	model := &Model{}
 
@@ -393,11 +411,50 @@ func TestTaskCardBorderColorUsesAccentForSelectedNeutralCard(t *testing.T) {
 func TestBoardKeyboardHintsIncludeManualPRRetry(t *testing.T) {
 	hints := kbdHints(FocusBoard)
 
+	if !strings.Contains(hints, "j comment") {
+		t.Fatalf("kbdHints(FocusBoard) = %q, want PR comment hint", hints)
+	}
 	if !strings.Contains(hints, "c PR") {
 		t.Fatalf("kbdHints(FocusBoard) = %q, want create PR hint", hints)
 	}
 	if !strings.Contains(hints, "C retry PR") {
 		t.Fatalf("kbdHints(FocusBoard) = %q, want retry PR hint", hints)
+	}
+}
+
+func TestHandleKeyJOpensPRCommentModal(t *testing.T) {
+	model := &Model{
+		focus:              FocusBoard,
+		selectedTrackIndex: 0,
+		selectedTaskIndex:  0,
+		tracks: []TrackRecord{
+			{ID: "pr", SortOrder: 1},
+		},
+		tasks: []TaskRecord{
+			func() TaskRecord {
+				prNumber := 42
+				return TaskRecord{
+					ID:       "task-1",
+					TrackID:  "pr",
+					SortKey:  1,
+					Title:    "Selected",
+					PRNumber: &prNumber,
+					PRState:  "open",
+				}
+			}(),
+		},
+	}
+
+	cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+
+	if cmd != nil {
+		t.Fatal("handleKey(j) returned command, want nil")
+	}
+	if model.modal != ModalPRComment {
+		t.Fatalf("modal = %q, want %q", model.modal, ModalPRComment)
+	}
+	if model.prCommentModal == nil || model.prCommentModal.TaskID != "task-1" {
+		t.Fatalf("prCommentModal = %#v, want task-1", model.prCommentModal)
 	}
 }
 

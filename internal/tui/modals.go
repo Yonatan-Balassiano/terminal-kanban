@@ -37,6 +37,11 @@ type taskDescriptionModalState struct {
 	Value  string
 }
 
+type prCommentModalState struct {
+	TaskID string
+	Value  string
+}
+
 type archiveConfirmModalState struct {
 	TaskID string
 }
@@ -94,6 +99,7 @@ func (m *Model) closeModal() {
 	m.createTaskModal = nil
 	m.renameTaskModal = nil
 	m.taskDescriptionModal = nil
+	m.prCommentModal = nil
 	m.archiveConfirmModal = nil
 	m.deleteConfirmModal = nil
 	m.createPillarModal = nil
@@ -171,6 +177,21 @@ func (m *Model) openTaskDescriptionModal(task *TaskRecord) {
 		TaskID: task.ID,
 		Value:  task.Description,
 	}
+}
+
+func (m *Model) openPRCommentModal(task *TaskRecord) {
+	if task == nil {
+		m.statusMessage = "Select a task to comment on its PR."
+		return
+	}
+	if blocker := getPRCommentBlockerReason(*task); blocker != "" {
+		m.statusMessage = blocker
+		return
+	}
+	m.closeModal()
+	m.modal = ModalPRComment
+	m.focus = FocusModal
+	m.prCommentModal = &prCommentModalState{TaskID: task.ID}
 }
 
 func (m *Model) openArchiveConfirmModal(task *TaskRecord) {
@@ -321,6 +342,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleRenameTaskModalKey(key)
 	case ModalTaskDescription:
 		return m.handleTaskDescriptionModalKey(key)
+	case ModalPRComment:
+		return m.handlePRCommentModalKey(key)
 	case ModalArchiveConfirm:
 		return m.handleArchiveConfirmModalKey(key)
 	case ModalDeleteConfirm:
@@ -515,6 +538,35 @@ func (m *Model) handleTaskDescriptionModalKey(key tea.KeyMsg) tea.Cmd {
 		description := strings.TrimSpace(state.Value)
 		m.closeModal()
 		return m.updateTaskDescriptionCmd(taskID, description)
+	case tea.KeyBackspace, tea.KeyDelete:
+		state.Value = trimLastRune(state.Value)
+		return nil
+	}
+	if next, changed := appendPrintableInput(state.Value, key); changed {
+		state.Value = next
+	}
+	return nil
+}
+
+func (m *Model) handlePRCommentModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.prCommentModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		taskID := state.TaskID
+		body := strings.TrimSpace(state.Value)
+		if body == "" {
+			return nil
+		}
+		task := m.taskByID(taskID)
+		m.closeModal()
+		return m.commentTaskPRCmd(task, body)
 	case tea.KeyBackspace, tea.KeyDelete:
 		state.Value = trimLastRune(state.Value)
 		return nil
@@ -827,6 +879,9 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "edit-description":
 		m.openTaskDescriptionModal(contextTask)
 		return nil
+	case "comment-pr":
+		m.openPRCommentModal(contextTask)
+		return nil
 	case "delete-task":
 		m.openDeleteConfirmModal(contextTask)
 		return nil
@@ -981,6 +1036,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "open-workspace", Title: "Reveal workspace", Section: "Workspace", Detail: "Open the current task workspace in Finder or Explorer.", Shortcut: "x", Keywords: []string{"finder", "explorer", "folder"}, Disabled: contextTask == nil, DisabledReason: "Select a task to reveal its workspace."},
 		{ID: "create-pr", Title: "Create or ensure pull request", Section: "GitHub", Detail: "Create the PR immediately for the current task branch.", Shortcut: "c", Keywords: []string{"github", "pull request"}, Disabled: contextTask == nil, DisabledReason: "Select a task to create a pull request."},
 		{ID: "retry-pushed-pr-creation", Title: "Retry pushed-branch PR creation", Section: "GitHub", Detail: "Restart the background PR creation watcher after a branch push.", Shortcut: "C", Keywords: []string{"github", "pull request", "push", "retry"}, Disabled: contextTask == nil || contextTask.BranchName == "", DisabledReason: "Select a task with a branch to watch for PR creation."},
+		{ID: "comment-pr", Title: "Comment on pull request", Section: "GitHub", Detail: "Open a composer and post a comment with gh CLI.", Shortcut: "j", Keywords: []string{"github", "pull request", "comment"}, Disabled: contextTask == nil || !canCommentOnTaskPR(*contextTask), DisabledReason: "The current task does not have an open or draft pull request."},
 		{ID: "open-pr", Title: "Open pull request", Section: "GitHub", Detail: "Open the current task PR in the browser.", Shortcut: "o", Keywords: []string{"github", "browser", "pr"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: "The current task does not have an open pull request."},
 		{ID: "open-checks", Title: "Open pull request checks", Section: "GitHub", Detail: "Open CI checks for the current task PR.", Shortcut: "v", Keywords: []string{"github", "checks", "ci"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: "The current task does not have an open pull request."},
 		{ID: "merge-pr", Title: "Merge pull request", Section: "GitHub", Detail: "Squash merge the current task PR when it is ready.", Shortcut: "m", Keywords: []string{"github", "merge"}, Disabled: contextTask == nil || !canMergeTask(*contextTask), DisabledReason: "Open PR, approved review, and passing build are required."},
@@ -1148,6 +1204,10 @@ func (m *Model) pillarByID(pillarID string) *PillarRecord {
 
 func hasOpenPR(task TaskRecord) bool {
 	return task.PRState == "open" || task.PRState == "draft"
+}
+
+func canCommentOnTaskPR(task TaskRecord) bool {
+	return task.PRNumber != nil && hasOpenPR(task)
 }
 
 func detailOrFallback(task *TaskRecord, format string, fallback string) string {

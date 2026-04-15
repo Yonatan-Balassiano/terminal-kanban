@@ -30,6 +30,7 @@ const (
 	ModalCommandPalette  ModalType = "command-palette"
 	ModalRenameTask      ModalType = "rename-task"
 	ModalTaskDescription ModalType = "task-description"
+	ModalPRComment       ModalType = "pr-comment"
 	ModalArchiveConfirm  ModalType = "archive-confirm"
 	ModalDeleteConfirm   ModalType = "delete-confirm"
 	ModalFilterPicker    ModalType = "filter-picker"
