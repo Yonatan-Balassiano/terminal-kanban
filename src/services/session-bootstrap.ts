@@ -4,11 +4,18 @@ export function buildNewSessionBootstrapCommand(
   baseBranch = 'main',
   usesWorktree = false,
   cwd?: string,
+  bootstrapNotice?: string,
 ): string {
   const quotedRepoPath = JSON.stringify(repoPath);
   const quotedBranch = JSON.stringify(branch);
   const quotedBaseBranch = JSON.stringify(baseBranch);
-  const cdPrefix = cwd ? `cd ${JSON.stringify(cwd)} && ` : '';
+  const changeDirCmd = cwd ? `cd ${JSON.stringify(cwd)}` : '';
+  const cdPrefix = changeDirCmd ? `${changeDirCmd} && ` : '';
+
+  if (bootstrapNotice) {
+    const noticeCmd = `printf '%b\\n\\n' ${JSON.stringify(bootstrapNotice)}`;
+    return changeDirCmd ? `${noticeCmd} && ${changeDirCmd}` : noticeCmd;
+  }
 
   if (usesWorktree) {
     return `${cdPrefix}clear && claude`;

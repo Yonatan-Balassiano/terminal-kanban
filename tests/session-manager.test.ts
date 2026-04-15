@@ -518,6 +518,73 @@ describe('SessionManager branch fallback', () => {
     expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(false);
   });
 
+  it('opens a fallback repo shell when worktree setup fails', async () => {
+    const task = board.createTask({ title: 'Recover me', repoId: 'repo-1' });
+
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'pty',
+      backendSessionId: 'ab_recover_me',
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace() {
+          throw new Error('Git command failed: git worktree add -b "ab/recover-me-1234"');
+        },
+      },
+      backend,
+    );
+
+    const session = await manager.openSession(task.id);
+
+    expect(session.id).toBe('session-1');
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoPath: '/tmp/repo-1',
+        cwd: '/tmp/repo-1',
+        usesWorktree: false,
+        bootstrapNotice: expect.stringContaining('Git command failed: git worktree add'),
+      }),
+    );
+    expect(board.getTask(task.id)?.sessionId).toBe('session-1');
+    expect(board.getTask(task.id)?.lastSessionCwd).toBe('/tmp/repo-1');
+  });
+
   it('clears attention when sending input back into a session', async () => {
     const task = board.createTask({ title: 'Continue me', repoId: 'repo-1' });
     board.setTaskSessionAttention(task.id);

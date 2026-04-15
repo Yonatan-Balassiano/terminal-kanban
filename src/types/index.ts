@@ -210,6 +210,7 @@ export interface CreateSessionOpts {
   cwd?: string;
   baseBranch?: string;
   usesWorktree?: boolean;
+  bootstrapNotice?: string;
 }
 
 export interface AttachMetadata {

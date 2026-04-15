@@ -575,6 +575,45 @@ func (m *Model) applyBoardNavigation(action boardNavigationAction) bool {
 	return m.selectedTrackIndex != previousTrackIndex || m.selectedTaskIndex != previousTaskIndex
 }
 
+func (m *Model) selectTaskByID(taskID string) bool {
+	if taskID == "" {
+		return false
+	}
+
+	tracks := m.sortedTracks()
+	tasksByTrack := m.tasksByTrack()
+	for trackIndex, track := range tracks {
+		for taskIndex, task := range tasksByTrack[track.ID] {
+			if task.ID != taskID {
+				continue
+			}
+			m.selectedTrackIndex = trackIndex
+			m.selectedTaskIndex = taskIndex
+			return true
+		}
+	}
+
+	return false
+}
+
+func (m *Model) previewTaskShell(task *TaskRecord) tea.Cmd {
+	if task == nil || task.ID == "" || task.SessionID == "" || task.ID == m.activeTaskID {
+		return nil
+	}
+
+	m.activeTaskID = task.ID
+	m.activeSessionBranch = task.BranchName
+	m.activeSessionBackendType = ""
+	m.terminalPaneVisible = true
+	m.terminalScrollOffset = 0
+	m.buffer = GetBufferResult{}
+
+	return tea.Batch(
+		m.loadBufferCmd(task.ID),
+		m.inspectSessionCmd(task.ID),
+	)
+}
+
 func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 	if key.Type == tea.KeyEsc {
 		m.clearTerminalBoardNav()
@@ -606,7 +645,7 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 		if task.ID == m.activeTaskID {
 			return rearmCmd
 		}
-		return tea.Batch(m.openSessionCmd(task.ID, false), rearmCmd)
+		return tea.Batch(m.previewTaskShell(task), m.openSessionCmd(task.ID, false), rearmCmd)
 	}
 
 	if m.terminalBoardNavConsumed {
@@ -681,6 +720,7 @@ func (m *Model) clearTerminalBoardNav() {
 }
 
 func (m *Model) armTerminalBoardNav(taskID string, consumed bool) tea.Cmd {
+	m.selectTaskByID(taskID)
 	m.terminalBoardNavPending = true
 	m.terminalBoardNavTaskID = taskID
 	m.terminalBoardNavConsumed = consumed

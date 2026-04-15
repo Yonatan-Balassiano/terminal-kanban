@@ -403,8 +403,18 @@ func TestBoardKeyboardHintsIncludeManualPRRetry(t *testing.T) {
 
 func TestHandleTerminalKeyTabArmsBoardNavigation(t *testing.T) {
 	model := &Model{
-		focus:        FocusTerminal,
-		activeTaskID: "task-1",
+		focus:              FocusTerminal,
+		activeTaskID:       "task-1",
+		selectedTrackIndex: 0,
+		selectedTaskIndex:  0,
+		tracks: []TrackRecord{
+			{ID: "backlog", SortOrder: 1},
+			{ID: "in-progress", SortOrder: 2},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "Active"},
+			{ID: "task-2", TrackID: "backlog", SortKey: 1, Title: "Selected"},
+		},
 	}
 
 	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyTab})
@@ -414,6 +424,9 @@ func TestHandleTerminalKeyTabArmsBoardNavigation(t *testing.T) {
 	}
 	if model.terminalBoardNavTaskID != "task-1" {
 		t.Fatalf("terminalBoardNavTaskID = %q, want task-1", model.terminalBoardNavTaskID)
+	}
+	if model.selectedTrackIndex != 1 || model.selectedTaskIndex != 0 {
+		t.Fatalf("selection = (%d,%d), want active task coordinates (1,0)", model.selectedTrackIndex, model.selectedTaskIndex)
 	}
 	if cmd == nil {
 		t.Fatal("handleTerminalKey(tab) returned nil cmd")
@@ -432,8 +445,8 @@ func TestHandleTerminalKeyTabDownSwitchesToNeighborTaskShell(t *testing.T) {
 			{ID: "in-progress", SortOrder: 1},
 		},
 		tasks: []TaskRecord{
-			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "First"},
-			{ID: "task-2", TrackID: "in-progress", SortKey: 2, Title: "Second"},
+			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "First", SessionID: "session-1"},
+			{ID: "task-2", TrackID: "in-progress", SortKey: 2, Title: "Second", SessionID: "session-2"},
 		},
 	}
 
@@ -451,12 +464,45 @@ func TestHandleTerminalKeyTabDownSwitchesToNeighborTaskShell(t *testing.T) {
 	if model.selectedTaskIndex != 1 {
 		t.Fatalf("selectedTaskIndex = %d, want 1", model.selectedTaskIndex)
 	}
+	if model.activeTaskID != "task-2" {
+		t.Fatalf("activeTaskID = %q, want task-2", model.activeTaskID)
+	}
 	selected := model.selectedTask()
 	if selected == nil || selected.ID != "task-2" {
 		t.Fatalf("selectedTask() = %#v, want task-2", selected)
 	}
 	if cmd == nil {
 		t.Fatal("handleTerminalKey(tab+j) returned nil cmd")
+	}
+}
+
+func TestHandleTerminalKeyTabDownArrowSwitchesToNeighborTaskShell(t *testing.T) {
+	model := &Model{
+		focus:                   FocusTerminal,
+		activeTaskID:            "task-1",
+		terminalBoardNavPending: true,
+		terminalBoardNavTaskID:  "task-1",
+		selectedTrackIndex:      0,
+		selectedTaskIndex:       0,
+		tracks: []TrackRecord{
+			{ID: "in-progress", SortOrder: 1},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "First", SessionID: "session-1"},
+			{ID: "task-2", TrackID: "in-progress", SortKey: 2, Title: "Second", SessionID: "session-2"},
+		},
+	}
+
+	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	if model.activeTaskID != "task-2" {
+		t.Fatalf("activeTaskID = %q, want task-2", model.activeTaskID)
+	}
+	if model.selectedTaskIndex != 1 {
+		t.Fatalf("selectedTaskIndex = %d, want 1", model.selectedTaskIndex)
+	}
+	if cmd == nil {
+		t.Fatal("handleTerminalKey(tab+down) returned nil cmd")
 	}
 }
 

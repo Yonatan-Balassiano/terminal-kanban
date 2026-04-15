@@ -12,7 +12,7 @@ import { PtyBackend } from './session-backends/pty.js';
 import type { TerminalBufferService } from './terminal-buffer.js';
 import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
-import type { WorktreeService } from './worktree.js';
+import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
 import {
   deriveFallbackSessionActivity,
   deriveSessionActivity,
@@ -51,6 +51,10 @@ interface RepoRow {
   id: string;
   path: string;
   default_base_branch: string | null;
+}
+
+interface PreparedSessionWorkspace extends TaskWorkspaceInfo {
+  bootstrapNotice?: string;
 }
 
 export interface InspectSessionStateResult {
@@ -238,6 +242,27 @@ export class SessionManager {
       .run(branch, Date.now(), sessionId);
   }
 
+  private async prepareWorkspaceForSession(
+    taskId: string,
+    repoPath: string,
+  ): Promise<PreparedSessionWorkspace> {
+    try {
+      return this.worktrees.prepareTaskWorkspace(taskId);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.board.setTaskLastSessionCwd?.(taskId, repoPath);
+      return {
+        taskId,
+        path: repoPath,
+        repoPath,
+        usedWorktree: false,
+        bootstrapNotice:
+          `${detail}\n\n` +
+          'Worktree setup failed. Opened a shell in the repo checkout so you can handle it manually.',
+      };
+    }
+  }
+
   // ---- openSession -----------------------------------------
 
   async openSession(taskId: string): Promise<SessionRecord> {
@@ -347,7 +372,7 @@ export class SessionManager {
     }
 
     const backend = this.getBackend(backendType);
-    const workspace = this.worktrees.prepareTaskWorkspace(taskId);
+    const workspace = await this.prepareWorkspaceForSession(taskId, repoRow.path);
 
     const sessionRecord = await backend.create({
       taskId,
@@ -357,6 +382,7 @@ export class SessionManager {
       cwd: workspace.path,
       baseBranch: repoRow.default_base_branch ?? 'main',
       usesWorktree: workspace.usedWorktree,
+      bootstrapNotice: workspace.bootstrapNotice,
     });
 
     // 6. Persist to DB

@@ -206,6 +206,7 @@ export class TmuxBackend implements SessionBackend {
       opts.baseBranch,
       opts.usesWorktree,
       opts.cwd,
+      opts.bootstrapNotice,
     );
 
     execSync(
