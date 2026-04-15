@@ -81,7 +81,7 @@ function makeBoard(taskPatch: Partial<TaskRecord> = {}) {
 }
 
 describe('SyncService', () => {
-  it('creates a PR after the branch is pushed and moves backlog to in-progress', async () => {
+  it('creates a PR after the branch is pushed and moves the task into pr', async () => {
     const { board } = makeBoard();
     const prInfo = makePrInfo();
     const github = {
@@ -130,7 +130,7 @@ describe('SyncService', () => {
     );
     expect(board.moveTask).toHaveBeenCalledWith({
       id: 'task-1',
-      trackId: 'in-progress',
+      trackId: 'pr',
     });
   });
 
@@ -175,7 +175,7 @@ describe('SyncService', () => {
     expect(github.createPR).toHaveBeenCalledTimes(1);
   });
 
-  it('moves backlog to in-progress for an existing open PR without creating a duplicate PR', async () => {
+  it('moves an existing open PR task into pr without creating a duplicate PR', async () => {
     const { board } = makeBoard();
     const prInfo = makePrInfo();
     const github = {
@@ -215,7 +215,50 @@ describe('SyncService', () => {
     expect(github.createPR).not.toHaveBeenCalled();
     expect(board.moveTask).toHaveBeenCalledWith({
       id: 'task-1',
-      trackId: 'in-progress',
+      trackId: 'pr',
+    });
+  });
+
+  it('moves an in-progress task into pr when its PR is open', async () => {
+    const { board } = makeBoard({ trackId: 'in-progress' });
+    const prInfo = makePrInfo();
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({
+        number: prInfo.number,
+        prState: 'open',
+        title: prInfo.title,
+        url: prInfo.url,
+      }),
+      getPR: vi.fn().mockResolvedValue(prInfo),
+      createPR: vi.fn(),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn(),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    await sync.trigger();
+
+    expect(github.createPR).not.toHaveBeenCalled();
+    expect(board.moveTask).toHaveBeenCalledWith({
+      id: 'task-1',
+      trackId: 'pr',
     });
   });
 
@@ -406,7 +449,7 @@ describe('SyncService', () => {
     expect(getTask().prNumber).toBe(42);
     expect(board.moveTask).toHaveBeenCalledWith({
       id: 'task-1',
-      trackId: 'in-progress',
+      trackId: 'pr',
     });
   });
 

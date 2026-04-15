@@ -135,7 +135,8 @@ export function defaultConfig(): AppConfig {
     tracks: [
       { id: 'backlog', label: 'Backlog', sortOrder: 0 },
       { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
-      { id: 'done', label: 'Done', sortOrder: 2 },
+      { id: 'pr', label: 'PR', sortOrder: 2 },
+      { id: 'done', label: 'Done', sortOrder: 3 },
     ],
     pillars: [],
     repos: [],
