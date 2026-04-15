@@ -252,7 +252,8 @@ npm run reset-deamon
 
 ### GitHub actions
 
-- `c`: create/ensure PR for selected task
+- `c`: create/ensure PR for selected task immediately
+- `C`: retry PR creation for a pushed branch
 - `o`: open PR in browser
 - `v`: open PR checks page
 - `m`: merge approved + green PR
@@ -332,6 +333,7 @@ With `gh` configured, AgentBoard can:
 
 - detect existing PRs for task branches
 - create PRs
+- retry post-push PR creation from the board with `C` if the automatic watcher misses a push
 - show PR number and URL
 - show build status
 - show review status

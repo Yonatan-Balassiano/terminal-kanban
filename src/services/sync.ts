@@ -269,19 +269,13 @@ export class SyncService {
 
     try {
       let prInfo = await this.github.getPR(repoPath, task.branchName, fullRepo);
-      let remoteBranchPresent = false;
 
       if (!prInfo) {
-        remoteBranchPresent = await this.waitForRemoteBranch(
+        const remoteBranchPresent = await this.waitForRemoteBranch(
           repoPath,
           task.branchName,
           opts?.retryPendingRemoteBranches === true
         );
-
-        if (remoteBranchPresent && task.trackId === 'backlog') {
-          this.board.moveTask({ id: task.id, trackId: 'in-progress' });
-          taskChanged = true;
-        }
 
         if (remoteBranchPresent) {
           prInfo = await this.github.createPR(repoPath, {
@@ -300,21 +294,21 @@ export class SyncService {
 
       if (this.applyTaskSyncPatch(task, prInfo ?? undefined, gitStatus)) {
         taskChanged = true;
+      }
 
-        if (prInfo && task.trackId !== 'done' && prInfo.prState === 'merged') {
-          this.board.moveTask({ id: task.id, trackId: 'done' });
-          taskChanged = true;
-        }
+      if (prInfo && task.trackId !== 'done' && prInfo.prState === 'merged') {
+        this.board.moveTask({ id: task.id, trackId: 'done' });
+        taskChanged = true;
+      }
 
-        // A pushed branch with a PR means active work, so move backlog into progress.
-        if (
-          prInfo &&
-          task.trackId === 'backlog' &&
-          (prInfo.prState === 'draft' || prInfo.prState === 'open')
-        ) {
-          this.board.moveTask({ id: task.id, trackId: 'in-progress' });
-          taskChanged = true;
-        }
+      // Only move a backlog card once a PR is confirmed, so board state and PR metadata stay aligned.
+      if (
+        prInfo &&
+        task.trackId === 'backlog' &&
+        (prInfo.prState === 'draft' || prInfo.prState === 'open')
+      ) {
+        this.board.moveTask({ id: task.id, trackId: 'in-progress' });
+        taskChanged = true;
       }
 
       if (taskChanged) {

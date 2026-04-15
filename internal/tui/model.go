@@ -448,7 +448,12 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "c":
 		task := m.selectedTask()
 		if task != nil {
-			return m.boardActionCmd("createTaskPR", map[string]string{"taskId": task.ID}, fmt.Sprintf("Ensured PR for task %s", task.ID))
+			return m.createTaskPRCmd(task)
+		}
+	case "C":
+		task := m.selectedTask()
+		if task != nil {
+			return m.retryPushedBranchPRCreationCmd(task)
 		}
 	case "o":
 		task := m.selectedTask()
@@ -463,11 +468,7 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "m":
 		task := m.selectedTask()
 		if task != nil {
-			if blocker := getMergeBlockerReason(*task); blocker != "" {
-				m.statusMessage = blocker
-				return nil
-			}
-			return m.boardActionCmd("mergeTaskPR", map[string]string{"taskId": task.ID}, fmt.Sprintf("Merged PR #%d", derefInt(task.PRNumber)))
+			return m.mergeTaskPRCmd(task)
 		}
 	case "i":
 		task := m.selectedTask()
@@ -824,6 +825,46 @@ func (m *Model) sendInputCmd(taskID, data string) tea.Cmd {
 func (m *Model) syncCmd() tea.Cmd {
 	m.syncInProgress = true
 	return m.boardActionCmd("triggerSync", nil, "Sync complete.")
+}
+
+func (m *Model) createTaskPRCmd(task *TaskRecord) tea.Cmd {
+	if task == nil {
+		return nil
+	}
+	m.statusMessage = "PR creation in progress..."
+	return m.boardActionCmd(
+		"createTaskPR",
+		map[string]string{"taskId": task.ID},
+		fmt.Sprintf("Ensured PR for task %s", task.ID),
+	)
+}
+
+func (m *Model) retryPushedBranchPRCreationCmd(task *TaskRecord) tea.Cmd {
+	if task == nil {
+		return nil
+	}
+	if task.BranchName == "" {
+		m.statusMessage = "Selected task has no branch to watch for PR creation."
+		return nil
+	}
+	m.statusMessage = "PR creation in progress..."
+	return m.schedulePostPushSyncCmd(task.ID)
+}
+
+func (m *Model) mergeTaskPRCmd(task *TaskRecord) tea.Cmd {
+	if task == nil {
+		return nil
+	}
+	if blocker := getMergeBlockerReason(*task); blocker != "" {
+		m.statusMessage = blocker
+		return nil
+	}
+	m.statusMessage = "Merge in progress..."
+	return m.boardActionCmd(
+		"mergeTaskPR",
+		map[string]string{"taskId": task.ID},
+		fmt.Sprintf("Merged PR #%d", derefInt(task.PRNumber)),
+	)
 }
 
 func (m *Model) schedulePostPushSyncCmd(taskID string) tea.Cmd {
