@@ -125,6 +125,7 @@ type Model struct {
 	postPushSyncVersion        int
 	terminalBoardNavPending    bool
 	terminalBoardNavTaskID     string
+	terminalBoardNavConsumed   bool
 	terminalBoardNavVersion    int
 
 	createTaskModal          *createTaskModalState
@@ -488,18 +489,16 @@ func (m *Model) handleTerminalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handlePendingTerminalBoardNavKey(key)
 	}
 
+	return m.handleDirectTerminalKey(key)
+}
+
+func (m *Model) handleDirectTerminalKey(key tea.KeyMsg) tea.Cmd {
 	switch key.Type {
 	case tea.KeyTab:
 		if m.activeTaskID == "" {
 			return nil
 		}
-		m.terminalBoardNavPending = true
-		m.terminalBoardNavTaskID = m.activeTaskID
-		m.terminalBoardNavVersion++
-		version := m.terminalBoardNavVersion
-		return tea.Tick(terminalBoardNavTimeout, func(_ time.Time) tea.Msg {
-			return terminalBoardNavTimeoutMsg{Version: version}
-		})
+		return m.armTerminalBoardNav(m.activeTaskID, false)
 	case tea.KeyEsc:
 		flushCmd := m.flushPendingTerminalInputCmd()
 		m.terminalCommand = ""
@@ -590,19 +589,33 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 		return flushCmd
 	}
 
+	if key.Type == tea.KeyTab {
+		return m.armTerminalBoardNav(m.terminalBoardNavTaskID, m.terminalBoardNavConsumed)
+	}
+
 	if action := boardNavigationActionForKey(key); action != boardNavigationNone {
-		m.clearTerminalBoardNav()
 		m.applyBoardNavigation(action)
 
 		task := m.selectedTask()
+		nextTaskID := m.terminalBoardNavTaskID
+		if task != nil {
+			nextTaskID = task.ID
+		}
+		rearmCmd := m.armTerminalBoardNav(nextTaskID, true)
+
 		if task == nil {
 			m.statusMessage = "Selected track has no task."
-			return nil
+			return rearmCmd
 		}
 		if task.ID == m.activeTaskID {
-			return nil
+			return rearmCmd
 		}
-		return m.openSessionCmd(task.ID, false)
+		return tea.Batch(m.openSessionCmd(task.ID, false), rearmCmd)
+	}
+
+	if m.terminalBoardNavConsumed {
+		m.clearTerminalBoardNav()
+		return m.handleDirectTerminalKey(key)
 	}
 
 	if m.terminalBoardNavTaskID == "" {
@@ -657,8 +670,9 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 
 func (m *Model) flushPendingTerminalBoardNavCmd() tea.Cmd {
 	taskID := m.terminalBoardNavTaskID
+	consumed := m.terminalBoardNavConsumed
 	m.clearTerminalBoardNav()
-	if taskID == "" {
+	if taskID == "" || consumed {
 		return nil
 	}
 	return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
@@ -667,6 +681,18 @@ func (m *Model) flushPendingTerminalBoardNavCmd() tea.Cmd {
 func (m *Model) clearTerminalBoardNav() {
 	m.terminalBoardNavPending = false
 	m.terminalBoardNavTaskID = ""
+	m.terminalBoardNavConsumed = false
+}
+
+func (m *Model) armTerminalBoardNav(taskID string, consumed bool) tea.Cmd {
+	m.terminalBoardNavPending = true
+	m.terminalBoardNavTaskID = taskID
+	m.terminalBoardNavConsumed = consumed
+	m.terminalBoardNavVersion++
+	version := m.terminalBoardNavVersion
+	return tea.Tick(terminalBoardNavTimeout, func(_ time.Time) tea.Msg {
+		return terminalBoardNavTimeoutMsg{Version: version}
+	})
 }
 
 func (m *Model) View() string {

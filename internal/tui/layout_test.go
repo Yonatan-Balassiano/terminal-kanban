@@ -268,8 +268,14 @@ func TestHandleTerminalKeyTabDownSwitchesToNeighborTaskShell(t *testing.T) {
 
 	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 
-	if model.terminalBoardNavPending {
-		t.Fatal("terminal board navigation should clear after switching")
+	if !model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should stay armed after switching")
+	}
+	if !model.terminalBoardNavConsumed {
+		t.Fatal("terminal board navigation should be marked consumed after switching")
+	}
+	if model.terminalBoardNavTaskID != "task-2" {
+		t.Fatalf("terminalBoardNavTaskID = %q, want task-2", model.terminalBoardNavTaskID)
 	}
 	if model.selectedTaskIndex != 1 {
 		t.Fatalf("selectedTaskIndex = %d, want 1", model.selectedTaskIndex)
@@ -280,6 +286,45 @@ func TestHandleTerminalKeyTabDownSwitchesToNeighborTaskShell(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("handleTerminalKey(tab+j) returned nil cmd")
+	}
+}
+
+func TestHandleTerminalKeyTabDownContinuesSwitchingWhileArmed(t *testing.T) {
+	model := &Model{
+		focus:                   FocusTerminal,
+		activeTaskID:            "task-1",
+		terminalBoardNavPending: true,
+		terminalBoardNavTaskID:  "task-1",
+		selectedTrackIndex:      0,
+		selectedTaskIndex:       0,
+		tracks: []TrackRecord{
+			{ID: "in-progress", SortOrder: 1},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "First"},
+			{ID: "task-2", TrackID: "in-progress", SortKey: 2, Title: "Second"},
+			{ID: "task-3", TrackID: "in-progress", SortKey: 3, Title: "Third"},
+		},
+	}
+
+	firstCmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	secondCmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+
+	if !model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should stay armed for another move")
+	}
+	if model.selectedTaskIndex != 2 {
+		t.Fatalf("selectedTaskIndex = %d, want 2", model.selectedTaskIndex)
+	}
+	selected := model.selectedTask()
+	if selected == nil || selected.ID != "task-3" {
+		t.Fatalf("selectedTask() = %#v, want task-3", selected)
+	}
+	if model.terminalBoardNavTaskID != "task-3" {
+		t.Fatalf("terminalBoardNavTaskID = %q, want task-3", model.terminalBoardNavTaskID)
+	}
+	if firstCmd == nil || secondCmd == nil {
+		t.Fatal("handleTerminalKey(tab+j+j) should return cmds for both moves")
 	}
 }
 
@@ -308,5 +353,25 @@ func TestHandleTerminalKeyTabRuneFallsBackToLiteralTabInput(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("handleTerminalKey(tab+t) returned nil cmd")
+	}
+}
+
+func TestFlushPendingTerminalBoardNavCmdSkipsLiteralTabAfterNavigation(t *testing.T) {
+	model := &Model{
+		terminalBoardNavPending:  true,
+		terminalBoardNavTaskID:   "task-2",
+		terminalBoardNavConsumed: true,
+	}
+
+	cmd := model.flushPendingTerminalBoardNavCmd()
+
+	if model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should clear after timeout")
+	}
+	if model.terminalBoardNavTaskID != "" {
+		t.Fatalf("terminalBoardNavTaskID = %q, want empty", model.terminalBoardNavTaskID)
+	}
+	if cmd != nil {
+		t.Fatal("flushPendingTerminalBoardNavCmd() should not send a literal tab after navigation")
 	}
 }
