@@ -47,6 +47,11 @@ interface RepoRow {
   default_base_branch: string | null;
 }
 
+export interface InspectSessionStateResult {
+  activity: import('../types/index.js').SessionActivitySnapshot | null;
+  attentionChanged: boolean;
+}
+
 // --------------- Helpers -------------------------------------
 
 function rowToRecord(row: SessionRow): SessionRecord {
@@ -74,6 +79,7 @@ export class SessionManager {
   private bufferPushInFlight = new Map<string, Promise<void>>();
   private bufferPushQueued = new Set<string>();
   private lastOutputAtByTaskId = new Map<string, number>();
+  private lastBusyByTaskId = new Map<string, boolean>();
 
   constructor(
     private db: Db,
@@ -81,6 +87,8 @@ export class SessionManager {
       linkSession?: (taskId: string, sessionId: string) => Promise<void> | void;
       setTaskBranch?: (taskId: string, branchName: string) => Promise<void> | void;
       setTaskLastSessionCwd?: (taskId: string, cwd: string | null) => Promise<void> | void;
+      setTaskSessionAttention?: (taskId: string) => boolean;
+      clearTaskSessionAttention?: (taskId: string) => boolean;
     },
     private worktrees: WorktreeService,
     private buffers: TerminalBufferService,
@@ -122,6 +130,10 @@ export class SessionManager {
 
   private noteSessionOutput(taskId: string): void {
     this.lastOutputAtByTaskId.set(taskId, Date.now());
+  }
+
+  private clearTaskAttention(taskId: string): boolean {
+    return this.board.clearTaskSessionAttention?.(taskId) ?? false;
   }
 
   private async scheduleBufferPush(taskId: string): Promise<void> {
@@ -260,6 +272,7 @@ export class SessionManager {
               );
               this.persistSessionBranch(existing.id, currentBranch);
             }
+            this.clearTaskAttention(taskId);
             return { ...existing, branch: currentBranch };
           }
         }
@@ -332,6 +345,7 @@ export class SessionManager {
 
     // 7. Link session to task
     await this.board.linkSession?.(taskId, sessionRecord.id);
+    this.clearTaskAttention(taskId);
 
     return sessionRecord;
   }
@@ -354,13 +368,14 @@ export class SessionManager {
 
   // ---- sendInput -------------------------------------------
 
-  async sendInput(taskId: string, data: string): Promise<void> {
+  async sendInput(taskId: string, data: string): Promise<boolean> {
     const session = this.getSession(taskId);
     if (!session) throw new Error(`No active session for task: ${taskId}`);
     if (!session.backendSessionId) throw new Error(`Session has no backend ID: ${session.id}`);
 
     const backend = this.getBackend(session.backendType);
     await backend.sendInput(session.backendSessionId, data);
+    return this.clearTaskAttention(taskId);
   }
 
   async resizeSession(taskId: string, cols: number, rows: number): Promise<void> {
@@ -395,36 +410,58 @@ export class SessionManager {
     return this.buffers.getBuffer(taskId);
   }
 
-  async inspectSession(taskId: string): Promise<import('../types/index.js').SessionActivitySnapshot | null> {
+  async inspectSessionState(taskId: string): Promise<InspectSessionStateResult> {
     const session = this.getSession(taskId);
     if (!session) {
-      return null;
+      this.lastBusyByTaskId.delete(taskId);
+      return { activity: null, attentionChanged: false };
     }
 
+    let activity: import('../types/index.js').SessionActivitySnapshot | null;
     if (!session.backendSessionId) {
-      return inspectSessionActivity(taskId, session.id, session.status);
+      activity = inspectSessionActivity(taskId, session.id, session.status);
+    } else {
+      const backend = this.getBackend(session.backendType);
+      const info = await backend.inspect(session.backendSessionId);
+      if (!info) {
+        activity = {
+          taskId,
+          sessionId: session.id,
+          sessionStatus: 'orphaned',
+          isBusy: false,
+          updatedAt: Date.now(),
+        };
+      } else {
+        activity = inspectSessionActivity(
+          taskId,
+          session.id,
+          info.status,
+          info.shellPid,
+          this.lastOutputAtByTaskId.get(taskId),
+          info.currentCommand,
+        );
+      }
     }
 
-    const backend = this.getBackend(session.backendType);
-    const info = await backend.inspect(session.backendSessionId);
-    if (!info) {
-      return {
-        taskId,
-        sessionId: session.id,
-        sessionStatus: 'orphaned',
-        isBusy: false,
-        updatedAt: Date.now(),
-      };
+    let attentionChanged = false;
+    const previousBusy = this.lastBusyByTaskId.get(taskId) ?? false;
+    if (activity.sessionStatus === 'active') {
+      if (activity.isBusy) {
+        attentionChanged = this.clearTaskAttention(taskId);
+      } else if (previousBusy) {
+        attentionChanged = this.board.setTaskSessionAttention?.(taskId) ?? false;
+      }
+      this.lastBusyByTaskId.set(taskId, activity.isBusy);
+    } else {
+      this.lastBusyByTaskId.delete(taskId);
     }
 
-    return inspectSessionActivity(
-      taskId,
-      session.id,
-      info.status,
-      info.shellPid,
-      this.lastOutputAtByTaskId.get(taskId),
-      info.currentCommand,
-    );
+    return { activity, attentionChanged };
+  }
+
+  async inspectSession(taskId: string): Promise<import('../types/index.js').SessionActivitySnapshot | null> {
+    const result = await this.inspectSessionState(taskId);
+    return result.activity;
   }
 
   // ---- terminateSession ------------------------------------
@@ -444,6 +481,7 @@ export class SessionManager {
 
     this.buffers.destroy(session.taskId);
     this.lastOutputAtByTaskId.delete(session.taskId);
+    this.lastBusyByTaskId.delete(session.taskId);
 
     this.db
       .prepare<[string, number, string], void>(

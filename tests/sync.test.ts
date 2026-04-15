@@ -24,6 +24,7 @@ function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
     gitBehindCount: 0,
     hasUntracked: false,
     hasConflicts: false,
+    sessionAttentionNeeded: false,
     reviewState: 'none',
     unresolvedThreadCount: 0,
     githubSyncStatus: 'idle',

@@ -112,6 +112,8 @@ export interface TaskRecord {
   gitBehindCount: number;
   hasUntracked: boolean;
   hasConflicts: boolean;
+  sessionAttentionNeeded: boolean;
+  sessionAttentionUpdatedAt?: number;
   archivedAt?: number;
   createdAt: number;
   updatedAt: number;
