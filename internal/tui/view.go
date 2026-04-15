@@ -65,7 +65,7 @@ func renderView(m *Model) string {
 		fitHeight(renderHeader(m), headerHeight),
 	}
 
-	if shouldShowFilterBar(m.filters, m.focus) {
+	if shouldShowFilterBar(m.filters, m.focus, m.activeTab) {
 		parts = append(parts, fitHeight(renderFilterBar(m), 1))
 	}
 
@@ -86,7 +86,7 @@ func renderContent(m *Model) string {
 	stacked := showSplitTerminal && m.terminalLayoutMode == TerminalLayoutMode("top-bottom")
 
 	if !showSplitTerminal {
-		return renderBoard(m, contentHeight)
+		return renderPrimaryPane(m, contentHeight)
 	}
 
 	if stacked {
@@ -97,7 +97,7 @@ func renderContent(m *Model) string {
 		boardHeight := max(1, (contentHeight-dividerHeight+1)/2)
 		terminalHeight := max(1, contentHeight-boardHeight-dividerHeight)
 		chunks := []string{
-			fitHeight(renderBoard(m, boardHeight), boardHeight),
+			fitHeight(renderPrimaryPane(m, boardHeight), boardHeight),
 		}
 		if dividerHeight > 0 {
 			chunks = append(chunks, fitHeight(lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render(strings.Repeat("─", max(1, m.width))), 1))
@@ -106,7 +106,7 @@ func renderContent(m *Model) string {
 		return lipgloss.JoinVertical(lipgloss.Left, chunks...)
 	}
 
-	boardView := fitHeight(renderBoard(m, contentHeight), contentHeight)
+	boardView := fitHeight(renderPrimaryPane(m, contentHeight), contentHeight)
 	terminalView := fitHeight(renderTerminalPane(m, contentHeight, false), contentHeight)
 	divider := renderVerticalDivider(contentHeight)
 	return lipgloss.JoinHorizontal(lipgloss.Top, boardView, divider, terminalView)
@@ -163,7 +163,11 @@ func renderHeader(m *Model) string {
 
 	row1Left := []string{
 		badge("agentboard", "accent", "", false),
-		badge(truncateText(valueOrAllRepos(activeRepo), 18), "muted", "◈", false),
+		badge("board", ternaryString(m.activeTab == AppTabBoard, "accent", "muted"), "", false),
+		badge("missions", ternaryString(m.activeTab == AppTabMissions, "purple", "muted"), "", false),
+	}
+	if m.activeTab == AppTabBoard {
+		row1Left = append(row1Left, badge(truncateText(valueOrAllRepos(activeRepo), 18), "muted", "◈", false))
 	}
 	if activeView != nil {
 		row1Left = append(row1Left, badge(truncateText(activeView.Label, 16), "purple", "⌘", false))
@@ -220,6 +224,16 @@ func renderHeader(m *Model) string {
 			parts = append(parts, headerText(icon, contextPillar.Label, color))
 		}
 		row2Left = strings.Join(parts, " ")
+	} else if m.activeTab == AppTabMissions {
+		if mission := m.selectedMission(); mission != nil {
+			row2Left = strings.Join([]string{
+				lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(mission.Title, 42)),
+				headerText("◎", fmt.Sprintf("%d/%d complete", mission.CompletedSteps+mission.SkippedSteps, mission.TotalSteps), uiChrome.Accent),
+				headerText("◈", truncateText(missionRepoHeaderLabel(m, mission), 18), uiChrome.Blue),
+			}, " ")
+		} else {
+			row2Left = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No mission selected")
+		}
 	} else {
 		row2Left = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No task selected")
 	}
@@ -565,17 +579,26 @@ func renderStatusBar(m *Model) string {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(m.statusMessage, max(1, m.width/2))))
 	} else if contextTask != nil {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Selected: "+contextTask.Title))
+	} else if m.activeTab == AppTabMissions {
+		if step := m.selectedMissionStep(); step != nil {
+			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Step: "+step.Title))
+		} else if mission := m.selectedMission(); mission != nil {
+			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Mission: "+mission.Title))
+		} else {
+			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Create a mission to start planning"))
+		}
 	} else {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Ready"))
 	}
 
-	return joinSpaceBetween(strings.Join(leftParts, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(kbdHints(m.focus)), m.width)
+	return joinSpaceBetween(strings.Join(leftParts, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(kbdHints(m)), m.width)
 }
 
 func renderHelpModal() string {
 	sections := [][]string{
-		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
+		{"Navigation", "Tab / Shift+Tab switches between Board and Missions", "hjkl / arrow keys move within the current tab", ": or Ctrl+P opens the command palette", "t focuses the terminal pane", "z expands the terminal workspace"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete, a archive", "p assign pillar, P create pillar, D delete pillar and its tasks", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
+		{"Missions", "n new mission, A add step, Enter starts or opens the selected step", "S starts the next ready step, G starts every ready step", "x skips a step, r reopens a skipped or done step, o jumps to the linked board task"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
 		{"Terminal", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
@@ -1093,7 +1116,10 @@ func terminalViewportHeight(height int) int {
 	return max(1, height-terminalHeaderHeight-terminalFooterHeight)
 }
 
-func shouldShowFilterBar(filters FilterModel, focus AppFocus) bool {
+func shouldShowFilterBar(filters FilterModel, focus AppFocus, activeTab AppTab) bool {
+	if activeTab != AppTabBoard {
+		return focus == FocusFilterBar || focus == FocusSearch
+	}
 	return focus == FocusFilterBar || focus == FocusSearch || countActiveFilters(filters) > 0
 }
 
@@ -1262,10 +1288,13 @@ func headerText(icon, value, color string) string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(value)
 }
 
-func kbdHints(focus AppFocus) string {
-	switch focus {
+func kbdHints(m *Model) string {
+	switch m.focus {
 	case FocusBoard:
-		return "move  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
+		if m.activeTab == AppTabMissions {
+			return "move  Tab switch tabs  Enter start/open  n new mission  A add step  S next  G all  ? help"
+		}
+		return "move  Tab switch tabs  : commands  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync  ? help"
 	case FocusTerminal:
 		return "Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
 	case FocusModal:

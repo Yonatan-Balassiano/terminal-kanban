@@ -162,7 +162,7 @@ func TestRenderHeaderShowsAttentionCounter(t *testing.T) {
 
 func TestRenderStatusBarShowsAttentionBadge(t *testing.T) {
 	model := &Model{
-		width:              120,
+		width:              180,
 		focus:              FocusBoard,
 		selectedTrackIndex: 0,
 		selectedTaskIndex:  0,
@@ -409,7 +409,7 @@ func TestTaskCardBorderColorUsesAccentForSelectedNeutralCard(t *testing.T) {
 }
 
 func TestBoardKeyboardHintsIncludeManualPRRetry(t *testing.T) {
-	hints := kbdHints(FocusBoard)
+	hints := kbdHints(&Model{focus: FocusBoard, activeTab: AppTabBoard})
 
 	if !strings.Contains(hints, "j comment") {
 		t.Fatalf("kbdHints(FocusBoard) = %q, want PR comment hint", hints)
@@ -455,6 +455,63 @@ func TestHandleKeyJOpensPRCommentModal(t *testing.T) {
 	}
 	if model.prCommentModal == nil || model.prCommentModal.TaskID != "task-1" {
 		t.Fatalf("prCommentModal = %#v, want task-1", model.prCommentModal)
+	}
+}
+
+func TestMissionKeyboardHintsIncludeMissionActions(t *testing.T) {
+	hints := kbdHints(&Model{focus: FocusBoard, activeTab: AppTabMissions})
+
+	if !strings.Contains(hints, "n new mission") {
+		t.Fatalf("kbdHints(missions) = %q, want new mission hint", hints)
+	}
+	if !strings.Contains(hints, "A add step") {
+		t.Fatalf("kbdHints(missions) = %q, want add step hint", hints)
+	}
+}
+
+func TestHandleKeyTabSwitchesPrimaryTabs(t *testing.T) {
+	model := &Model{
+		focus:     FocusBoard,
+		activeTab: AppTabBoard,
+	}
+
+	cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+
+	if model.activeTab != AppTabMissions {
+		t.Fatalf("activeTab = %q, want %q", model.activeTab, AppTabMissions)
+	}
+	if cmd == nil {
+		t.Fatal("handleKey(tab) returned nil cmd")
+	}
+}
+
+func TestRenderHeaderShowsMissionContext(t *testing.T) {
+	model := &Model{
+		width:        120,
+		activeTab:    AppTabMissions,
+		activeRepoID: "repo-1",
+		missions: []MissionSummaryRecord{
+			{
+				MissionRecord:  MissionRecord{ID: "mission-1", Title: "Mission One", Status: "open"},
+				TotalSteps:     2,
+				CompletedSteps: 1,
+				SkippedSteps:   0,
+				RepoIDs:        []string{"repo-1"},
+			},
+		},
+		selectedMissionIndex: 0,
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo One"},
+		},
+		daemonConnected: true,
+	}
+
+	plain := ansiPattern.ReplaceAllString(renderHeader(model), "")
+	if !strings.Contains(plain, "missions") {
+		t.Fatalf("renderHeader() = %q, want missions tab badge", plain)
+	}
+	if !strings.Contains(plain, "Mission One") {
+		t.Fatalf("renderHeader() = %q, want mission context", plain)
 	}
 }
 

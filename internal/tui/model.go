@@ -32,6 +32,16 @@ type boardLoadedMsg struct {
 	err   error
 }
 
+type appStateLoadedMsg struct {
+	board                 BoardSnapshot
+	missions              []MissionSummaryRecord
+	missionDetail         *MissionDetail
+	selectedMissionID     string
+	selectedMissionStepID string
+	status                string
+	err                   error
+}
+
 type boardActionMsg struct {
 	board  *BoardSnapshot
 	status string
@@ -74,6 +84,7 @@ type terminalBoardNavTimeoutMsg struct {
 }
 
 type boardNavigationAction int
+type missionPaneFocus string
 
 const (
 	boardNavigationNone boardNavigationAction = iota
@@ -81,6 +92,11 @@ const (
 	boardNavigationRight
 	boardNavigationUp
 	boardNavigationDown
+)
+
+const (
+	missionPaneList  missionPaneFocus = "list"
+	missionPaneSteps missionPaneFocus = "steps"
 )
 
 type Model struct {
@@ -94,15 +110,22 @@ type Model struct {
 	labels     []LabelRecord
 	tracks     []TrackRecord
 	tasks      []TaskRecord
+	missions   []MissionSummaryRecord
 	savedViews []SavedViewRecord
 
 	focus                      AppFocus
 	modal                      ModalType
+	activeTab                  AppTab
 	activeRepoID               string
 	activeViewID               string
 	filters                    FilterModel
 	selectedTrackIndex         int
 	selectedTaskIndex          int
+	activeMissionID            string
+	selectedMissionIndex       int
+	selectedMissionStepIndex   int
+	missionPaneFocus           missionPaneFocus
+	missionDetail              *MissionDetail
 	terminalPaneVisible        bool
 	terminalLayoutMode         TerminalLayoutMode
 	activeTaskID               string
@@ -129,6 +152,8 @@ type Model struct {
 	terminalBoardNavVersion    int
 
 	createTaskModal          *createTaskModalState
+	createMissionModal       *createMissionModalState
+	addMissionStepModal      *addMissionStepModalState
 	renameTaskModal          *renameTaskModalState
 	taskDescriptionModal     *taskDescriptionModalState
 	prCommentModal           *prCommentModalState
@@ -152,6 +177,8 @@ func NewModel(socketPath string) (*Model, error) {
 		client:                  client,
 		focus:                   FocusBoard,
 		modal:                   ModalNone,
+		activeTab:               AppTabBoard,
+		missionPaneFocus:        missionPaneList,
 		terminalLayoutMode:      TerminalLayoutMode("side-by-side"),
 		sessionActivityByTaskID: map[string]*SessionActivitySnapshot{},
 		themeMode:               ThemeMode("truecolor"),
@@ -162,7 +189,7 @@ func NewModel(socketPath string) (*Model, error) {
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.subscribeCmd(),
-		m.loadBoardCmd(),
+		m.loadAppStateCmd("", "", ""),
 		waitForEventCmd(m.client.Events()),
 		spinnerTickCmd(),
 		sessionPollTickCmd(),
@@ -224,13 +251,20 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(commands...)
 
-	case boardLoadedMsg:
+	case appStateLoadedMsg:
 		if msg.err != nil {
 			m.daemonConnected = false
 			m.statusMessage = msg.err.Error()
 			return m, nil
 		}
 		m.applyBoard(msg.board)
+		m.applyMissions(msg.missions, msg.missionDetail, msg.selectedMissionID, msg.selectedMissionStepID)
+		if msg.status != "" {
+			m.statusMessage = msg.status
+		}
+		if m.activeTaskID != "" && m.terminalPaneShouldRender() {
+			return m, tea.Batch(m.loadBufferCmd(m.activeTaskID), m.inspectSessionCmd(m.activeTaskID))
+		}
 		return m, nil
 
 	case boardActionMsg:
@@ -244,9 +278,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.status != "" {
 			m.statusMessage = msg.status
 		}
-		if m.activeTaskID != "" && m.terminalPaneShouldRender() {
-			return m, tea.Batch(m.loadBufferCmd(m.activeTaskID), m.inspectSessionCmd(m.activeTaskID))
+		return m, nil
+
+	case boardLoadedMsg:
+		if msg.err != nil {
+			m.daemonConnected = false
+			m.statusMessage = msg.err.Error()
+			return m, nil
 		}
+		m.applyBoard(msg.board)
 		return m, nil
 
 	case sessionOpenedMsg:
@@ -314,11 +354,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) handleRPCEvent(event RPCEvent) tea.Cmd {
 	switch event.Type {
 	case "board_patch":
-		var board BoardSnapshot
-		if err := json.Unmarshal(event.Payload, &board); err != nil {
-			return func() tea.Msg { return asyncErrorMsg{err: err} }
-		}
-		return func() tea.Msg { return boardLoadedMsg{board: board} }
+		return m.loadAppStateCmd("", "", "")
 	case "session_update":
 		var update SessionUpdateEvent
 		if err := json.Unmarshal(event.Payload, &update); err != nil {
@@ -357,6 +393,19 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 
 	if key.Type == tea.KeyCtrlC {
 		return tea.Quit
+	}
+
+	if key.Type == tea.KeyTab {
+		m.switchAppTab(1)
+		return m.persistActiveTabCmd()
+	}
+	if key.Type == tea.KeyShiftTab {
+		m.switchAppTab(-1)
+		return m.persistActiveTabCmd()
+	}
+
+	if m.activeTab == AppTabMissions {
+		return m.handleMissionKey(key)
 	}
 
 	if key.String() == "ctrl+d" {
@@ -741,11 +790,48 @@ func (m *Model) View() string {
 	return renderView(m)
 }
 
-func (m *Model) loadBoardCmd() tea.Cmd {
+func (m *Model) loadAppState(status, selectedMissionID, selectedMissionStepID string) tea.Msg {
+	var board BoardSnapshot
+	if err := m.client.Call("getBoard", nil, &board); err != nil {
+		return appStateLoadedMsg{err: err}
+	}
+
+	var missions []MissionSummaryRecord
+	if err := m.client.Call("listMissions", nil, &missions); err != nil {
+		return appStateLoadedMsg{err: err}
+	}
+
+	missionID := selectedMissionID
+	if missionID == "" {
+		if m.activeMissionID != "" {
+			missionID = m.activeMissionID
+		} else if len(missions) > 0 {
+			missionID = missions[0].ID
+		}
+	}
+
+	var detail *MissionDetail
+	if missionID != "" {
+		var loaded MissionDetail
+		if err := m.client.Call("getMission", map[string]string{"id": missionID}, &loaded); err != nil {
+			return appStateLoadedMsg{err: err}
+		}
+		detail = &loaded
+	}
+
+	return appStateLoadedMsg{
+		board:                 board,
+		missions:              missions,
+		missionDetail:         detail,
+		selectedMissionID:     missionID,
+		selectedMissionStepID: selectedMissionStepID,
+		status:                status,
+	}
+}
+
+func (m *Model) loadAppStateCmd(status, selectedMissionID, selectedMissionStepID string) tea.Cmd {
 	return func() tea.Msg {
-		var board BoardSnapshot
-		err := m.client.Call("getBoard", nil, &board)
-		return boardLoadedMsg{board: board, err: err}
+		return m.loadAppState(status, selectedMissionID, selectedMissionStepID)
 	}
 }
 
@@ -779,13 +865,9 @@ func sessionPollTickCmd() tea.Cmd {
 func (m *Model) boardActionCmd(method string, params interface{}, status string) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.client.Call(method, params, nil); err != nil {
-			return boardActionMsg{err: err}
+			return appStateLoadedMsg{err: err}
 		}
-		var board BoardSnapshot
-		if err := m.client.Call("getBoard", nil, &board); err != nil {
-			return boardActionMsg{err: err}
-		}
-		return boardActionMsg{board: &board, status: status}
+		return m.loadAppState(status, "", "")
 	}
 }
 
@@ -1069,6 +1151,9 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	}
 	m.sessionActivityByTaskID = nextActivity
 
+	if board.UIState.ActiveTab != "" {
+		m.activeTab = board.UIState.ActiveTab
+	}
 	if board.UIState.ActiveRepoID != "" || m.activeRepoID == "" {
 		m.activeRepoID = board.UIState.ActiveRepoID
 	}
@@ -1244,8 +1329,15 @@ func (m *Model) boardRenderWidth() int {
 	return max(1, len(m.sortedTracks())) * trackColumnRenderWidth
 }
 
+func (m *Model) primaryPaneRenderWidth() int {
+	if m.activeTab == AppTabMissions {
+		return missionPaneRenderWidth(m.width)
+	}
+	return m.boardRenderWidth()
+}
+
 func (m *Model) canShowTerminalPane() bool {
-	return m.width-m.boardRenderWidth()-terminalDividerWidth >= minTerminalPaneWidth
+	return m.width-m.primaryPaneRenderWidth()-terminalDividerWidth >= minTerminalPaneWidth
 }
 
 func (m *Model) terminalTakesOver() bool {
@@ -1261,7 +1353,7 @@ func (m *Model) terminalContentWidth() int {
 	if m.terminalUsesFullWidth() {
 		return max(1, m.width)
 	}
-	return max(1, m.width-m.boardRenderWidth()-terminalDividerWidth)
+	return max(1, m.width-m.primaryPaneRenderWidth()-terminalDividerWidth)
 }
 
 func (m *Model) terminalViewportHeight() int {
@@ -1283,7 +1375,7 @@ func (m *Model) terminalViewportHeight() int {
 
 func (m *Model) contentHeight() int {
 	height := m.height - 2 - 1
-	if shouldShowFilterBar(m.filters, m.focus) {
+	if shouldShowFilterBar(m.filters, m.focus, m.activeTab) {
 		height--
 	}
 	return max(1, height)
