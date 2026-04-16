@@ -70,6 +70,12 @@ type archiveConfirmModalState struct {
 	TaskID string
 }
 
+type deleteMissionConfirmModalState struct {
+	MissionID string
+	TaskCount int
+	KeepOpen  bool
+}
+
 type deleteConfirmModalState struct {
 	TaskID string
 }
@@ -148,6 +154,7 @@ func (m *Model) closeModal() {
 	m.taskDescriptionModal = nil
 	m.prCommentModal = nil
 	m.archiveConfirmModal = nil
+	m.deleteMissionConfirmModal = nil
 	m.deleteConfirmModal = nil
 	m.createPillarModal = nil
 	m.deletePillarConfirmModal = nil
@@ -344,6 +351,22 @@ func (m *Model) openDeleteConfirmModal(task *TaskRecord) {
 	m.deleteConfirmModal = &deleteConfirmModalState{TaskID: task.ID}
 }
 
+func (m *Model) openDeleteMissionConfirmModal(mission *MissionSnapshot) {
+	if mission == nil {
+		m.statusMessage = "Select a mission to delete it."
+		return
+	}
+	keepOpen := m.missionsPaneExpanded || m.focus == FocusMissions
+	m.closeModal()
+	m.modal = ModalDeleteMission
+	m.focus = FocusModal
+	m.deleteMissionConfirmModal = &deleteMissionConfirmModalState{
+		MissionID: mission.ID,
+		TaskCount: len(mission.Tasks),
+		KeepOpen:  keepOpen,
+	}
+}
+
 func (m *Model) openCreatePillarModal(assignTaskID string) {
 	m.closeModal()
 	m.modal = ModalCreatePillar
@@ -478,6 +501,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handlePRCommentModalKey(key)
 	case ModalArchiveConfirm:
 		return m.handleArchiveConfirmModalKey(key)
+	case ModalDeleteMission:
+		return m.handleDeleteMissionConfirmModalKey(key)
 	case ModalDeleteConfirm:
 		return m.handleDeleteConfirmModalKey(key)
 	case ModalCreatePillar:
@@ -1000,6 +1025,25 @@ func (m *Model) handleDeleteConfirmModalKey(key tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) handleDeleteMissionConfirmModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.deleteMissionConfirmModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+	if key.Type == tea.KeyEsc || key.String() == "n" || key.String() == "N" {
+		m.closeModal()
+		return nil
+	}
+	if key.String() == "y" || key.String() == "Y" {
+		missionID := state.MissionID
+		keepOpen := state.KeepOpen
+		m.closeModal()
+		return m.deleteMissionCmd(missionID, keepOpen)
+	}
+	return nil
+}
+
 func (m *Model) handleCreatePillarModalKey(key tea.KeyMsg) tea.Cmd {
 	state := m.createPillarModal
 	if state == nil {
@@ -1324,6 +1368,9 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "create-mission":
 		m.openCreateMissionModal()
 		return nil
+	case "delete-mission":
+		m.openDeleteMissionConfirmModal(m.selectedMission())
+		return nil
 	case "add-mission-task":
 		m.openAddMissionTaskModal(m.selectedMission())
 		return nil
@@ -1487,6 +1534,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 	selectedMissionTask := m.selectedMissionTask()
 	return []CommandPaletteItem{
 		{ID: "create-mission", Title: "Create mission", Section: "Mission", Detail: "Create a new mission shell in the left rail.", Shortcut: "N", Keywords: []string{"mission", "plan", "new"}},
+		{ID: "delete-mission", Title: "Delete mission", Section: "Mission", Detail: detailOrFallbackMission(selectedMission, "Delete %s and its tasks", "Delete the selected mission and every task in it."), Shortcut: "d", Keywords: []string{"mission", "remove", "destroy"}, Disabled: selectedMission == nil, DisabledReason: "Select a mission before deleting it."},
 		{ID: "add-mission-task", Title: "Add mission task", Section: "Mission", Detail: detailOrFallbackMission(selectedMission, "Add a new task to %s", "Add a new task to the selected mission."), Shortcut: "n", Keywords: []string{"mission", "task", "step"}, Disabled: selectedMission == nil, DisabledReason: "Select a mission before adding a mission task."},
 		{ID: "edit-mission-dependencies", Title: "Edit mission blockers", Section: "Mission", Detail: detailOrFallbackMissionTask(selectedMissionTask, "Change blockers for %s", "Change blockers for the selected mission task."), Shortcut: "b", Keywords: []string{"mission", "blocker", "dependency"}, Disabled: selectedMissionTask == nil, DisabledReason: "Select a mission task before editing blockers."},
 		{ID: "release-mission-task", Title: "Release mission task to backlog", Section: "Mission", Detail: "Add the selected mission task to the regular board backlog.", Shortcut: "u", Keywords: []string{"mission", "release", "backlog"}, Disabled: selectedMissionTask == nil || selectedMissionTask.ReleasedToBoard, DisabledReason: "Select an unreleased mission task before releasing it."},
@@ -1573,6 +1621,53 @@ func (m *Model) createMissionCmd(title string) tea.Cmd {
 			status:           "Created mission.",
 			selectMissionID:  mission.ID,
 			openMissionsPane: true,
+		}
+	}
+}
+
+func (m *Model) deleteMissionCmd(missionID string, keepOpen bool) tea.Cmd {
+	remaining := make([]MissionSnapshot, 0, max(0, len(m.missions)-1))
+	for _, mission := range m.missions {
+		if mission.ID != missionID {
+			remaining = append(remaining, mission)
+		}
+	}
+
+	nextMissionID := ""
+	nextMissionTaskID := ""
+	if len(remaining) > 0 {
+		nextIndex := clamp(m.selectedMissionIndex, 0, len(remaining)-1)
+		nextMission := remaining[nextIndex]
+		nextMissionID = nextMission.ID
+		if m.selectedMissionTaskIndex >= 0 && len(nextMission.Tasks) > 0 {
+			nextTaskIndex := clamp(m.selectedMissionTaskIndex, 0, len(nextMission.Tasks)-1)
+			nextMissionTaskID = nextMission.Tasks[nextTaskIndex].TaskID
+		}
+	}
+
+	openMissionsPane := keepOpen && nextMissionID != ""
+
+	return func() tea.Msg {
+		if err := m.client.Call("deleteMission", map[string]string{"missionId": missionID}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+		if err := m.client.Call("setUIState", map[string]interface{}{
+			"missionsPaneExpanded":  openMissionsPane,
+			"selectedMissionId":     nextMissionID,
+			"selectedMissionTaskId": nextMissionTaskID,
+		}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+		var board BoardSnapshot
+		if err := m.client.Call("getBoard", nil, &board); err != nil {
+			return boardActionMsg{err: err}
+		}
+		return boardActionMsg{
+			board:               &board,
+			status:              "Deleted mission.",
+			selectMissionID:     nextMissionID,
+			selectMissionTaskID: nextMissionTaskID,
+			openMissionsPane:    openMissionsPane,
 		}
 	}
 }

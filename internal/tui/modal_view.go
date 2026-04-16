@@ -33,6 +33,8 @@ func renderModal(m *Model) string {
 		return renderPRCommentModal(m)
 	case ModalArchiveConfirm:
 		return renderArchiveConfirmModal(m)
+	case ModalDeleteMission:
+		return renderDeleteMissionConfirmModal(m)
 	case ModalDeleteConfirm:
 		return renderDeleteConfirmModal(m)
 	case ModalCreatePillar:
@@ -317,6 +319,29 @@ func renderDeleteConfirmModal(m *Model) string {
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("red")).Render("Delete Task"),
 		"",
 		fmt.Sprintf("Delete task '%s'?", title),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
+	}
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderDeleteMissionConfirmModal(m *Model) string {
+	state := m.deleteMissionConfirmModal
+	if state == nil {
+		return ""
+	}
+	title := state.MissionID
+	if mission := m.selectedMission(); mission != nil && mission.ID == state.MissionID {
+		title = mission.Title
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("red")).Render("Delete Mission"),
+		"",
+		fmt.Sprintf("Delete mission '%s'?", title),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("red")).Render(
+			fmt.Sprintf("This will also delete %d task%s in this mission.", state.TaskCount, ternaryString(state.TaskCount == 1, "", "s")),
+		),
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
 	}

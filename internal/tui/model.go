@@ -147,21 +147,22 @@ type Model struct {
 	terminalBoardNavConsumed   bool
 	terminalBoardNavVersion    int
 
-	createTaskModal          *createTaskModalState
-	createMissionModal       *createMissionModalState
-	addMissionTaskModal      *addMissionTaskModalState
-	renameTaskModal          *renameTaskModalState
-	taskDescriptionModal     *taskDescriptionModalState
-	prCommentModal           *prCommentModalState
-	archiveConfirmModal      *archiveConfirmModalState
-	deleteConfirmModal       *deleteConfirmModalState
-	createPillarModal        *createPillarModalState
-	deletePillarConfirmModal *deletePillarConfirmModalState
-	pillarPickerModal        *pillarPickerModalState
-	filterModal              *filterModalState
-	viewModal                *viewModalState
-	commandPaletteModal      *commandPaletteModalState
-	missionDependenciesModal *missionDependenciesModalState
+	createTaskModal           *createTaskModalState
+	createMissionModal        *createMissionModalState
+	addMissionTaskModal       *addMissionTaskModalState
+	renameTaskModal           *renameTaskModalState
+	taskDescriptionModal      *taskDescriptionModalState
+	prCommentModal            *prCommentModalState
+	archiveConfirmModal       *archiveConfirmModalState
+	deleteMissionConfirmModal *deleteMissionConfirmModalState
+	deleteConfirmModal        *deleteConfirmModalState
+	createPillarModal         *createPillarModalState
+	deletePillarConfirmModal  *deletePillarConfirmModalState
+	pillarPickerModal         *pillarPickerModalState
+	filterModal               *filterModalState
+	viewModal                 *viewModalState
+	commandPaletteModal       *commandPaletteModalState
+	missionDependenciesModal  *missionDependenciesModalState
 }
 
 func NewModel(socketPath string) (*Model, error) {
@@ -568,6 +569,9 @@ func (m *Model) handleMissionKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	case "b":
 		m.openMissionDependenciesModal(m.selectedMissionTask())
+		return nil
+	case "d":
+		m.openDeleteMissionConfirmModal(m.selectedMission())
 		return nil
 	case ":":
 		m.openCommandPaletteModal()

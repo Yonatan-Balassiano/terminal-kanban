@@ -317,6 +317,7 @@ export type RPCMethod =
   | 'getBoard'
   | 'setUIState'
   | 'createMission'
+  | 'deleteMission'
   | 'addMissionTask'
   | 'setMissionTaskDependencies'
   | 'releaseMissionTaskToBoard'
@@ -369,6 +370,10 @@ export interface CreateMissionParams {
   title: string;
 }
 export type CreateMissionResult = MissionRecord;
+
+export interface DeleteMissionParams {
+  missionId: string;
+}
 
 export interface AddMissionTaskParams {
   missionId: string;
