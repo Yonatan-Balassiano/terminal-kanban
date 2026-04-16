@@ -736,7 +736,7 @@ func renderStatusBar(m *Model) string {
 func renderHelpModal() string {
 	sections := [][]string{
 		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
-		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers"},
+		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers, d deletes the selected mission"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete, a archive", "p assign pillar, P create pillar, D delete pillar and its tasks", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
@@ -1452,7 +1452,7 @@ func kbdHints(focus AppFocus) string {
 	case FocusBoard:
 		return "move  u missions  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
 	case FocusMissions:
-		return "j/k move  u release-or-close  n add task  N new mission  b blockers  Enter board  Esc close"
+		return "j/k move  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
 	case FocusTerminal:
 		return "Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
 	case FocusModal:

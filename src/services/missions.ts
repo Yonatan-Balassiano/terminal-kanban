@@ -108,6 +108,29 @@ export class MissionService {
     };
   }
 
+  async deleteMission(
+    missionId: string,
+    deleteTask: (taskId: string) => void | Promise<void> = (taskId) => this.board.deleteTask(taskId),
+  ): Promise<void> {
+    this.requireMission(missionId);
+
+    const taskIds = this.db
+      .prepare<[string], { task_id: string }>(
+        `SELECT task_id
+         FROM mission_tasks
+         WHERE mission_id = ?
+         ORDER BY sort_key, created_at`,
+      )
+      .all(missionId)
+      .map((row) => row.task_id);
+
+    for (const taskId of taskIds) {
+      await deleteTask(taskId);
+    }
+
+    this.db.prepare<[string], void>('DELETE FROM missions WHERE id = ?').run(missionId);
+  }
+
   addMissionTask(params: AddMissionTaskParams): MissionTaskRecord {
     this.requireMission(params.missionId);
 

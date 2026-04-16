@@ -189,3 +189,67 @@ func TestRenderAddMissionTaskModalBlockerSelectionShowsOptions(t *testing.T) {
 		t.Fatalf("rendered modal missing selected blocker option:\n%s", rendered)
 	}
 }
+
+func TestOpenDeleteMissionConfirmModalCapturesMissionState(t *testing.T) {
+	model := &Model{
+		focus:                FocusMissions,
+		missionsPaneExpanded: true,
+		selectedMissionIndex: 0,
+		missions: []MissionSnapshot{
+			{
+				ID:    "mission-1",
+				Title: "Rollout",
+				Tasks: []MissionTaskRecord{
+					{MissionID: "mission-1", TaskID: "task-1"},
+					{MissionID: "mission-1", TaskID: "task-2"},
+				},
+			},
+		},
+	}
+
+	model.openDeleteMissionConfirmModal(model.selectedMission())
+
+	if model.modal != ModalDeleteMission {
+		t.Fatalf("modal = %q, want %q", model.modal, ModalDeleteMission)
+	}
+	if model.deleteMissionConfirmModal == nil {
+		t.Fatal("deleteMissionConfirmModal = nil, want state")
+	}
+	if model.deleteMissionConfirmModal.MissionID != "mission-1" {
+		t.Fatalf("MissionID = %q, want mission-1", model.deleteMissionConfirmModal.MissionID)
+	}
+	if model.deleteMissionConfirmModal.TaskCount != 2 {
+		t.Fatalf("TaskCount = %d, want 2", model.deleteMissionConfirmModal.TaskCount)
+	}
+	if !model.deleteMissionConfirmModal.KeepOpen {
+		t.Fatal("KeepOpen = false, want true")
+	}
+}
+
+func TestRenderDeleteMissionConfirmModalShowsTaskWarning(t *testing.T) {
+	model := &Model{
+		selectedMissionIndex: 0,
+		missions: []MissionSnapshot{
+			{
+				ID:    "mission-1",
+				Title: "Rollout",
+			},
+		},
+		deleteMissionConfirmModal: &deleteMissionConfirmModalState{
+			MissionID: "mission-1",
+			TaskCount: 2,
+		},
+	}
+
+	rendered := ansiPattern.ReplaceAllString(renderDeleteMissionConfirmModal(model), "")
+
+	if !strings.Contains(rendered, "Delete Mission") {
+		t.Fatalf("rendered modal missing title:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Delete mission 'Rollout'?") {
+		t.Fatalf("rendered modal missing mission prompt:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "This will also delete 2 tasks in this mission.") {
+		t.Fatalf("rendered modal missing task warning:\n%s", rendered)
+	}
+}

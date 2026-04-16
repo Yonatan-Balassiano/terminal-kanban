@@ -146,6 +146,60 @@ describe('daemon createMission dispatch', () => {
   });
 });
 
+describe('daemon deleteMission dispatch', () => {
+  it('deletes mission tasks through the lifecycle service and emits a board patch asynchronously', async () => {
+    vi.useFakeTimers();
+    try {
+      const deleteTask = vi.fn().mockResolvedValue(undefined);
+      const deleteMission = vi.fn().mockImplementation(async (_missionId, taskDeleter) => {
+        await taskDeleter('task-1');
+        await taskDeleter('task-2');
+      });
+      const getBoardSnapshot = vi.fn().mockReturnValue({ missions: [] });
+
+      const boardPatchEvent = new Promise<unknown>((resolve) => {
+        serverEvents.once('event', resolve);
+      });
+
+      const response = await dispatch(
+        {
+          id: 'req-delete-mission',
+          method: 'deleteMission',
+          params: {
+            missionId: 'mission-1',
+          },
+        },
+        {
+          missions: { deleteMission },
+          taskLifecycle: { deleteTask },
+          view: { getBoardSnapshot },
+        } as never,
+        '/tmp/agentboard.sock',
+      );
+
+      expect(deleteMission).toHaveBeenCalledWith('mission-1', expect.any(Function));
+      expect(deleteTask).toHaveBeenCalledTimes(2);
+      expect(deleteTask).toHaveBeenNthCalledWith(1, 'task-1');
+      expect(deleteTask).toHaveBeenNthCalledWith(2, 'task-2');
+      expect(response).toEqual({
+        id: 'req-delete-mission',
+        result: null,
+      });
+      expect(getBoardSnapshot).not.toHaveBeenCalled();
+
+      await vi.runAllTimersAsync();
+
+      expect(getBoardSnapshot).toHaveBeenCalledTimes(1);
+      await expect(boardPatchEvent).resolves.toEqual({
+        type: 'board_patch',
+        payload: { missions: [] },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('daemon mergeTaskPR dispatch', () => {
   it('updates the board immediately and does not await the follow-up sync', async () => {
     let resolveTrigger: (() => void) | null = null;

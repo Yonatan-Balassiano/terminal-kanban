@@ -34,6 +34,7 @@ const (
 	ModalAddMissionTask  ModalType = "add-mission-task"
 	ModalCommandPalette  ModalType = "command-palette"
 	ModalMissionDeps     ModalType = "mission-dependencies"
+	ModalDeleteMission   ModalType = "delete-mission-confirm"
 	ModalRenameTask      ModalType = "rename-task"
 	ModalTaskDescription ModalType = "task-description"
 	ModalPRComment       ModalType = "pr-comment"

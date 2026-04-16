@@ -15,6 +15,7 @@ import type {
   DaemonStatus,
   UIStateRecord,
   CreateMissionParams,
+  DeleteMissionParams,
   AddMissionTaskParams,
   SetMissionTaskDependenciesParams,
   ReleaseMissionTaskToBoardParams,
@@ -138,6 +139,17 @@ export async function dispatch(
         const mission = services.missions.createMission(p as unknown as CreateMissionParams);
         emitBoardPatchAsync(services);
         return { id: req.id, result: mission };
+      }
+
+      case 'deleteMission': {
+        await services.missions.deleteMission(
+          (p as unknown as DeleteMissionParams).missionId,
+          async (taskId) => {
+            await services.taskLifecycle.deleteTask(taskId);
+          },
+        );
+        emitBoardPatchAsync(services);
+        return { id: req.id, result: null };
       }
 
       case 'addMissionTask': {

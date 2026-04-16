@@ -98,4 +98,31 @@ describe('MissionService', () => {
     expect(snapshot.missions[0].completedAt).toBeDefined();
     expect(snapshot.missions[0].counts.merged).toBe(2);
   });
+
+  it('deletes the mission and every task attached to it', async () => {
+    const mission = missions.createMission({ title: 'Retire rollout' });
+    const firstTask = missions.addMissionTask({
+      missionId: mission.id,
+      title: 'Base change',
+      repoId: 'repo-1',
+    });
+    const secondTask = missions.addMissionTask({
+      missionId: mission.id,
+      title: 'Follow-up',
+      repoId: 'repo-1',
+      blockerTaskIds: [firstTask.taskId],
+    });
+    const outsideTask = board.createTask({
+      title: 'Standalone work',
+      repoId: 'repo-1',
+    });
+
+    await missions.deleteMission(mission.id);
+
+    const snapshot = view.getBoardSnapshot();
+    expect(snapshot.missions).toEqual([]);
+    expect(board.getTask(firstTask.taskId)).toBeNull();
+    expect(board.getTask(secondTask.taskId)).toBeNull();
+    expect(board.getTask(outsideTask.id)?.id).toBe(outsideTask.id);
+  });
 });
