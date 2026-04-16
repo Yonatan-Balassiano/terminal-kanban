@@ -150,6 +150,7 @@ describe('SessionManager branch fallback', () => {
       }),
     );
     expect(board.getTask(task.id)?.branchName).toBe(session.branch);
+    expect(board.getTask(task.id)?.trackId).toBe('in-progress');
   });
 
   it('passes the stored task agent into new session creation', async () => {
@@ -364,6 +365,7 @@ describe('SessionManager branch fallback', () => {
     const session = await manager.openSession(task.id);
 
     expect(session.branch).toBe(task.branchName);
+    expect(board.getTask(task.id)?.trackId).toBe('backlog');
     expect(sendInput).not.toHaveBeenCalled();
   });
 

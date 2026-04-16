@@ -43,6 +43,7 @@ interface TaskRow {
   title: string;
   repo_id: string;
   agent_cli: 'claude' | 'codex' | null;
+  track_id: string;
   branch_name: string | null;
   worktree_path: string | null;
   session_id: string | null;
@@ -278,7 +279,7 @@ export class SessionManager {
     // 1. Load task
     const taskRow = this.db
       .prepare<[string], TaskRow>(
-        'SELECT id, title, repo_id, agent_cli, branch_name, worktree_path, session_id FROM tasks WHERE id = ?',
+        'SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path, session_id FROM tasks WHERE id = ?',
       )
       .get(taskId);
 
@@ -416,6 +417,9 @@ export class SessionManager {
 
     // 7. Link session to task
     await this.board.linkSession?.(taskId, sessionRecord.id);
+    if (taskRow.track_id === 'backlog') {
+      this.board.moveTask({ id: taskId, trackId: 'in-progress' });
+    }
     this.clearTaskAttention(taskId);
 
     return sessionRecord;

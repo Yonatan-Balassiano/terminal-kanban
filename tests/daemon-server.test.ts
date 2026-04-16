@@ -91,6 +91,61 @@ describe('daemon createTask dispatch', () => {
   });
 });
 
+describe('daemon createMission dispatch', () => {
+  it('returns the mission without waiting on the board patch snapshot', async () => {
+    vi.useFakeTimers();
+    try {
+      const mission = {
+        id: 'mission-1',
+        title: 'Cross-repo rollout',
+        sortKey: 1000,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const createMission = vi.fn().mockReturnValue(mission);
+      const getBoardSnapshot = vi.fn().mockReturnValue({ missions: [mission] });
+
+      const boardPatchEvent = new Promise<unknown>((resolve) => {
+        serverEvents.once('event', resolve);
+      });
+
+      const response = await dispatch(
+        {
+          id: 'req-mission',
+          method: 'createMission',
+          params: {
+            title: 'Cross-repo rollout',
+          },
+        },
+        {
+          missions: { createMission },
+          view: { getBoardSnapshot },
+        } as never,
+        '/tmp/agentboard.sock',
+      );
+
+      expect(createMission).toHaveBeenCalledWith({
+        title: 'Cross-repo rollout',
+      });
+      expect(response).toEqual({
+        id: 'req-mission',
+        result: mission,
+      });
+      expect(getBoardSnapshot).not.toHaveBeenCalled();
+
+      await vi.runAllTimersAsync();
+
+      expect(getBoardSnapshot).toHaveBeenCalledTimes(1);
+      await expect(boardPatchEvent).resolves.toEqual({
+        type: 'board_patch',
+        payload: { missions: [mission] },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('daemon mergeTaskPR dispatch', () => {
   it('updates the board immediately and does not await the follow-up sync', async () => {
     let resolveTrigger: (() => void) | null = null;

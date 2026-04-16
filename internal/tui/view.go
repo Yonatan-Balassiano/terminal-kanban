@@ -282,14 +282,17 @@ func renderFilterBar(m *Model) string {
 }
 
 func renderBoard(m *Model, height int) string {
+	rail := renderMissionRail(m, height)
+
 	if len(m.repos) == 0 {
-		return fitHeight(
+		board := fitHeight(
 			lipgloss.NewStyle().
 				Padding(1, 2).
 				Foreground(lipgloss.Color(uiChrome.Muted)).
 				Render("No repos registered. Run: agentboard repos add <path>"),
 			height,
 		)
+		return fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), height)
 	}
 
 	repoLabels := map[string]string{}
@@ -312,13 +315,159 @@ func renderBoard(m *Model, height int) string {
 		))
 	}
 
-	return fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, columns...), height)
+	board := fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, columns...), height)
+	return fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), height)
+}
+
+func renderMissionRail(m *Model, height int) string {
+	width := m.missionRailWidth()
+	contentWidth := max(1, width-4)
+	title := "MISSIONS"
+	if !m.missionsPaneExpanded && m.focus != FocusMissions {
+		title = "MISS"
+	}
+	header := joinSpaceBetween(
+		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(m.focus == FocusMissions, uiChrome.Accent, uiChrome.Text))).Render(title),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(fmt.Sprintf("%d", len(m.missions))),
+		contentWidth,
+	)
+
+	rows := m.missionRows()
+	lines := []string{}
+	if len(rows) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No missions"))
+	} else {
+		selectionIndex := 0
+		for index, row := range rows {
+			if row.MissionIndex == m.selectedMissionIndex && row.TaskIndex == m.selectedMissionTaskIndex {
+				selectionIndex = index
+				break
+			}
+		}
+		itemHeights := make([]int, len(rows))
+		for index := range itemHeights {
+			itemHeights[index] = 1
+		}
+		windowStart, windowEnd := visibleWindow(itemHeights, selectionIndex, max(1, height-3))
+		for _, row := range rows[windowStart:windowEnd] {
+			if row.TaskIndex == missionSummaryRowTaskIndex {
+				lines = append(lines, renderMissionSummaryRow(m, row.MissionIndex, contentWidth))
+				continue
+			}
+			if row.TaskIndex == missionEmptyRowTaskIndex {
+				lines = append(lines, renderMissionEmptyRow(m, row.MissionIndex, contentWidth))
+				continue
+			}
+			lines = append(lines, renderMissionTaskRow(m, row.MissionIndex, row.TaskIndex, contentWidth))
+		}
+	}
+
+	border := lipgloss.NormalBorder()
+	if m.focus == FocusMissions {
+		border = lipgloss.RoundedBorder()
+	}
+
+	return fitHeight(
+		lipgloss.NewStyle().
+			Width(width).
+			Height(height).
+			Border(border).
+			BorderForeground(lipgloss.Color(ternaryString(m.focus == FocusMissions, uiChrome.Accent, uiChrome.Line))).
+			Render(header+"\n"+strings.Join(lines, "\n")),
+		height,
+	)
+}
+
+func renderMissionSummaryRow(m *Model, missionIndex int, width int) string {
+	if missionIndex < 0 || missionIndex >= len(m.missions) {
+		return ""
+	}
+	mission := m.missions[missionIndex]
+	selected := m.focus == FocusMissions && m.selectedMissionIndex == missionIndex && m.selectedMissionTaskIndex == missionSummaryRowTaskIndex
+	prefix := ternaryString(selected, "▸ ", "  ")
+	title := truncateText(mission.Title, max(1, width-12))
+	counts := fmt.Sprintf("%d/%d/%d/%d", mission.Counts.Backlog, mission.Counts.InProgress, mission.Counts.PR, mission.Counts.Merged)
+	row := joinSpaceBetween(prefix+title, counts, width)
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
+	if mission.CompletedAt != nil {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Success))
+	}
+	if selected {
+		style = style.Bold(true).Foreground(lipgloss.Color(uiChrome.Accent))
+	}
+	return style.Render(row)
+}
+
+func renderMissionEmptyRow(m *Model, missionIndex int, width int) string {
+	if missionIndex < 0 || missionIndex >= len(m.missions) {
+		return ""
+	}
+	selected := m.focus == FocusMissions && m.selectedMissionIndex == missionIndex && m.selectedMissionTaskIndex == missionEmptyRowTaskIndex
+	label := "No tasks yet"
+	right := "n add"
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
+	if selected {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent))
+	}
+	return style.Render(joinSpaceBetween("    "+label, right, width))
+}
+
+func renderMissionTaskRow(m *Model, missionIndex, taskIndex, width int) string {
+	if missionIndex < 0 || missionIndex >= len(m.missions) {
+		return ""
+	}
+	mission := m.missions[missionIndex]
+	if taskIndex < 0 || taskIndex >= len(mission.Tasks) {
+		return ""
+	}
+	missionTask := mission.Tasks[taskIndex]
+	selected := m.focus == FocusMissions && m.selectedMissionIndex == missionIndex && m.selectedMissionTaskIndex == taskIndex
+	statusIcon := "○"
+	statusColor := uiChrome.Muted
+	switch missionTask.Status {
+	case "in-progress":
+		statusIcon = "●"
+		statusColor = uiChrome.Accent
+	case "pr":
+		statusIcon = "↗"
+		statusColor = uiChrome.Warning
+	case "merged":
+		statusIcon = "✓"
+		statusColor = uiChrome.Success
+	}
+	if missionTask.IsBlocked && missionTask.Status != "merged" {
+		statusIcon = "×"
+		statusColor = uiChrome.Danger
+	}
+
+	label := truncateText(missionTask.Task.Title, max(1, width-12))
+	right := ""
+	switch {
+	case !missionTask.ReleasedToBoard:
+		right = "hold"
+	case missionTask.IsBlocked && missionTask.Status != "merged":
+		right = "blk"
+	case missionTask.Status == "merged":
+		right = "done"
+	}
+	left := ternaryString(selected, "▸ ", "  ") + statusIcon + " " + label
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor))
+	if missionTask.Status != "merged" {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
+	}
+	if selected {
+		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Accent))
+	}
+	if missionTask.Status == "merged" {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Success))
+	}
+	return style.Render(joinSpaceBetween(left, right, width))
 }
 
 func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected bool, height int, repoLabels map[string]string) string {
 	taskHeights := make([]int, 0, len(tasks))
 	for _, task := range tasks {
-		taskHeights = append(taskHeights, taskCardHeight(task))
+		taskHeights = append(taskHeights, taskCardHeight(m, task))
 	}
 	listHeight := max(1, height-3)
 	windowStart, windowEnd := visibleWindow(taskHeights, ternaryInt(isSelected, m.selectedTaskIndex, 0), listHeight)
@@ -368,6 +517,7 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 	headerStatus := headerStatusModel(m, task, activity, isActiveSession)
 	activeSessionIcon := headerStatus.Icon
 	descriptionPreview := descriptionLine(task.Description)
+	missionPreview := taskMissionLine(m, task.ID)
 	titleLines := taskTitleLines(task.Title)
 	branchLabel := truncateText(compactBranchLabel(task.BranchName), 16)
 	workspaceLabel := "root"
@@ -390,6 +540,9 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 	}
 	if descriptionPreview != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(descriptionPreview, taskCardContentWidth)))
+	}
+	if missionPreview != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Render(truncateText(missionPreview, taskCardContentWidth)))
 	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(strings.Repeat("─", taskCardContentWidth)))
 
@@ -563,6 +716,14 @@ func renderStatusBar(m *Model) string {
 	}
 	if m.statusMessage != "" {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(m.statusMessage, max(1, m.width/2))))
+	} else if m.focus == FocusMissions {
+		if missionTask := m.selectedMissionTask(); missionTask != nil {
+			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Mission task: "+missionTask.Task.Title))
+		} else if mission := m.selectedMission(); mission != nil {
+			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Mission: "+mission.Title))
+		} else {
+			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Ready"))
+		}
 	} else if contextTask != nil {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Selected: "+contextTask.Title))
 	} else {
@@ -575,6 +736,7 @@ func renderStatusBar(m *Model) string {
 func renderHelpModal() string {
 	sections := [][]string{
 		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
+		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete, a archive", "p assign pillar, P create pillar, D delete pillar and its tasks", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
@@ -755,12 +917,35 @@ func taskCardBorderColor(task TaskRecord, isSelected bool) string {
 	return "#475569"
 }
 
-func taskCardHeight(task TaskRecord) int {
+func taskCardHeight(m *Model, task TaskRecord) int {
 	height := 8 + len(taskTitleLines(task.Title))
 	if descriptionLine(task.Description) != "" {
 		height++
 	}
+	if taskMissionLine(m, task.ID) != "" {
+		height++
+	}
 	return height
+}
+
+func taskMissionLine(m *Model, taskID string) string {
+	if m == nil {
+		return ""
+	}
+	mission, missionTask := m.missionForTask(taskID)
+	if mission == nil || missionTask == nil {
+		return ""
+	}
+
+	label := "Mission: " + mission.Title
+	switch {
+	case !missionTask.ReleasedToBoard:
+		return label + " | hold"
+	case missionTask.IsBlocked && missionTask.Status != "merged":
+		return label + " | blocked"
+	default:
+		return label
+	}
 }
 
 func taskTitleLines(title string) []string {
@@ -1265,7 +1450,9 @@ func headerText(icon, value, color string) string {
 func kbdHints(focus AppFocus) string {
 	switch focus {
 	case FocusBoard:
-		return "move  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
+		return "move  u missions  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
+	case FocusMissions:
+		return "j/k move  u release-or-close  n add task  N new mission  b blockers  Enter board  Esc close"
 	case FocusTerminal:
 		return "Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
 	case FocusModal:

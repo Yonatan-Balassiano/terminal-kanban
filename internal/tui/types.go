@@ -14,6 +14,7 @@ type GitState string
 type TerminalLayoutMode string
 type SessionActivityKind string
 type AgentCLI string
+type MissionTaskStatus string
 
 type AppFocus string
 type ModalType string
@@ -24,11 +25,15 @@ const (
 	FocusFilterBar AppFocus = "filterbar"
 	FocusModal     AppFocus = "modal"
 	FocusSearch    AppFocus = "search"
+	FocusMissions  AppFocus = "missions"
 )
 
 const (
 	ModalCreateTask      ModalType = "create-task"
+	ModalCreateMission   ModalType = "create-mission"
+	ModalAddMissionTask  ModalType = "add-mission-task"
 	ModalCommandPalette  ModalType = "command-palette"
+	ModalMissionDeps     ModalType = "mission-dependencies"
 	ModalRenameTask      ModalType = "rename-task"
 	ModalTaskDescription ModalType = "task-description"
 	ModalPRComment       ModalType = "pr-comment"
@@ -123,6 +128,46 @@ type TaskRecord struct {
 	UpdatedAt                 int64            `json:"updatedAt"`
 }
 
+type MissionRecord struct {
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	SortKey     float64 `json:"sortKey"`
+	CompletedAt *int64  `json:"completedAt"`
+	CreatedAt   int64   `json:"createdAt"`
+	UpdatedAt   int64   `json:"updatedAt"`
+}
+
+type MissionStatusCounts struct {
+	Backlog    int `json:"backlog"`
+	InProgress int `json:"inProgress"`
+	PR         int `json:"pr"`
+	Merged     int `json:"merged"`
+}
+
+type MissionTaskRecord struct {
+	MissionID       string            `json:"missionId"`
+	TaskID          string            `json:"taskId"`
+	SortKey         float64           `json:"sortKey"`
+	ReleasedToBoard bool              `json:"releasedToBoard"`
+	ReleasedAt      *int64            `json:"releasedAt"`
+	BlockerTaskIDs  []string          `json:"blockerTaskIds"`
+	BlockedTaskIDs  []string          `json:"blockedTaskIds"`
+	Status          MissionTaskStatus `json:"status"`
+	IsBlocked       bool              `json:"isBlocked"`
+	Task            TaskRecord        `json:"task"`
+}
+
+type MissionSnapshot struct {
+	ID          string              `json:"id"`
+	Title       string              `json:"title"`
+	SortKey     float64             `json:"sortKey"`
+	CompletedAt *int64              `json:"completedAt"`
+	CreatedAt   int64               `json:"createdAt"`
+	UpdatedAt   int64               `json:"updatedAt"`
+	Counts      MissionStatusCounts `json:"counts"`
+	Tasks       []MissionTaskRecord `json:"tasks"`
+}
+
 type SessionRecord struct {
 	ID               string             `json:"id"`
 	TaskID           string             `json:"taskId"`
@@ -147,14 +192,17 @@ type SavedViewRecord struct {
 }
 
 type UIStateRecord struct {
-	ActiveRepoID        string             `json:"activeRepoId"`
-	ActiveViewID        string             `json:"activeViewId"`
-	Filters             *FilterModel       `json:"filters"`
-	SelectedTrackID     string             `json:"selectedTrackId"`
-	SelectedTaskID      string             `json:"selectedTaskId"`
-	TerminalPaneVisible *bool              `json:"terminalPaneVisible"`
-	TerminalLayoutMode  TerminalLayoutMode `json:"terminalLayoutMode"`
-	ThemeMode           ThemeMode          `json:"themeMode"`
+	ActiveRepoID          string             `json:"activeRepoId"`
+	ActiveViewID          string             `json:"activeViewId"`
+	Filters               *FilterModel       `json:"filters"`
+	SelectedTrackID       string             `json:"selectedTrackId"`
+	SelectedTaskID        string             `json:"selectedTaskId"`
+	SelectedMissionID     string             `json:"selectedMissionId"`
+	SelectedMissionTaskID string             `json:"selectedMissionTaskId"`
+	TerminalPaneVisible   *bool              `json:"terminalPaneVisible"`
+	TerminalLayoutMode    TerminalLayoutMode `json:"terminalLayoutMode"`
+	MissionsPaneExpanded  *bool              `json:"missionsPaneExpanded"`
+	ThemeMode             ThemeMode          `json:"themeMode"`
 }
 
 type FilterModel struct {
@@ -175,6 +223,7 @@ type BoardSnapshot struct {
 	Labels     []LabelRecord     `json:"labels"`
 	Tracks     []TrackRecord     `json:"tracks"`
 	Tasks      []TaskRecord      `json:"tasks"`
+	Missions   []MissionSnapshot `json:"missions"`
 	SavedViews []SavedViewRecord `json:"savedViews"`
 	UIState    UIStateRecord     `json:"uiState"`
 }

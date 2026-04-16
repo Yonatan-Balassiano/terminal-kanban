@@ -34,7 +34,7 @@ Core ideas:
 
 Required:
 
-- Node.js `>= 20`
+- Node.js `24.x`
 - Go `>= 1.26.2`
 - Git
 

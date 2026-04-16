@@ -1,6 +1,6 @@
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
-import { readdirSync, readFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { randomBytes } from 'crypto';
 
@@ -13,54 +13,94 @@ const BetterSqlite3 = require('better-sqlite3') as {
   new (path: string, options?: Options): Database;
 };
 
+const SCHEMA_VERSION_KEY = 'schema_version';
+export const CURRENT_SCHEMA_VERSION = '2026-04-16-node24';
+
 // --------------- ID generator --------------------------------
 
 export function generateId(): string {
   return randomBytes(4).toString('hex');
 }
 
-// --------------- Migration runner ----------------------------
+function schemaPath(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), 'schema.sql');
+}
 
-function runMigrations(db: Db): void {
-  // Ensure the migrations tracking table exists before anything else.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS _migrations (
-      name TEXT PRIMARY KEY,
-      ran_at INTEGER NOT NULL
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function tableExists(db: Db, name: string): boolean {
+  const row = db
+    .prepare<[string], { name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
     )
-  `);
+    .get(name);
+  return row !== undefined;
+}
 
-  const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), 'migrations');
+function listUserObjects(db: Db, type: 'table' | 'view'): string[] {
+  return db
+    .prepare<[string], { name: string }>(
+      `SELECT name
+         FROM sqlite_master
+        WHERE type = ?
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY name`,
+    )
+    .all(type)
+    .map((row) => row.name);
+}
 
-  let files: string[];
+function currentSchemaVersion(db: Db): string | null {
+  if (!tableExists(db, '_schema_meta')) {
+    return null;
+  }
+
+  const row = db
+    .prepare<[string], { value: string }>('SELECT value FROM _schema_meta WHERE key = ?')
+    .get(SCHEMA_VERSION_KEY);
+  return row?.value ?? null;
+}
+
+function recreateSchema(db: Db): void {
+  const schemaSql = readFileSync(schemaPath(), 'utf8');
+  const viewNames = listUserObjects(db, 'view');
+  const tableNames = listUserObjects(db, 'table');
+
+  db.pragma('foreign_keys = OFF');
   try {
-    files = readdirSync(migrationsDir)
-      .filter((f) => /^\d+.*\.sql$/.test(f))
-      .sort();
-  } catch {
-    // No migrations directory — nothing to run.
+    const apply = db.transaction(() => {
+      for (const viewName of viewNames) {
+        db.exec(`DROP VIEW IF EXISTS ${quoteIdentifier(viewName)}`);
+      }
+
+      for (const tableName of tableNames) {
+        db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(tableName)}`);
+      }
+
+      db.exec(schemaSql);
+      db.prepare<[string, string, number], void>(
+        `INSERT INTO _schema_meta (key, value, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE
+           SET value = excluded.value,
+               updated_at = excluded.updated_at`,
+      ).run(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION, Date.now());
+    });
+
+    apply();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+function ensureCurrentSchema(db: Db): void {
+  if (currentSchemaVersion(db) === CURRENT_SCHEMA_VERSION) {
     return;
   }
 
-  const ranStmt = db.prepare<[], { name: string }>('SELECT name FROM _migrations');
-  const ran = new Set(ranStmt.all().map((r) => r.name));
-
-  const insertStmt = db.prepare<[string, number], void>(
-    'INSERT INTO _migrations (name, ran_at) VALUES (?, ?)',
-  );
-
-  for (const file of files) {
-    if (ran.has(file)) continue;
-
-    const sql = readFileSync(join(migrationsDir, file), 'utf8');
-
-    const applyMigration = db.transaction(() => {
-      db.exec(sql);
-      insertStmt.run(file, Date.now());
-    });
-
-    applyMigration();
-  }
+  recreateSchema(db);
 }
 
 // --------------- openDb --------------------------------------
@@ -73,7 +113,7 @@ export function openDb(dbPath: string): Db {
   db.pragma('synchronous = NORMAL');
   db.pragma('cache_size = -32000');
 
-  runMigrations(db);
+  ensureCurrentSchema(db);
 
   return db;
 }

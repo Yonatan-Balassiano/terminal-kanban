@@ -11,6 +11,7 @@ import { spawn } from 'child_process';
 
 export interface ServiceContainer {
   board: import('../services/board.js').BoardService;
+  missions: import('../services/missions.js').MissionService;
   workspace: import('../services/workspace.js').WorkspaceService;
   worktrees: import('../services/worktree.js').WorktreeService;
   taskLifecycle: import('../services/task-lifecycle.js').TaskLifecycleService;
@@ -244,6 +245,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   // ---- Wire up all services -----------------------------------
   const { BoardService } = await import('../services/board.js');
   const { WorkspaceService } = await import('../services/workspace.js');
+  const { MissionService } = await import('../services/missions.js');
   const { ViewService } = await import('../services/view.js');
   const { GitService } = await import('../services/git.js');
   const { GitHubService } = await import('../services/github.js');
@@ -265,8 +267,9 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   }
 
   const board = new BoardService(db);
+  const missions = new MissionService(db, board);
   const workspace = new WorkspaceService(db);
-  const view = new ViewService(board);
+  const view = new ViewService(board, missions);
   const git = new GitService();
   const github = new GitHubService();
   const events = new EventLogService(db);
@@ -280,7 +283,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     });
   }, cfg.sessionBootstrapScript);
   const taskLifecycle = new TaskLifecycleService(db, board, git, session);
-  const sync = new SyncService(board, github, git, db);
+  const sync = new SyncService(board, missions, github, git, db);
 
   // ---- Load config and seed tracks + poll interval -----------
   let pollIntervalMs = 60000;
@@ -333,6 +336,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     db,
     dbPath: opts.dbPath,
     board,
+    missions,
     workspace,
     worktrees,
     taskLifecycle,
