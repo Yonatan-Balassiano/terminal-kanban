@@ -14,7 +14,7 @@ import {
   writeDefaultConfig,
   type ConfigPaths,
 } from '../config/index.js';
-import { ensureRunning, readPidFile } from '../daemon/index.js';
+import { ensureRunning, stopDaemon } from '../daemon/index.js';
 import { createRPCClient } from './rpc.js';
 import type {
   DoctorCheck,
@@ -491,13 +491,15 @@ export function buildCli(): Command {
     .action(async () => {
       try {
         const paths = configPaths();
-        const pidFile = `${paths.stateDir}/daemon.pid`;
-        const pid = readPidFile(pidFile);
-        if (!pid) {
-          console.log('Daemon is not running (no PID file found).');
+        const stopped = await stopDaemon({
+          stateDir: paths.stateDir,
+          socketPath: paths.socketPath,
+          logFile: paths.logFile,
+        });
+        if (!stopped) {
+          console.log('Daemon is not running.');
           return;
         }
-        process.kill(pid, 'SIGTERM');
         console.log('Daemon stopped.');
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);

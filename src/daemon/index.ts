@@ -116,6 +116,45 @@ function normalizeBoardTracks(
   }));
 }
 
+function daemonPidPaths(stateDir: string): { pidFile: string; lockFile: string } {
+  return {
+    pidFile: path.join(stateDir, 'daemon.pid'),
+    lockFile: path.join(stateDir, 'daemon.lock'),
+  };
+}
+
+function resolveDaemonPid(stateDir: string): number | null {
+  const { pidFile, lockFile } = daemonPidPaths(stateDir);
+  return readPidFile(pidFile) ?? readPidFile(lockFile);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) {
+      return true;
+    }
+    await sleep(100);
+  }
+
+  return !isProcessAlive(pid);
+}
+
+function removeSocketFile(socketPath: string): void {
+  try {
+    fs.unlinkSync(socketPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw err;
+    }
+  }
+}
+
 // --------------- isDaemonRunning ----------------------------
 
 export async function isDaemonRunning(socketPath: string): Promise<boolean> {
@@ -185,6 +224,12 @@ export interface DaemonOpts {
   stateDir: string;
 }
 
+export interface DaemonPaths {
+  socketPath: string;
+  logFile: string;
+  stateDir: string;
+}
+
 /**
  * Fork a detached background daemon process.
  * The spawned process must call `runDaemon()` with the same opts.
@@ -210,6 +255,33 @@ export function startDaemon(opts: DaemonOpts): void {
   child.unref();
 }
 
+export async function stopDaemon(paths: DaemonPaths): Promise<boolean> {
+  const pid = resolveDaemonPid(paths.stateDir);
+
+  if (!pid || !isProcessAlive(pid)) {
+    removeSocketFile(paths.socketPath);
+    return false;
+  }
+
+  appendLog(paths.logFile, `[daemon] stop requested pid=${pid}`);
+
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      throw err;
+    }
+  }
+
+  const exited = await waitForProcessExit(pid, 6500);
+  if (!exited) {
+    throw new Error(`Daemon pid ${pid} did not exit within 6.5 s`);
+  }
+
+  removeSocketFile(paths.socketPath);
+  return true;
+}
+
 // --------------- runDaemon ----------------------------------
 
 /**
@@ -217,8 +289,7 @@ export function startDaemon(opts: DaemonOpts): void {
  * It blocks (via the open server handle) until a signal triggers shutdown.
  */
 export async function runDaemon(opts: DaemonOpts): Promise<void> {
-  const pidFile = path.join(opts.stateDir, 'daemon.pid');
-  const lockFile = path.join(opts.stateDir, 'daemon.lock');
+  const { pidFile, lockFile } = daemonPidPaths(opts.stateDir);
 
   if (!acquireDaemonLock(lockFile, opts.logFile)) {
     return;
@@ -370,12 +441,14 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
       } catch {
         // Ignore close errors.
       }
-      cleanupInstanceFiles();
       try {
-        fs.unlinkSync(opts.socketPath);
+        // Remove the socket path before releasing the lock so a fast restart
+        // cannot have its fresh socket unlinked by this older daemon.
+        removeSocketFile(opts.socketPath);
       } catch {
         // Socket already gone.
       }
+      cleanupInstanceFiles();
       appendLog(opts.logFile, `[daemon] stopped`);
       process.exit(0);
     });
@@ -414,6 +487,17 @@ export async function ensureRunning(paths: {
   const running = await isDaemonRunning(paths.socketPath);
   if (running) return;
 
+  const existingPid = resolveDaemonPid(paths.stateDir);
+  if (existingPid && isProcessAlive(existingPid)) {
+    appendLog(
+      paths.logFile,
+      `[daemon] unhealthy pid=${existingPid} detected during startup; attempting recovery`,
+    );
+    await stopDaemon(paths);
+  } else {
+    removeSocketFile(paths.socketPath);
+  }
+
   startDaemon(paths);
 
   // Poll for up to 5 s in 200 ms increments.
@@ -423,5 +507,5 @@ export async function ensureRunning(paths: {
     if (await isDaemonRunning(paths.socketPath)) return;
   }
 
-  throw new Error(`Daemon did not start within 5 s (socket: ${paths.socketPath})`);
+  throw new Error(`Daemon did not start within 5 s (socket: ${paths.socketPath}, log: ${paths.logFile})`);
 }
