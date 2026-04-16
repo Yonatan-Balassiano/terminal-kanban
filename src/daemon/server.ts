@@ -14,6 +14,10 @@ import type {
   BoardSnapshot,
   DaemonStatus,
   UIStateRecord,
+  CreateMissionParams,
+  AddMissionTaskParams,
+  SetMissionTaskDependenciesParams,
+  ReleaseMissionTaskToBoardParams,
   CreateTaskParams,
   CreatePillarParams,
   MoveTaskParams,
@@ -47,6 +51,27 @@ import type { ServiceContainer } from './index.js';
  */
 export const serverEvents = new EventEmitter();
 
+function emitBoardPatchAsync(services: ServiceContainer): void {
+  if (!services.view) {
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    try {
+      serverEvents.emit('event', {
+        type: 'board_patch',
+        payload: services.view.getBoardSnapshot(),
+      });
+    } catch {
+      // Ignore async snapshot failures so the originating RPC can still succeed.
+    }
+  }, 0);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
 // --------------- Placeholder BoardSnapshot ------------------
 
 function makePlaceholderBoard(): BoardSnapshot {
@@ -56,6 +81,7 @@ function makePlaceholderBoard(): BoardSnapshot {
     labels: [],
     tracks: [],
     tasks: [],
+    missions: [],
     savedViews: [],
     uiState: {},
   };
@@ -104,6 +130,35 @@ export async function dispatch(
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
         });
+        return { id: req.id, result: null };
+      }
+
+      // ---- mission mutations ----------------------------------
+      case 'createMission': {
+        const mission = services.missions.createMission(p as unknown as CreateMissionParams);
+        emitBoardPatchAsync(services);
+        return { id: req.id, result: mission };
+      }
+
+      case 'addMissionTask': {
+        const missionTask = services.missions.addMissionTask(p as unknown as AddMissionTaskParams);
+        emitBoardPatchAsync(services);
+        return { id: req.id, result: missionTask };
+      }
+
+      case 'setMissionTaskDependencies': {
+        services.missions.setMissionTaskDependencies(
+          p as unknown as SetMissionTaskDependenciesParams,
+        );
+        emitBoardPatchAsync(services);
+        return { id: req.id, result: null };
+      }
+
+      case 'releaseMissionTaskToBoard': {
+        services.missions.releaseMissionTaskToBoard(
+          (p as unknown as ReleaseMissionTaskToBoardParams).taskId,
+        );
+        emitBoardPatchAsync(services);
         return { id: req.id, result: null };
       }
 
@@ -441,6 +496,7 @@ export async function dispatch(
         if (task.trackId !== 'done') {
           services.board.moveTask({ id: task.id, trackId: 'done' });
         }
+        services.missions?.reconcileTaskCompletion(task.id);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),

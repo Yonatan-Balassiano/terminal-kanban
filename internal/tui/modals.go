@@ -10,15 +10,20 @@ import (
 
 type createTaskLine string
 type filterColumn string
+type addMissionTaskModalStage string
 
 const (
-	createTaskTitleLine  createTaskLine = "title"
-	createTaskRepoLine   createTaskLine = "repo"
-	createTaskPillarLine createTaskLine = "pillar"
-	createTaskAgentLine  createTaskLine = "agent"
+	createTaskTitleLine   createTaskLine = "title"
+	createTaskRepoLine    createTaskLine = "repo"
+	createTaskPillarLine  createTaskLine = "pillar"
+	createTaskAgentLine   createTaskLine = "agent"
+	createTaskBlockedLine createTaskLine = "blocked"
 
 	filterRepoColumn   filterColumn = "repo"
 	filterPillarColumn filterColumn = "pillar"
+
+	addMissionTaskStageDetails  addMissionTaskModalStage = "details"
+	addMissionTaskStageBlockers addMissionTaskModalStage = "blockers"
 )
 
 type createTaskModalState struct {
@@ -27,6 +32,23 @@ type createTaskModalState struct {
 	PillarIndex int
 	AgentIndex  int
 	ActiveLine  createTaskLine
+}
+
+type createMissionModalState struct {
+	Value string
+}
+
+type addMissionTaskModalState struct {
+	MissionID              string
+	Value                  string
+	RepoIndex              int
+	PillarIndex            int
+	AgentIndex             int
+	ActiveLine             createTaskLine
+	Stage                  addMissionTaskModalStage
+	WantsBlocked           bool
+	BlockerIndex           int
+	SelectedBlockerTaskIDs []string
 }
 
 type renameTaskModalState struct {
@@ -85,6 +107,13 @@ type commandPaletteModalState struct {
 	Index int
 }
 
+type missionDependenciesModalState struct {
+	MissionID              string
+	TaskID                 string
+	Index                  int
+	SelectedBlockerTaskIDs []string
+}
+
 type createTaskPillarOption struct {
 	ID    string
 	Label string
@@ -113,6 +142,8 @@ func (m *Model) closeModal() {
 	m.modal = ModalNone
 	m.focus = FocusBoard
 	m.createTaskModal = nil
+	m.createMissionModal = nil
+	m.addMissionTaskModal = nil
 	m.renameTaskModal = nil
 	m.taskDescriptionModal = nil
 	m.prCommentModal = nil
@@ -124,6 +155,7 @@ func (m *Model) closeModal() {
 	m.filterModal = nil
 	m.viewModal = nil
 	m.commandPaletteModal = nil
+	m.missionDependenciesModal = nil
 }
 
 func (m *Model) openHelpModal() {
@@ -165,6 +197,85 @@ func (m *Model) openCreateTaskModal() {
 		PillarIndex: initialPillarIndex,
 		AgentIndex:  0,
 		ActiveLine:  createTaskTitleLine,
+	}
+}
+
+func (m *Model) openCreateMissionModal() {
+	m.closeModal()
+	m.modal = ModalCreateMission
+	m.focus = FocusModal
+	m.createMissionModal = &createMissionModalState{}
+}
+
+func (m *Model) openAddMissionTaskModal(mission *MissionSnapshot) {
+	if mission == nil {
+		m.statusMessage = "Select a mission before adding a task."
+		return
+	}
+
+	initialRepoIndex := 0
+	if m.activeRepoID != "" {
+		for index, repo := range m.repos {
+			if repo.ID == m.activeRepoID {
+				initialRepoIndex = index
+				break
+			}
+		}
+	}
+
+	pillarOptions := m.createTaskPillarOptions()
+	initialPillarIndex := 0
+	if len(m.repos) > 0 {
+		defaultPillarID := m.repos[initialRepoIndex].DefaultPillarID
+		if defaultPillarID != "" {
+			for index, option := range pillarOptions {
+				if option.ID == defaultPillarID {
+					initialPillarIndex = index
+					break
+				}
+			}
+		}
+	}
+
+	selectedBlockerTaskIDs := []string{}
+	if selectedTask := m.selectedMissionTask(); selectedTask != nil && selectedTask.MissionID == mission.ID {
+		selectedBlockerTaskIDs = append(selectedBlockerTaskIDs, selectedTask.TaskID)
+	}
+
+	m.closeModal()
+	m.modal = ModalAddMissionTask
+	m.focus = FocusModal
+	m.addMissionTaskModal = &addMissionTaskModalState{
+		MissionID:              mission.ID,
+		RepoIndex:              initialRepoIndex,
+		PillarIndex:            initialPillarIndex,
+		AgentIndex:             0,
+		ActiveLine:             createTaskTitleLine,
+		Stage:                  addMissionTaskStageDetails,
+		SelectedBlockerTaskIDs: selectedBlockerTaskIDs,
+	}
+}
+
+func (m *Model) openMissionDependenciesModal(task *MissionTaskRecord) {
+	if task == nil {
+		m.statusMessage = "Select a mission task before editing blockers."
+		return
+	}
+	index := 0
+	options := m.missionDependencyOptions(task.MissionID, task.TaskID)
+	selected := append([]string{}, task.BlockerTaskIDs...)
+	if len(options) > 0 {
+		index = 0
+	}
+
+	m.closeModal()
+	m.modal = ModalMissionDeps
+	m.focus = FocusModal
+	m.missionDependenciesModal = &missionDependenciesModalState{
+		MissionID:              task.MissionID,
+		TaskID:                 task.TaskID,
+		Index:                  index,
+		SelectedBlockerTaskIDs: selected,
 	}
 }
 
@@ -355,6 +466,10 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	case ModalCreateTask:
 		return m.handleCreateTaskModalKey(key)
+	case ModalCreateMission:
+		return m.handleCreateMissionModalKey(key)
+	case ModalAddMissionTask:
+		return m.handleAddMissionTaskModalKey(key)
 	case ModalRenameTask:
 		return m.handleRenameTaskModalKey(key)
 	case ModalTaskDescription:
@@ -377,6 +492,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleViewModalKey(key)
 	case ModalCommandPalette:
 		return m.handleCommandPaletteModalKey(key)
+	case ModalMissionDeps:
+		return m.handleMissionDependenciesModalKey(key)
 	default:
 		if key.Type == tea.KeyEsc {
 			m.closeModal()
@@ -520,6 +637,246 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 				state.Value = next
 			}
 		}
+	}
+
+	return nil
+}
+
+func (m *Model) handleCreateMissionModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.createMissionModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		title := strings.TrimSpace(state.Value)
+		if title == "" {
+			return nil
+		}
+		m.closeModal()
+		return m.createMissionCmd(title)
+	case tea.KeyBackspace, tea.KeyDelete:
+		state.Value = trimLastRune(state.Value)
+		return nil
+	}
+
+	if next, changed := appendPrintableInput(state.Value, key); changed {
+		state.Value = next
+	}
+	return nil
+}
+
+func (m *Model) handleAddMissionTaskModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.addMissionTaskModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+	if state.Stage == addMissionTaskStageBlockers {
+		return m.handleAddMissionTaskBlockerSelectionKey(key)
+	}
+
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		title := strings.TrimSpace(state.Value)
+		if title == "" {
+			return nil
+		}
+		repoID := ""
+		if len(m.repos) > 0 {
+			repoID = m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].ID
+		}
+		pillarID := ""
+		options := m.createTaskPillarOptions()
+		if len(options) > 0 {
+			pillarID = options[clamp(state.PillarIndex, 0, len(options)-1)].ID
+		}
+		agentCLI := string(createTaskAgentOptionAt(state.AgentIndex).Value)
+		if repoID == "" {
+			m.statusMessage = "Add a repo before creating mission tasks."
+			return nil
+		}
+		if state.WantsBlocked {
+			options := m.missionDependencyOptions(state.MissionID, "")
+			if len(options) == 0 {
+				m.statusMessage = "No mission tasks are available to block this task yet."
+				return nil
+			}
+			state.Stage = addMissionTaskStageBlockers
+			state.BlockerIndex = clamp(state.BlockerIndex, 0, len(options)-1)
+			return nil
+		}
+		missionID := state.MissionID
+		m.closeModal()
+		return m.addMissionTaskCmd(missionID, title, repoID, pillarID, agentCLI, nil)
+	case tea.KeyUp:
+		switch state.ActiveLine {
+		case createTaskBlockedLine:
+			state.ActiveLine = createTaskAgentLine
+		case createTaskAgentLine:
+			state.ActiveLine = createTaskPillarLine
+		case createTaskPillarLine:
+			state.ActiveLine = createTaskRepoLine
+		case createTaskRepoLine:
+			state.ActiveLine = createTaskTitleLine
+		}
+		return nil
+	case tea.KeyDown:
+		switch state.ActiveLine {
+		case createTaskTitleLine:
+			state.ActiveLine = createTaskRepoLine
+		case createTaskRepoLine:
+			state.ActiveLine = createTaskPillarLine
+		case createTaskPillarLine:
+			state.ActiveLine = createTaskAgentLine
+		case createTaskAgentLine:
+			state.ActiveLine = createTaskBlockedLine
+		}
+		return nil
+	case tea.KeyLeft:
+		switch state.ActiveLine {
+		case createTaskRepoLine:
+			if len(m.repos) > 1 {
+				state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), -1)
+			}
+		case createTaskPillarLine:
+			options := m.createTaskPillarOptions()
+			if len(options) > 1 {
+				state.PillarIndex = wrapIndex(state.PillarIndex, len(options), -1)
+			}
+		case createTaskAgentLine:
+			if len(createTaskAgentOptions) > 1 {
+				state.AgentIndex = wrapIndex(state.AgentIndex, len(createTaskAgentOptions), -1)
+			}
+		case createTaskBlockedLine:
+			state.WantsBlocked = false
+		}
+		return nil
+	case tea.KeyRight:
+		switch state.ActiveLine {
+		case createTaskRepoLine:
+			if len(m.repos) > 1 {
+				state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), 1)
+			}
+		case createTaskPillarLine:
+			options := m.createTaskPillarOptions()
+			if len(options) > 1 {
+				state.PillarIndex = wrapIndex(state.PillarIndex, len(options), 1)
+			}
+		case createTaskAgentLine:
+			if len(createTaskAgentOptions) > 1 {
+				state.AgentIndex = wrapIndex(state.AgentIndex, len(createTaskAgentOptions), 1)
+			}
+		case createTaskBlockedLine:
+			state.WantsBlocked = true
+		}
+		return nil
+	case tea.KeyBackspace, tea.KeyDelete:
+		if state.ActiveLine == createTaskTitleLine && state.Value != "" {
+			state.Value = trimLastRune(state.Value)
+		}
+		return nil
+	}
+
+	switch key.String() {
+	case ",":
+		if state.ActiveLine == createTaskRepoLine && len(m.repos) > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), -1)
+		}
+	case ".":
+		if state.ActiveLine == createTaskRepoLine && len(m.repos) > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), 1)
+		}
+	case "[":
+		if state.ActiveLine == createTaskPillarLine {
+			options := m.createTaskPillarOptions()
+			if len(options) > 1 {
+				state.PillarIndex = wrapIndex(state.PillarIndex, len(options), -1)
+			}
+		}
+	case "]":
+		if state.ActiveLine == createTaskPillarLine {
+			options := m.createTaskPillarOptions()
+			if len(options) > 1 {
+				state.PillarIndex = wrapIndex(state.PillarIndex, len(options), 1)
+			}
+		}
+	default:
+		if state.ActiveLine == createTaskTitleLine {
+			if next, changed := appendPrintableInput(state.Value, key); changed {
+				state.Value = next
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *Model) handleAddMissionTaskBlockerSelectionKey(key tea.KeyMsg) tea.Cmd {
+	state := m.addMissionTaskModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+
+	options := m.missionDependencyOptions(state.MissionID, "")
+	switch key.Type {
+	case tea.KeyEsc:
+		state.Stage = addMissionTaskStageDetails
+		return nil
+	case tea.KeyEnter:
+		if len(state.SelectedBlockerTaskIDs) == 0 {
+			m.statusMessage = "Select at least one blocker or set Blocked to No."
+			return nil
+		}
+		title := strings.TrimSpace(state.Value)
+		if title == "" {
+			return nil
+		}
+		repoID := ""
+		if len(m.repos) > 0 {
+			repoID = m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].ID
+		}
+		pillarID := ""
+		pillarOptions := m.createTaskPillarOptions()
+		if len(pillarOptions) > 0 {
+			pillarID = pillarOptions[clamp(state.PillarIndex, 0, len(pillarOptions)-1)].ID
+		}
+		agentCLI := string(createTaskAgentOptionAt(state.AgentIndex).Value)
+		if repoID == "" {
+			m.statusMessage = "Add a repo before creating mission tasks."
+			return nil
+		}
+		missionID := state.MissionID
+		blockerTaskIDs := append([]string{}, state.SelectedBlockerTaskIDs...)
+		m.closeModal()
+		return m.addMissionTaskCmd(missionID, title, repoID, pillarID, agentCLI, blockerTaskIDs)
+	case tea.KeyUp:
+		state.BlockerIndex = clamp(state.BlockerIndex-1, 0, max(0, len(options)-1))
+		return nil
+	case tea.KeyDown:
+		state.BlockerIndex = clamp(state.BlockerIndex+1, 0, max(0, len(options)-1))
+		return nil
+	case tea.KeySpace:
+		if len(options) == 0 {
+			return nil
+		}
+		option := options[clamp(state.BlockerIndex, 0, len(options)-1)]
+		state.SelectedBlockerTaskIDs = toggleID(state.SelectedBlockerTaskIDs, option.ID)
+		return nil
+	}
+
+	if key.String() == " " && len(options) > 0 {
+		option := options[clamp(state.BlockerIndex, 0, len(options)-1)]
+		state.SelectedBlockerTaskIDs = toggleID(state.SelectedBlockerTaskIDs, option.ID)
 	}
 
 	return nil
@@ -870,6 +1227,70 @@ func (m *Model) handleCommandPaletteModalKey(key tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) handleMissionDependenciesModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.missionDependenciesModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+
+	options := m.missionDependencyOptions(state.MissionID, state.TaskID)
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		taskID := state.TaskID
+		missionID := state.MissionID
+		blockerTaskIDs := append([]string{}, state.SelectedBlockerTaskIDs...)
+		m.closeModal()
+		return m.setMissionTaskDependenciesCmd(missionID, taskID, blockerTaskIDs)
+	case tea.KeyUp:
+		state.Index = clamp(state.Index-1, 0, max(0, len(options)-1))
+		return nil
+	case tea.KeyDown:
+		state.Index = clamp(state.Index+1, 0, max(0, len(options)-1))
+		return nil
+	case tea.KeySpace:
+		if len(options) == 0 {
+			return nil
+		}
+		option := options[clamp(state.Index, 0, len(options)-1)]
+		state.SelectedBlockerTaskIDs = toggleID(state.SelectedBlockerTaskIDs, option.ID)
+		return nil
+	}
+
+	if key.String() == " " && len(options) > 0 {
+		option := options[clamp(state.Index, 0, len(options)-1)]
+		state.SelectedBlockerTaskIDs = toggleID(state.SelectedBlockerTaskIDs, option.ID)
+	}
+
+	return nil
+}
+
+func (m *Model) missionDependencyOptions(missionID, taskID string) []filterOption {
+	for _, mission := range m.missions {
+		if mission.ID != missionID {
+			continue
+		}
+		options := make([]filterOption, 0, len(mission.Tasks))
+		for _, missionTask := range mission.Tasks {
+			if taskID != "" && missionTask.TaskID == taskID {
+				continue
+			}
+			label := missionTask.Task.Title
+			if missionTask.Task.RepoID != "" {
+				if repo := m.repoByID(missionTask.Task.RepoID); repo != nil {
+					label = repo.Label + " · " + label
+				}
+			}
+			options = append(options, filterOption{ID: missionTask.TaskID, Label: label})
+		}
+		return options
+	}
+	return nil
+}
+
 func (m *Model) toggleFilterSelection() {
 	state := m.filterModal
 	if state == nil {
@@ -900,6 +1321,21 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	}
 
 	switch commandID {
+	case "create-mission":
+		m.openCreateMissionModal()
+		return nil
+	case "add-mission-task":
+		m.openAddMissionTaskModal(m.selectedMission())
+		return nil
+	case "edit-mission-dependencies":
+		m.openMissionDependenciesModal(m.selectedMissionTask())
+		return nil
+	case "release-mission-task":
+		m.closeModal()
+		if missionTask := m.selectedMissionTask(); missionTask != nil {
+			return m.releaseMissionTaskCmd(missionTask.TaskID)
+		}
+		return nil
 	case "create-task":
 		m.openCreateTaskModal()
 		return nil
@@ -1047,7 +1483,13 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 	if contextTask != nil {
 		contextTrackIndex = indexTrack(m.sortedTracks(), contextTask.TrackID)
 	}
+	selectedMission := m.selectedMission()
+	selectedMissionTask := m.selectedMissionTask()
 	return []CommandPaletteItem{
+		{ID: "create-mission", Title: "Create mission", Section: "Mission", Detail: "Create a new mission shell in the left rail.", Shortcut: "N", Keywords: []string{"mission", "plan", "new"}},
+		{ID: "add-mission-task", Title: "Add mission task", Section: "Mission", Detail: detailOrFallbackMission(selectedMission, "Add a new task to %s", "Add a new task to the selected mission."), Shortcut: "n", Keywords: []string{"mission", "task", "step"}, Disabled: selectedMission == nil, DisabledReason: "Select a mission before adding a mission task."},
+		{ID: "edit-mission-dependencies", Title: "Edit mission blockers", Section: "Mission", Detail: detailOrFallbackMissionTask(selectedMissionTask, "Change blockers for %s", "Change blockers for the selected mission task."), Shortcut: "b", Keywords: []string{"mission", "blocker", "dependency"}, Disabled: selectedMissionTask == nil, DisabledReason: "Select a mission task before editing blockers."},
+		{ID: "release-mission-task", Title: "Release mission task to backlog", Section: "Mission", Detail: "Add the selected mission task to the regular board backlog.", Shortcut: "u", Keywords: []string{"mission", "release", "backlog"}, Disabled: selectedMissionTask == nil || selectedMissionTask.ReleasedToBoard, DisabledReason: "Select an unreleased mission task before releasing it."},
 		{ID: "create-task", Title: "Create task", Section: "Task", Detail: "Add a new task into the backlog track.", Shortcut: "n", Keywords: []string{"new", "backlog", "add"}},
 		{ID: "rename-task", Title: "Rename current task", Section: "Task", Detail: detailOrFallback(contextTask, "Rename %s", "Rename the current task."), Shortcut: "r", Keywords: []string{"title", "edit"}, Disabled: contextTask == nil, DisabledReason: "Select a task to rename it."},
 		{ID: "edit-description", Title: "Edit task description", Section: "Task", Detail: "Open the long-form task description editor.", Shortcut: "Ctrl+D", Keywords: []string{"notes", "description"}, Disabled: contextTask == nil, DisabledReason: "Select a task to edit its description."},
@@ -1106,6 +1548,86 @@ func (m *Model) createTaskCmd(title, repoID, pillarID, agentCLI string) tea.Cmd 
 		params["pillarId"] = pillarID
 	}
 	return m.boardActionCmd("createTask", params, "Created task.")
+}
+
+func (m *Model) createMissionCmd(title string) tea.Cmd {
+	m.statusMessage = "Creating mission..."
+	return func() tea.Msg {
+		var mission MissionRecord
+		if err := m.client.Call("createMission", map[string]string{"title": title}, &mission); err != nil {
+			return boardActionMsg{err: err}
+		}
+		if err := m.client.Call("setUIState", map[string]interface{}{
+			"missionsPaneExpanded":  true,
+			"selectedMissionId":     mission.ID,
+			"selectedMissionTaskId": "",
+		}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+		var board BoardSnapshot
+		if err := m.client.Call("getBoard", nil, &board); err != nil {
+			return boardActionMsg{err: err}
+		}
+		return boardActionMsg{
+			board:            &board,
+			status:           "Created mission.",
+			selectMissionID:  mission.ID,
+			openMissionsPane: true,
+		}
+	}
+}
+
+func (m *Model) addMissionTaskCmd(missionID, title, repoID, pillarID, agentCLI string, blockerTaskIDs []string) tea.Cmd {
+	params := map[string]interface{}{
+		"missionId": missionID,
+		"title":     title,
+		"repoId":    repoID,
+		"agentCli":  agentCLI,
+	}
+	if pillarID != "" {
+		params["pillarId"] = pillarID
+	}
+	if len(blockerTaskIDs) > 0 {
+		params["blockerTaskIds"] = blockerTaskIDs
+	}
+	return func() tea.Msg {
+		var missionTask MissionTaskRecord
+		if err := m.client.Call("addMissionTask", params, &missionTask); err != nil {
+			return boardActionMsg{err: err}
+		}
+		if err := m.client.Call("setUIState", map[string]interface{}{
+			"missionsPaneExpanded":  true,
+			"selectedMissionId":     missionID,
+			"selectedMissionTaskId": missionTask.TaskID,
+		}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+		var board BoardSnapshot
+		if err := m.client.Call("getBoard", nil, &board); err != nil {
+			return boardActionMsg{err: err}
+		}
+		return boardActionMsg{
+			board:               &board,
+			status:              "Added mission task.",
+			selectMissionID:     missionID,
+			selectMissionTaskID: missionTask.TaskID,
+			openMissionsPane:    true,
+		}
+	}
+}
+
+func (m *Model) setMissionTaskDependenciesCmd(missionID, taskID string, blockerTaskIDs []string) tea.Cmd {
+	return m.boardActionCmd("setMissionTaskDependencies", map[string]interface{}{
+		"missionId":      missionID,
+		"taskId":         taskID,
+		"blockerTaskIds": blockerTaskIDs,
+	}, "Updated mission blockers.")
+}
+
+func (m *Model) releaseMissionTaskCmd(taskID string) tea.Cmd {
+	return m.boardActionCmd("releaseMissionTaskToBoard", map[string]string{
+		"taskId": taskID,
+	}, "Released mission task to backlog.")
 }
 
 func (m *Model) renameTaskCmd(taskID, title string) tea.Cmd {
@@ -1224,6 +1746,17 @@ func (m *Model) taskByID(taskID string) *TaskRecord {
 	return nil
 }
 
+func (m *Model) missionForTask(taskID string) (*MissionSnapshot, *MissionTaskRecord) {
+	for missionIndex := range m.missions {
+		for taskIndex := range m.missions[missionIndex].Tasks {
+			if m.missions[missionIndex].Tasks[taskIndex].TaskID == taskID {
+				return &m.missions[missionIndex], &m.missions[missionIndex].Tasks[taskIndex]
+			}
+		}
+	}
+	return nil, nil
+}
+
 func (m *Model) pillarByID(pillarID string) *PillarRecord {
 	for index := range m.pillars {
 		if m.pillars[index].ID == pillarID {
@@ -1246,6 +1779,20 @@ func detailOrFallback(task *TaskRecord, format string, fallback string) string {
 		return fallback
 	}
 	return fmt.Sprintf(format, task.Title)
+}
+
+func detailOrFallbackMission(mission *MissionSnapshot, format string, fallback string) string {
+	if mission == nil {
+		return fallback
+	}
+	return fmt.Sprintf(format, mission.Title)
+}
+
+func detailOrFallbackMissionTask(task *MissionTaskRecord, format string, fallback string) string {
+	if task == nil {
+		return fallback
+	}
+	return fmt.Sprintf(format, task.Task.Title)
 }
 
 func appendPrintableInput(current string, key tea.KeyMsg) (string, bool) {

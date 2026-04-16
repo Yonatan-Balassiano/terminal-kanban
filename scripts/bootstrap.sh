@@ -34,7 +34,7 @@ install_hint() {
 
   case "$command_name" in
     node)
-      echo "Install Node.js 20+ (for example with nvm: \`nvm install 20\`)."
+      echo "Install Node.js 24.x (for example with nvm: \`nvm install 24\`)."
       ;;
     npm)
       echo "Install npm (it is bundled with most Node.js distributions)."
@@ -162,8 +162,8 @@ require_command go "$(install_hint go)"
 cd "$ROOT_DIR"
 
 NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
-if [[ "$NODE_MAJOR" -lt 20 ]]; then
-  echo "Error: AgentBoard requires Node.js >= 20 (found $(node -v))" >&2
+if [[ "$NODE_MAJOR" -lt 24 ]]; then
+  echo "Error: AgentBoard requires Node.js >= 24 (found $(node -v))" >&2
   exit 1
 fi
 

@@ -4,6 +4,7 @@ import type { SyncResult, TaskRecord, TaskSyncPatch } from '../types/index.js';
 import type { BoardService } from './board.js';
 import { GitHubServiceError, type GitHubService, type PRInfo } from './github.js';
 import type { GitService } from './git.js';
+import type { MissionService } from './missions.js';
 
 function buildAutoPRTitle(taskId: string, taskTitle: string): string {
   return `[auto|${taskId}] ${taskTitle}`;
@@ -67,6 +68,12 @@ function sameValue(left: unknown, right: unknown): boolean {
 }
 
 export class SyncService {
+  private board: BoardService;
+  private missions?: Pick<MissionService, 'reconcileTaskCompletion'>;
+  private github: GitHubService;
+  private git: GitService;
+  private db: Db;
+  private wait: typeof sleep;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly queuedJobs = new Map<string, QueuedTaskJob>();
   private readonly delayedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -75,12 +82,33 @@ export class SyncService {
   readonly syncEvent = new EventEmitter();
 
   constructor(
-    private board: BoardService,
-    private github: GitHubService,
-    private git: GitService,
-    private db: Db,
-    private wait = sleep,
-  ) {}
+    board: BoardService,
+    missionsOrGithub: MissionService | GitHubService,
+    githubOrGit: GitHubService | GitService,
+    gitOrDb: GitService | Db,
+    dbOrWait?: Db | typeof sleep,
+    maybeWait = sleep,
+  ) {
+    this.board = board;
+
+    if (this.isMissionService(missionsOrGithub)) {
+      this.missions = missionsOrGithub;
+      this.github = githubOrGit as GitHubService;
+      this.git = gitOrDb as GitService;
+      this.db = dbOrWait as Db;
+      this.wait = maybeWait;
+      return;
+    }
+
+    this.github = missionsOrGithub as GitHubService;
+    this.git = githubOrGit as GitService;
+    this.db = gitOrDb as Db;
+    this.wait = (dbOrWait as typeof sleep | undefined) ?? sleep;
+  }
+
+  private isMissionService(value: MissionService | GitHubService): value is MissionService {
+    return typeof (value as MissionService).reconcileTaskCompletion === 'function';
+  }
 
   start(intervalMs: number): void {
     if (this.timer !== null) {
@@ -546,6 +574,13 @@ export class SyncService {
         this.board.moveTask({ id: task.id, trackId: 'done' });
         task.trackId = 'done';
         result.tasksUpdated += 1;
+      }
+
+      if (prInfo?.prState === 'merged') {
+        const releasedTaskIds = this.missions?.reconcileTaskCompletion(task.id) ?? [];
+        if (releasedTaskIds.length > 0) {
+          result.tasksUpdated += releasedTaskIds.length;
+        }
       }
 
       if (prInfo?.prState === 'closed') {

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "npm run build:ts && npm run build:go",
     "build:go": "mkdir -p .cache/go-build .cache/go-path .cache/go-mod dist-go && GOCACHE=\"$PWD/.cache/go-build\" GOPATH=\"$PWD/.cache/go-path\" GOMODCACHE=\"$PWD/.cache/go-mod\" go build -o dist-go/agentboard-tui ./cmd/agentboard-tui",
-    "build:ts": "tsc && mkdir -p dist/db/migrations && cp src/db/migrations/*.sql dist/db/migrations/",
+    "build:ts": "tsc && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
     "bootstrap": "bash scripts/bootstrap.sh",
     "dev": "npm run build:go && tsx src/bin/agentboard.ts",
     "lint": "eslint src",
@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@xterm/headless": "^5.5.0",
-    "better-sqlite3": "^9.4.3",
+    "better-sqlite3": "^12.8.0",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "marked": "^13.0.0",
@@ -34,8 +34,8 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
-    "@types/node": "^22.0.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.12.0",
     "prettier": "^3.3.3",
     "tsx": "^4.16.2",
     "typescript": "^5.5.4",
@@ -43,6 +43,6 @@
     "vitest": "^2.0.5"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.0.0 <25"
   }
 }

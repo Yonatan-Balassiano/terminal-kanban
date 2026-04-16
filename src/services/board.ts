@@ -76,7 +76,11 @@ export class BoardService {
 
   // ---- Task methods ------------------------------------------
 
-  getTasks(filter?: { repoId?: string; includeArchived?: boolean }): TaskRecord[] {
+  getTasks(filter?: {
+    repoId?: string;
+    includeArchived?: boolean;
+    includeUnreleasedMissionTasks?: boolean;
+  }): TaskRecord[] {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
@@ -89,11 +93,19 @@ export class BoardService {
       conditions.push('t.archived_at IS NULL');
     }
 
+    if (!filter?.includeUnreleasedMissionTasks) {
+      conditions.push('(mt.task_id IS NULL OR mt.released_to_board = 1)');
+    }
+
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const rows = this.db
       .prepare<unknown[], Record<string, unknown>>(
-        `SELECT t.* FROM tasks t ${where} ORDER BY t.track_id, t.sort_key`,
+        `SELECT t.*
+         FROM tasks t
+         LEFT JOIN mission_tasks mt ON mt.task_id = t.id
+         ${where}
+         ORDER BY t.track_id, t.sort_key`,
       )
       .all(...params);
 
@@ -122,6 +134,10 @@ export class BoardService {
     }
 
     return tasks;
+  }
+
+  getAllTasks(filter?: { repoId?: string; includeArchived?: boolean }): TaskRecord[] {
+    return this.getTasks({ ...filter, includeUnreleasedMissionTasks: true });
   }
 
   getTask(id: string): TaskRecord | null {
@@ -597,10 +613,16 @@ export class BoardService {
     if (map.has('filters')) state.filters = map.get('filters') as FilterModel;
     if (map.has('selectedTrackId')) state.selectedTrackId = map.get('selectedTrackId') as string;
     if (map.has('selectedTaskId')) state.selectedTaskId = map.get('selectedTaskId') as string;
+    if (map.has('selectedMissionId'))
+      state.selectedMissionId = map.get('selectedMissionId') as string;
+    if (map.has('selectedMissionTaskId'))
+      state.selectedMissionTaskId = map.get('selectedMissionTaskId') as string;
     if (map.has('terminalPaneVisible'))
       state.terminalPaneVisible = map.get('terminalPaneVisible') as boolean;
     if (map.has('terminalLayoutMode'))
       state.terminalLayoutMode = map.get('terminalLayoutMode') as import('../types/index.js').TerminalLayoutMode;
+    if (map.has('missionsPaneExpanded'))
+      state.missionsPaneExpanded = map.get('missionsPaneExpanded') as boolean;
     if (map.has('themeMode')) state.themeMode = map.get('themeMode') as ThemeMode;
 
     return state;

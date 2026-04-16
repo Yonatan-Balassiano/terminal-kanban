@@ -14,17 +14,19 @@ import (
 )
 
 const (
-	terminalDividerWidth     = 1
-	minTerminalPaneWidth     = 40
-	trackColumnStyleWidth    = 32
-	trackColumnRenderWidth   = trackColumnStyleWidth + 2
-	trackHeaderWidth         = trackColumnStyleWidth - 2
-	taskCardStyleWidth       = trackColumnStyleWidth - 2
-	taskCardContentWidth     = taskCardStyleWidth - 2
-	terminalHeaderHeight     = 1
-	terminalFooterHeight     = 1
-	terminalInputFlushMillis = 6
-	terminalBoardNavTimeout  = 250 * time.Millisecond
+	terminalDividerWidth      = 1
+	missionRailCollapsedWidth = 18
+	missionRailExpandedWidth  = 36
+	minTerminalPaneWidth      = 40
+	trackColumnStyleWidth     = 32
+	trackColumnRenderWidth    = trackColumnStyleWidth + 2
+	trackHeaderWidth          = trackColumnStyleWidth - 2
+	taskCardStyleWidth        = trackColumnStyleWidth - 2
+	taskCardContentWidth      = taskCardStyleWidth - 2
+	terminalHeaderHeight      = 1
+	terminalFooterHeight      = 1
+	terminalInputFlushMillis  = 6
+	terminalBoardNavTimeout   = 250 * time.Millisecond
 )
 
 type boardLoadedMsg struct {
@@ -33,9 +35,12 @@ type boardLoadedMsg struct {
 }
 
 type boardActionMsg struct {
-	board  *BoardSnapshot
-	status string
-	err    error
+	board               *BoardSnapshot
+	status              string
+	selectMissionID     string
+	selectMissionTaskID string
+	openMissionsPane    bool
+	err                 error
 }
 
 type sessionOpenedMsg struct {
@@ -83,6 +88,16 @@ const (
 	boardNavigationDown
 )
 
+type missionSelectionRef struct {
+	MissionIndex int
+	TaskIndex    int
+}
+
+const (
+	missionSummaryRowTaskIndex = -1
+	missionEmptyRowTaskIndex   = -2
+)
+
 type Model struct {
 	client *RPCClient
 
@@ -94,6 +109,7 @@ type Model struct {
 	labels     []LabelRecord
 	tracks     []TrackRecord
 	tasks      []TaskRecord
+	missions   []MissionSnapshot
 	savedViews []SavedViewRecord
 
 	focus                      AppFocus
@@ -103,8 +119,11 @@ type Model struct {
 	filters                    FilterModel
 	selectedTrackIndex         int
 	selectedTaskIndex          int
+	selectedMissionIndex       int
+	selectedMissionTaskIndex   int
 	terminalPaneVisible        bool
 	terminalLayoutMode         TerminalLayoutMode
+	missionsPaneExpanded       bool
 	activeTaskID               string
 	activeSessionBranch        string
 	activeSessionBackendType   SessionBackendType
@@ -129,6 +148,8 @@ type Model struct {
 	terminalBoardNavVersion    int
 
 	createTaskModal          *createTaskModalState
+	createMissionModal       *createMissionModalState
+	addMissionTaskModal      *addMissionTaskModalState
 	renameTaskModal          *renameTaskModalState
 	taskDescriptionModal     *taskDescriptionModalState
 	prCommentModal           *prCommentModalState
@@ -140,6 +161,7 @@ type Model struct {
 	filterModal              *filterModalState
 	viewModal                *viewModalState
 	commandPaletteModal      *commandPaletteModalState
+	missionDependenciesModal *missionDependenciesModalState
 }
 
 func NewModel(socketPath string) (*Model, error) {
@@ -149,12 +171,13 @@ func NewModel(socketPath string) (*Model, error) {
 	}
 
 	model := &Model{
-		client:                  client,
-		focus:                   FocusBoard,
-		modal:                   ModalNone,
-		terminalLayoutMode:      TerminalLayoutMode("side-by-side"),
-		sessionActivityByTaskID: map[string]*SessionActivitySnapshot{},
-		themeMode:               ThemeMode("truecolor"),
+		client:                   client,
+		focus:                    FocusBoard,
+		modal:                    ModalNone,
+		terminalLayoutMode:       TerminalLayoutMode("side-by-side"),
+		selectedMissionTaskIndex: -1,
+		sessionActivityByTaskID:  map[string]*SessionActivitySnapshot{},
+		themeMode:                ThemeMode("truecolor"),
 	}
 	return model, nil
 }
@@ -240,6 +263,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.board != nil {
 			m.applyBoard(*msg.board)
+			if msg.selectMissionID != "" {
+				m.selectMissionByID(msg.selectMissionID, msg.selectMissionTaskID)
+			}
+			if msg.openMissionsPane {
+				m.missionsPaneExpanded = true
+				m.focus = FocusMissions
+			}
 		}
 		if msg.status != "" {
 			m.statusMessage = msg.status
@@ -354,6 +384,9 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	if m.focus == FocusTerminal {
 		return m.handleTerminalKey(key)
 	}
+	if m.focus == FocusMissions {
+		return m.handleMissionKey(key)
+	}
 
 	if key.Type == tea.KeyCtrlC {
 		return tea.Quit
@@ -393,6 +426,8 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		}
 	case "s":
 		return m.syncCmd()
+	case "u":
+		return m.toggleMissionsPaneCmd(true)
 	case "t":
 		if m.activeTaskID == "" {
 			m.statusMessage = "No session open for the selected task."
@@ -478,6 +513,68 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		if task != nil {
 			return m.revealTaskWorkspaceCmd(task)
 		}
+	}
+
+	return nil
+}
+
+func (m *Model) handleMissionKey(key tea.KeyMsg) tea.Cmd {
+	if key.Type == tea.KeyCtrlC {
+		return tea.Quit
+	}
+
+	switch key.String() {
+	case "esc":
+		return m.toggleMissionsPaneCmd(false)
+	case "up", "k":
+		m.moveMissionSelection(-1)
+		return nil
+	case "down", "j":
+		m.moveMissionSelection(1)
+		return nil
+	case "enter":
+		selectedTask := m.selectedMissionTask()
+		if selectedTask == nil {
+			return nil
+		}
+		if !selectedTask.ReleasedToBoard {
+			m.statusMessage = "Release the mission task before selecting it on the board."
+			return nil
+		}
+		if m.selectTaskByID(selectedTask.TaskID) {
+			m.focus = FocusBoard
+			m.missionsPaneExpanded = false
+			return m.setUIStateCmd(map[string]interface{}{
+				"missionsPaneExpanded":  false,
+				"selectedMissionId":     selectedTask.MissionID,
+				"selectedMissionTaskId": selectedTask.TaskID,
+			})
+		}
+		return nil
+	case "u":
+		if selectedTask := m.selectedMissionTask(); selectedTask != nil && !selectedTask.ReleasedToBoard {
+			return m.releaseMissionTaskCmd(selectedTask.TaskID)
+		}
+		return m.toggleMissionsPaneCmd(false)
+	case "N":
+		m.openCreateMissionModal()
+		return nil
+	case "n":
+		if m.selectedMission() == nil {
+			m.openCreateMissionModal()
+			return nil
+		}
+		m.openAddMissionTaskModal(m.selectedMission())
+		return nil
+	case "b":
+		m.openMissionDependenciesModal(m.selectedMissionTask())
+		return nil
+	case ":":
+		m.openCommandPaletteModal()
+		return nil
+	case "?":
+		m.openHelpModal()
+		return nil
 	}
 
 	return nil
@@ -1001,6 +1098,31 @@ func (m *Model) setUIStateCmd(patch map[string]interface{}) tea.Cmd {
 	}
 }
 
+func (m *Model) toggleMissionsPaneCmd(open bool) tea.Cmd {
+	m.missionsPaneExpanded = open
+	m.clampMissionSelection()
+	if open {
+		m.focus = FocusMissions
+	} else {
+		m.focus = FocusBoard
+	}
+
+	selectedMissionID := ""
+	selectedMissionTaskID := ""
+	if mission := m.selectedMission(); mission != nil {
+		selectedMissionID = mission.ID
+	}
+	if missionTask := m.selectedMissionTask(); missionTask != nil {
+		selectedMissionTaskID = missionTask.TaskID
+	}
+
+	return m.setUIStateCmd(map[string]interface{}{
+		"missionsPaneExpanded":  open,
+		"selectedMissionId":     selectedMissionID,
+		"selectedMissionTaskId": selectedMissionTaskID,
+	})
+}
+
 func (m *Model) resizeActiveSessionCmd() tea.Cmd {
 	taskID := m.activeTaskID
 	if taskID == "" || !m.terminalPaneShouldRender() {
@@ -1051,6 +1173,7 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	m.labels = board.Labels
 	m.tracks = board.Tracks
 	m.tasks = board.Tasks
+	m.missions = board.Missions
 	m.savedViews = board.SavedViews
 	m.daemonConnected = true
 
@@ -1078,11 +1201,17 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	if board.UIState.Filters != nil {
 		m.filters = *board.UIState.Filters
 	}
+	if board.UIState.SelectedMissionID != "" || len(m.missions) == 0 {
+		m.selectMissionByID(board.UIState.SelectedMissionID, board.UIState.SelectedMissionTaskID)
+	}
 	if board.UIState.TerminalPaneVisible != nil {
 		m.terminalPaneVisible = *board.UIState.TerminalPaneVisible
 	}
 	if board.UIState.TerminalLayoutMode != "" {
 		m.terminalLayoutMode = board.UIState.TerminalLayoutMode
+	}
+	if board.UIState.MissionsPaneExpanded != nil {
+		m.missionsPaneExpanded = *board.UIState.MissionsPaneExpanded
 	}
 	if board.UIState.ThemeMode != "" {
 		m.themeMode = board.UIState.ThemeMode
@@ -1099,6 +1228,7 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 
 	m.selectedTrackIndex = clamp(m.selectedTrackIndex, 0, max(0, len(m.sortedTracks())-1))
 	m.selectedTaskIndex = clamp(m.selectedTaskIndex, 0, max(0, len(m.selectedTrackTasks())-1))
+	m.clampMissionSelection()
 }
 
 func (m *Model) switchRepo(direction int) {
@@ -1210,6 +1340,116 @@ func (m *Model) selectedTask() *TaskRecord {
 	return &task
 }
 
+func (m *Model) missionRailWidth() int {
+	if m.missionsPaneExpanded || m.focus == FocusMissions {
+		return missionRailExpandedWidth
+	}
+	return missionRailCollapsedWidth
+}
+
+func (m *Model) missionRows() []missionSelectionRef {
+	rows := make([]missionSelectionRef, 0, len(m.missions)*2)
+	for missionIndex, mission := range m.missions {
+		rows = append(rows, missionSelectionRef{MissionIndex: missionIndex, TaskIndex: missionSummaryRowTaskIndex})
+		if !m.missionsPaneExpanded && m.focus != FocusMissions {
+			continue
+		}
+		if len(mission.Tasks) == 0 {
+			rows = append(rows, missionSelectionRef{MissionIndex: missionIndex, TaskIndex: missionEmptyRowTaskIndex})
+			continue
+		}
+		for taskIndex := range mission.Tasks {
+			rows = append(rows, missionSelectionRef{MissionIndex: missionIndex, TaskIndex: taskIndex})
+		}
+	}
+	return rows
+}
+
+func (m *Model) selectedMission() *MissionSnapshot {
+	if len(m.missions) == 0 {
+		return nil
+	}
+	index := clamp(m.selectedMissionIndex, 0, len(m.missions)-1)
+	mission := m.missions[index]
+	return &mission
+}
+
+func (m *Model) selectedMissionTask() *MissionTaskRecord {
+	mission := m.selectedMission()
+	if mission == nil || len(mission.Tasks) == 0 || m.selectedMissionTaskIndex < 0 {
+		return nil
+	}
+	index := clamp(m.selectedMissionTaskIndex, 0, len(mission.Tasks)-1)
+	task := mission.Tasks[index]
+	return &task
+}
+
+func (m *Model) clampMissionSelection() {
+	if len(m.missions) == 0 {
+		m.selectedMissionIndex = 0
+		m.selectedMissionTaskIndex = -1
+		return
+	}
+	m.selectedMissionIndex = clamp(m.selectedMissionIndex, 0, len(m.missions)-1)
+	mission := m.missions[m.selectedMissionIndex]
+	if len(mission.Tasks) == 0 {
+		m.selectedMissionTaskIndex = -1
+		return
+	}
+	if m.selectedMissionTaskIndex >= len(mission.Tasks) {
+		m.selectedMissionTaskIndex = len(mission.Tasks) - 1
+	}
+	if m.selectedMissionTaskIndex < -1 {
+		m.selectedMissionTaskIndex = -1
+	}
+}
+
+func (m *Model) moveMissionSelection(delta int) {
+	rows := m.missionRows()
+	if len(rows) == 0 {
+		return
+	}
+
+	currentIndex := 0
+	for index, row := range rows {
+		if row.MissionIndex == m.selectedMissionIndex && row.TaskIndex == m.selectedMissionTaskIndex {
+			currentIndex = index
+			break
+		}
+	}
+
+	nextIndex := clamp(currentIndex+delta, 0, len(rows)-1)
+	m.selectedMissionIndex = rows[nextIndex].MissionIndex
+	m.selectedMissionTaskIndex = rows[nextIndex].TaskIndex
+}
+
+func (m *Model) selectMissionByID(missionID, taskID string) bool {
+	if missionID == "" {
+		m.clampMissionSelection()
+		return false
+	}
+
+	for missionIndex, mission := range m.missions {
+		if mission.ID != missionID {
+			continue
+		}
+		m.selectedMissionIndex = missionIndex
+		m.selectedMissionTaskIndex = missionSummaryRowTaskIndex
+		if taskID != "" {
+			for taskIndex, missionTask := range mission.Tasks {
+				if missionTask.TaskID == taskID {
+					m.selectedMissionTaskIndex = taskIndex
+					return true
+				}
+			}
+		}
+		return true
+	}
+
+	m.clampMissionSelection()
+	return false
+}
+
 func (m *Model) repoByID(repoID string) *RepoRecord {
 	for _, repo := range m.repos {
 		if repo.ID == repoID {
@@ -1241,7 +1481,7 @@ func (m *Model) terminalPaneShouldRender() bool {
 }
 
 func (m *Model) boardRenderWidth() int {
-	return max(1, len(m.sortedTracks())) * trackColumnRenderWidth
+	return m.missionRailWidth() + max(1, len(m.sortedTracks()))*trackColumnRenderWidth
 }
 
 func (m *Model) canShowTerminalPane() bool {

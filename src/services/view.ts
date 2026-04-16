@@ -1,8 +1,12 @@
 import type { BoardSnapshot, FilterModel, TaskRecord } from '../types/index.js';
 import type { BoardService } from './board.js';
+import type { MissionService } from './missions.js';
 
 export class ViewService {
-  constructor(private board: BoardService) {}
+  constructor(
+    private board: BoardService,
+    private missions: MissionService,
+  ) {}
 
   applyFilter(tasks: TaskRecord[], filter: FilterModel): TaskRecord[] {
     return tasks.filter((task) => {
@@ -68,6 +72,7 @@ export class ViewService {
     const labels = this.board.getLabels();
     const savedViews = this.board.getSavedViews();
     const uiState = this.board.getUIState();
+    const missions = this.missions.listMissions();
 
     // Tasks: already filtered by repoId; apply additional filter if provided
     let tasks = this.board.getTasks({ repoId, includeArchived: filter?.includeArchived });
@@ -124,6 +129,7 @@ export class ViewService {
       labels,
       tracks,
       tasks,
+      missions,
       savedViews,
       uiState,
     };

@@ -35,14 +35,14 @@ export class DoctorService {
   private checkNodeVersion(): DoctorCheck {
     const version = process.version; // e.g. "v20.11.0"
     const major = parseInt(version.slice(1).split('.')[0], 10);
-    if (major >= 20) {
+    if (major >= 24) {
       return { name: 'node-version', status: 'pass', message: version };
     }
     return {
       name: 'node-version',
       status: 'fail',
       message: `Node ${version} is too old`,
-      remediation: 'Upgrade to Node.js v20 or later',
+      remediation: 'Upgrade to Node.js v24',
     };
   }
 

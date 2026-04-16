@@ -19,6 +19,7 @@ export type GitState = 'unknown' | 'clean' | 'dirty' | 'untracked' | 'conflicted
 export type TerminalLayoutMode = 'side-by-side' | 'top-bottom';
 export type SessionActivityKind = 'agent' | 'process';
 export type AgentCLI = 'claude' | 'codex';
+export type MissionTaskStatus = 'backlog' | 'in-progress' | 'pr' | 'merged';
 
 export type EventType =
   | 'task.created'
@@ -121,6 +122,40 @@ export interface TaskRecord {
   updatedAt: number;
 }
 
+export interface MissionRecord {
+  id: string;
+  title: string;
+  sortKey: number;
+  completedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MissionStatusCounts {
+  backlog: number;
+  inProgress: number;
+  pr: number;
+  merged: number;
+}
+
+export interface MissionTaskRecord {
+  missionId: string;
+  taskId: string;
+  sortKey: number;
+  releasedToBoard: boolean;
+  releasedAt?: number;
+  blockerTaskIds: string[];
+  blockedTaskIds: string[];
+  status: MissionTaskStatus;
+  isBlocked: boolean;
+  task: TaskRecord;
+}
+
+export interface MissionSnapshot extends MissionRecord {
+  counts: MissionStatusCounts;
+  tasks: MissionTaskRecord[];
+}
+
 export interface SessionRecord {
   id: string;
   taskId: string;
@@ -160,8 +195,11 @@ export interface UIStateRecord {
   filters?: FilterModel;
   selectedTrackId?: string;
   selectedTaskId?: string;
+  selectedMissionId?: string;
+  selectedMissionTaskId?: string;
   terminalPaneVisible?: boolean;
   terminalLayoutMode?: TerminalLayoutMode;
+  missionsPaneExpanded?: boolean;
   themeMode?: ThemeMode;
 }
 
@@ -187,6 +225,7 @@ export interface BoardSnapshot {
   labels: LabelRecord[];
   tracks: TrackRecord[];
   tasks: TaskRecord[];
+  missions: MissionSnapshot[];
   savedViews: SavedViewRecord[];
   uiState: UIStateRecord;
 }
@@ -277,6 +316,10 @@ export interface RPCEvent {
 export type RPCMethod =
   | 'getBoard'
   | 'setUIState'
+  | 'createMission'
+  | 'addMissionTask'
+  | 'setMissionTaskDependencies'
+  | 'releaseMissionTaskToBoard'
   | 'createTask'
   | 'renameTask'
   | 'updateTaskDescription'
@@ -321,6 +364,31 @@ export interface GetBoardParams {
 export type GetBoardResult = BoardSnapshot;
 
 export type SetUIStateParams = Partial<UIStateRecord>;
+
+export interface CreateMissionParams {
+  title: string;
+}
+export type CreateMissionResult = MissionRecord;
+
+export interface AddMissionTaskParams {
+  missionId: string;
+  title: string;
+  repoId: string;
+  agentCli?: AgentCLI;
+  pillarId?: string;
+  blockerTaskIds?: string[];
+}
+export type AddMissionTaskResult = MissionTaskRecord;
+
+export interface SetMissionTaskDependenciesParams {
+  missionId: string;
+  taskId: string;
+  blockerTaskIds: string[];
+}
+
+export interface ReleaseMissionTaskToBoardParams {
+  taskId: string;
+}
 
 export interface CreateTaskParams {
   title: string;
