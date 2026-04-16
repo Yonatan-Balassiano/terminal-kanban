@@ -7,28 +7,18 @@ import * as fs from 'fs';
 import { EventEmitter } from 'events';
 import { generateId } from '../db/index.js';
 import type {
-  AddMissionStepParams,
   RPCRequest,
   RPCResponse,
   RPCEvent,
   RPCMethod,
-  CreateMissionParams,
   BoardSnapshot,
   DaemonStatus,
-  GetMissionParams,
   UIStateRecord,
   CreateTaskParams,
   CreatePillarParams,
   MoveTaskParams,
-  ReorderMissionStepParams,
   RenameTaskParams,
-  SetMissionStepStatusParams,
-  StartAllReadyMissionStepsParams,
-  StartMissionStepParams,
-  StartNextMissionStepParams,
   UpdateTaskDescriptionParams,
-  UpdateMissionParams,
-  UpdateMissionStepParams,
   ReorderTaskParams,
   AssignPillarParams,
   DeletePillarParams,
@@ -108,17 +98,6 @@ export async function dispatch(
         return { id: req.id, result: snapshot };
       }
 
-      case 'listMissions': {
-        return { id: req.id, result: services.missions.listMissions() };
-      }
-
-      case 'getMission': {
-        return {
-          id: req.id,
-          result: services.missions.getMission((p as unknown as GetMissionParams).id),
-        };
-      }
-
       case 'setUIState': {
         services.board.setUIState(p as Partial<UIStateRecord>);
         serverEvents.emit('event', {
@@ -129,94 +108,6 @@ export async function dispatch(
       }
 
       // ---- task mutations -------------------------------------
-      case 'createMission': {
-        const mission = services.missions.createMission(p as unknown as CreateMissionParams);
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: mission };
-      }
-
-      case 'updateMission': {
-        const mission = services.missions.updateMission(p as unknown as UpdateMissionParams);
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: mission };
-      }
-
-      case 'addMissionStep': {
-        const step = services.missions.addMissionStep(p as unknown as AddMissionStepParams);
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: step };
-      }
-
-      case 'updateMissionStep': {
-        const step = services.missions.updateMissionStep(p as unknown as UpdateMissionStepParams);
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: step };
-      }
-
-      case 'reorderMissionStep': {
-        const step = services.missions.reorderMissionStep(p as unknown as ReorderMissionStepParams);
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: step };
-      }
-
-      case 'startMissionStep': {
-        const task = services.missions.startMissionStep((p as unknown as StartMissionStepParams).id);
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: task };
-      }
-
-      case 'startNextMissionStep': {
-        const task = services.missions.startNextMissionStep(
-          (p as unknown as StartNextMissionStepParams).missionId
-        );
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: task };
-      }
-
-      case 'startAllReadyMissionSteps': {
-        const tasks = services.missions.startAllReadyMissionSteps(
-          (p as unknown as StartAllReadyMissionStepsParams).missionId
-        );
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: tasks };
-      }
-
-      case 'setMissionStepStatus': {
-        const step = services.missions.setMissionStepStatus(
-          (p as unknown as SetMissionStepStatusParams).id,
-          (p as unknown as SetMissionStepStatusParams).status
-        );
-        serverEvents.emit('event', {
-          type: 'board_patch',
-          payload: services.view.getBoardSnapshot(),
-        });
-        return { id: req.id, result: step };
-      }
-
       case 'createTask': {
         const task = services.board.createTask(p as unknown as CreateTaskParams);
         serverEvents.emit('event', {

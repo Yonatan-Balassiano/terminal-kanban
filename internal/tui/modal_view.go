@@ -21,10 +21,6 @@ func renderModal(m *Model) string {
 		return renderHelpModal()
 	case ModalCreateTask:
 		return renderCreateTaskModal(m)
-	case ModalCreateMission:
-		return renderCreateMissionModal(m)
-	case ModalAddMissionStep:
-		return renderAddMissionStepModal(m)
 	case ModalRenameTask:
 		return renderRenameTaskModal(m)
 	case ModalTaskDescription:
@@ -98,66 +94,6 @@ func renderCreateTaskModal(m *Model) string {
 		lineColor(createTaskRepoLine).Render(fmt.Sprintf("%s Repo: %s", linePrefix(createTaskRepoLine), selectedRepo)),
 		lineColor(createTaskPillarLine).Render(fmt.Sprintf("%s Pillar: %s", linePrefix(createTaskPillarLine), selectedPillar)),
 		lineColor(createTaskAgentLine).Render(fmt.Sprintf("%s Agent: %s", linePrefix(createTaskAgentLine), selectedAgent)),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[↑/↓ lines]  [←/→ change current field]"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
-	}
-
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
-func renderCreateMissionModal(m *Model) string {
-	state := m.createMissionModal
-	if state == nil {
-		return ""
-	}
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Render("Create Mission"),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Title: ") + state.Value + "|",
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
-	}
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
-func renderAddMissionStepModal(m *Model) string {
-	state := m.addMissionStepModal
-	if state == nil {
-		return ""
-	}
-
-	selectedRepo := "None"
-	if len(m.repos) > 0 {
-		selectedRepo = m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].Label
-	}
-
-	dependencyOptions := m.missionDependencyOptions()
-	selectedDependency := "None"
-	if len(dependencyOptions) > 0 {
-		selectedDependency = dependencyOptions[clamp(state.DependsOnIndex, 0, len(dependencyOptions)-1)].Label
-	}
-
-	linePrefix := func(line addMissionStepLine) string {
-		if state.ActiveLine == line {
-			return "▸"
-		}
-		return " "
-	}
-
-	lineColor := func(line addMissionStepLine) lipgloss.Style {
-		if state.ActiveLine == line {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("cyan"))
-		}
-		return lipgloss.NewStyle()
-	}
-
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Render("Add Mission Step"),
-		"",
-		lineColor(addMissionStepTitleLine).Render(fmt.Sprintf("%s Title: %s%s", linePrefix(addMissionStepTitleLine), state.Value, ternaryString(state.ActiveLine == addMissionStepTitleLine, "|", ""))),
-		lineColor(addMissionStepRepoLine).Render(fmt.Sprintf("%s Repo: %s", linePrefix(addMissionStepRepoLine), selectedRepo)),
-		lineColor(addMissionStepDependsOnLine).Render(fmt.Sprintf("%s Depends On: %s", linePrefix(addMissionStepDependsOnLine), selectedDependency)),
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[↑/↓ lines]  [←/→ change current field]"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
