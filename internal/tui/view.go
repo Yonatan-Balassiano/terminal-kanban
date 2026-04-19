@@ -646,6 +646,9 @@ func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 		fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotPrimary, primaryHeight, contentWidth), primaryHeight),
 	}
 	if secondaryHeight > 0 {
+		if dividerHeight := dualTerminalDividerHeight(height); dividerHeight > 0 {
+			parts = append(parts, fitHeight(renderHorizontalDivider(contentWidth), dividerHeight))
+		}
 		parts = append(parts, fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotSecondary, secondaryHeight, contentWidth), secondaryHeight))
 	}
 	return fitHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), height)
@@ -742,6 +745,12 @@ func renderVerticalDivider(height int) string {
 		lines[index] = dividerStyle.Render("│")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderHorizontalDivider(width int) string {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(uiChrome.Accent)).
+		Render(strings.Repeat("─", max(1, width)))
 }
 
 func renderStatusBar(m *Model) string {

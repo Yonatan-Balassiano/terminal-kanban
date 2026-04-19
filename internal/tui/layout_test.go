@@ -208,6 +208,17 @@ func TestRenderVerticalDividerStaysSingleColumn(t *testing.T) {
 	}
 }
 
+func TestRenderHorizontalDividerUsesRequestedWidth(t *testing.T) {
+	divider := renderHorizontalDivider(18)
+
+	if got := lipgloss.Width(divider); got != 18 {
+		t.Fatalf("divider width = %d, want 18", got)
+	}
+	if got := lipgloss.Height(divider); got != 1 {
+		t.Fatalf("divider height = %d, want 1", got)
+	}
+}
+
 func TestTaskCardFitsTrackContentWidth(t *testing.T) {
 	card := renderTaskCard(
 		&Model{},
@@ -632,15 +643,24 @@ func TestTerminalKeyboardHintsIncludePaneSwitching(t *testing.T) {
 
 func TestSplitTerminalSlotHeightsUsesSeventyFiveTwentyFiveLayout(t *testing.T) {
 	top, bottom := splitTerminalSlotHeights(true, 20)
-	if top != 15 || bottom != 5 {
-		t.Fatalf("splitTerminalSlotHeights(true, 20) = (%d, %d), want (15, 5)", top, bottom)
+	if top != 15 || bottom != 4 {
+		t.Fatalf("splitTerminalSlotHeights(true, 20) = (%d, %d), want (15, 4)", top, bottom)
 	}
 }
 
 func TestSplitTerminalSlotHeightsClampsSmallDualPanes(t *testing.T) {
 	top, bottom := splitTerminalSlotHeights(true, 8)
-	if top != 4 || bottom != 4 {
-		t.Fatalf("splitTerminalSlotHeights(true, 8) = (%d, %d), want (4, 4)", top, bottom)
+	if top != 4 || bottom != 3 {
+		t.Fatalf("splitTerminalSlotHeights(true, 8) = (%d, %d), want (4, 3)", top, bottom)
+	}
+}
+
+func TestDualTerminalDividerHeightRequiresRoomForTwoPanes(t *testing.T) {
+	if got := dualTerminalDividerHeight(2); got != 0 {
+		t.Fatalf("dualTerminalDividerHeight(2) = %d, want 0", got)
+	}
+	if got := dualTerminalDividerHeight(3); got != 1 {
+		t.Fatalf("dualTerminalDividerHeight(3) = %d, want 1", got)
 	}
 }
 

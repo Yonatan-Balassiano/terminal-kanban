@@ -15,6 +15,7 @@ import (
 
 const (
 	terminalDividerWidth      = 1
+	terminalSlotDividerHeight = 1
 	missionRailCollapsedWidth = 18
 	missionRailExpandedWidth  = 36
 	minTerminalPaneWidth      = 40
@@ -1776,25 +1777,39 @@ func splitTerminalSlotHeights(dual bool, totalHeight int) (int, int) {
 		return max(1, totalHeight), 0
 	}
 
-	totalHeight = max(2, totalHeight)
-	bottom := max(1, totalHeight/4)
-	top := totalHeight - bottom
+	availableHeight := max(1, totalHeight-dualTerminalDividerHeight(totalHeight))
+	if availableHeight == 1 {
+		return 1, 0
+	}
+
+	bottom := max(1, availableHeight/4)
+	top := availableHeight - bottom
 	const minPaneHeight = 4
-	if totalHeight >= minPaneHeight*2 {
+	if availableHeight < minPaneHeight*2 {
+		top = (availableHeight + 1) / 2
+		bottom = availableHeight - top
+	} else {
 		if bottom < minPaneHeight {
 			bottom = minPaneHeight
-			top = totalHeight - bottom
+			top = availableHeight - bottom
 		}
 		if top < minPaneHeight {
 			top = minPaneHeight
-			bottom = totalHeight - top
+			bottom = availableHeight - top
 		}
 	}
 	if bottom <= 0 {
 		bottom = 1
-		top = max(1, totalHeight-bottom)
+		top = max(1, availableHeight-bottom)
 	}
 	return top, bottom
+}
+
+func dualTerminalDividerHeight(totalHeight int) int {
+	if totalHeight >= terminalSlotDividerHeight+2 {
+		return terminalSlotDividerHeight
+	}
+	return 0
 }
 
 func terminalSlotViewportHeight(height int) int {
