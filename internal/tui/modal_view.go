@@ -13,6 +13,8 @@ const (
 	commandVisibleRows  = 8
 	filterColumnWidth   = 28
 	filterVisibleRows   = 8
+	aiChatModalWidth    = 96
+	aiChatVisibleRows   = 10
 )
 
 func renderModal(m *Model) string {
@@ -31,8 +33,6 @@ func renderModal(m *Model) string {
 		return renderTaskDescriptionModal(m)
 	case ModalPRComment:
 		return renderPRCommentModal(m)
-	case ModalArchiveConfirm:
-		return renderArchiveConfirmModal(m)
 	case ModalDeleteMission:
 		return renderDeleteMissionConfirmModal(m)
 	case ModalDeleteConfirm:
@@ -49,6 +49,8 @@ func renderModal(m *Model) string {
 		return renderViewModal(m)
 	case ModalCommandPalette:
 		return renderCommandPaletteModal(m)
+	case ModalAIChat:
+		return renderAIChatModal(m)
 	case ModalMissionDeps:
 		return renderMissionDependenciesModal(m)
 	default:
@@ -281,26 +283,6 @@ func renderPRCommentModal(m *Model) string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Comment: ") + state.Value + "|",
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] post  [Esc] cancel"),
-	}
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
-func renderArchiveConfirmModal(m *Model) string {
-	state := m.archiveConfirmModal
-	if state == nil {
-		return ""
-	}
-	task := m.taskByID(state.TaskID)
-	title := ""
-	if task != nil {
-		title = task.Title
-	}
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("yellow")).Render("Archive Task"),
-		"",
-		fmt.Sprintf("Archive task '%s'?", title),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
 	}
 	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
 }
@@ -589,6 +571,123 @@ func renderMissionDependenciesModal(m *Model) string {
 	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
 }
 
+func renderAIChatModal(m *Model) string {
+	state := m.aiChatModal
+	if state == nil {
+		return ""
+	}
+
+	lines := []string{
+		joinSpaceBetween(strings.Join([]string{
+			badge("AI CHAT", "accent", "", false),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Local Ollama tool-calling assistant"),
+		}, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Esc close"), aiChatModalWidth-4),
+		"",
+	}
+
+	transcript := state.Transcript
+	windowStart := max(0, len(transcript)-aiChatVisibleRows)
+	if len(transcript) == 0 && state.PendingPrompt == "" {
+		lines = append(lines, lipgloss.NewStyle().
+			Width(aiChatModalWidth-4).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(uiChrome.Line)).
+			Padding(1).
+			Render(
+				lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render("Ask AgentBoard to create or operate on tasks.")+"\n"+
+					lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Example: create a mission with tasks api, ui, qa"),
+			),
+		)
+	} else {
+		for _, message := range transcript[windowStart:] {
+			role := strings.ToUpper(message.Role)
+			color := uiChrome.Text
+			if message.Role == "user" {
+				color = uiChrome.Accent
+			} else if message.Role == "assistant" {
+				color = uiChrome.Success
+			}
+			lines = append(lines, lipgloss.NewStyle().
+				Width(aiChatModalWidth-4).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color(uiChrome.Line)).
+				Padding(0, 1).
+				Render(
+					lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(role)+"\n"+
+						lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(wrapText(message.Content, aiChatModalWidth-8)),
+				),
+			)
+			lines = append(lines, "")
+		}
+	}
+
+	if state.PendingPrompt != "" {
+		lines = append(lines, lipgloss.NewStyle().
+			Width(aiChatModalWidth-4).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(uiChrome.Warning)).
+			Padding(0, 1).
+			Render(
+				lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Bold(true).Render("USER")+"\n"+
+					lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(wrapText(state.PendingPrompt, aiChatModalWidth-8)),
+			),
+		)
+		lines = append(lines, "")
+	}
+
+	if len(state.Executions) > 0 {
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Last Tool Runs"))
+		for _, execution := range state.Executions {
+			statusColor := uiChrome.Muted
+			switch execution.Status {
+			case "completed":
+				statusColor = uiChrome.Success
+			case "failed":
+				statusColor = uiChrome.Warning
+			case "started":
+				statusColor = uiChrome.Accent
+			}
+			detail := execution.Summary
+			if detail == "" {
+				detail = execution.Error
+			}
+			lines = append(lines, lipgloss.NewStyle().
+				Width(aiChatModalWidth-4).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color(uiChrome.Line)).
+				Padding(0, 1).
+				Render(
+					joinSpaceBetween(
+						lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Bold(true).Render(execution.ToolName),
+						lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(strings.ToUpper(execution.Status)),
+						aiChatModalWidth-8,
+					)+"\n"+
+						lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(detail, aiChatModalWidth-8)),
+				),
+			)
+		}
+		lines = append(lines, "")
+	}
+
+	inputLabel := ": " + state.Input
+	if state.Pending {
+		inputLabel = ": waiting for response..."
+	} else {
+		inputLabel += "|"
+	}
+	lines = append(lines, lipgloss.NewStyle().
+		Width(aiChatModalWidth-4).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(ternaryString(state.Pending, uiChrome.Line, uiChrome.Accent))).
+		Padding(0, 1).
+		Render(inputLabel),
+	)
+	lines = append(lines, "")
+	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] send  [Esc] close"))
+
+	return modalBox(lipgloss.DoubleBorder(), strings.Join(lines, "\n"))
+}
+
 func renderFilterColumn(title string, active bool, options []filterOption, selectedIDs []string, selectedIndex int) string {
 	windowStart := commandWindowStart(selectedIndex, len(options), filterVisibleRows)
 	visible := options[windowStart:min(len(options), windowStart+filterVisibleRows)]
@@ -649,4 +748,27 @@ func padFilterLabel(label string, width int) string {
 		return truncateText(label, width)
 	}
 	return label + strings.Repeat(" ", width-plainWidth(label))
+}
+
+func wrapText(value string, width int) string {
+	if width <= 0 {
+		return value
+	}
+	words := strings.Fields(value)
+	if len(words) == 0 {
+		return value
+	}
+
+	lines := []string{}
+	current := words[0]
+	for _, word := range words[1:] {
+		if plainWidth(current)+1+plainWidth(word) <= width {
+			current += " " + word
+			continue
+		}
+		lines = append(lines, current)
+		current = word
+	}
+	lines = append(lines, current)
+	return strings.Join(lines, "\n")
 }

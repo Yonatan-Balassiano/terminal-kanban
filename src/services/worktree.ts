@@ -70,7 +70,7 @@ export class WorktreeService {
          FROM tasks
          WHERE repo_id = ?
            AND archived_at IS NULL
-           AND session_id IS NOT NULL
+           AND (session_id IS NOT NULL OR secondary_session_id IS NOT NULL)
            AND id <> ?`,
       )
       .get(repo.id, taskId)?.count ?? 0;

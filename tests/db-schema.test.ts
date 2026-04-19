@@ -54,6 +54,18 @@ describe('database schema bootstrap', () => {
         .all()
         .map((column) => column.name);
       expect(missionTaskColumns).toContain('released_to_board');
+
+      const taskColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(tasks)')
+        .all()
+        .map((column) => column.name);
+      expect(taskColumns).toContain('secondary_session_id');
+
+      const sessionColumns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(sessions)')
+        .all()
+        .map((column) => column.name);
+      expect(sessionColumns).toContain('slot');
     } finally {
       db.close();
     }

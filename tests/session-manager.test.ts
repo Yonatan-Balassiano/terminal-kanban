@@ -445,7 +445,7 @@ describe('SessionManager branch fallback', () => {
     const session = await manager.recreateSession(task.id);
 
     expect(terminate).toHaveBeenCalledWith('ab_old_session');
-    expect(destroy).toHaveBeenCalledWith(task.id);
+    expect(destroy).toHaveBeenCalledWith(task.id, 'primary');
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: task.id,
@@ -518,7 +518,15 @@ describe('SessionManager branch fallback', () => {
       backend,
     );
 
-    (manager as { lastBusyByTaskId: Map<string, boolean> }).lastBusyByTaskId.set(task.id, true);
+    (
+      manager as { lastBusyBySessionKey: Map<string, boolean>; sessionKey(taskId: string, slot: 'primary' | 'secondary'): string }
+    ).lastBusyBySessionKey.set(
+      (manager as { sessionKey(taskId: string, slot: 'primary' | 'secondary'): string }).sessionKey(
+        task.id,
+        'primary',
+      ),
+      true,
+    );
 
     const result = await manager.inspectSessionState(task.id);
 
@@ -909,5 +917,74 @@ describe('SessionManager branch fallback', () => {
     expect(firstResult.activity?.isBusy).toBe(true);
     expect(secondResult.activity?.isBusy).toBe(true);
     expect(inspect).toHaveBeenCalledTimes(2);
+  });
+
+  it('enables dual session mode by linking a secondary shell without replacing the primary shell', async () => {
+    const task = board.createTask({ title: 'Dual me', repoId: 'repo-1' });
+
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: opts.slot === 'secondary' ? 'session-2' : 'session-1',
+      taskId: opts.taskId,
+      slot: opts.slot,
+      backendType: 'pty',
+      backendSessionId:
+        opts.slot === 'secondary' ? 'ab_dual_me_2e30_s' : 'ab_dual_me_2e30_p',
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    await manager.setDualSessionMode(task.id, true);
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ taskId: task.id, slot: 'primary' }),
+    );
+    expect(create).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ taskId: task.id, slot: 'secondary' }),
+    );
+    expect(board.getTask(task.id)?.sessionId).toBe('session-1');
+    expect(board.getTask(task.id)?.secondarySessionId).toBe('session-2');
   });
 });

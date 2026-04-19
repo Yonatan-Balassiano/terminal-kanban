@@ -154,6 +154,11 @@ func (c *RPCClient) nextID() string {
 
 func rpcTimeout(method string) time.Duration {
 	switch method {
+	case "chatTurn":
+		// A single chat turn may span multiple Ollama/tool-call rounds.
+		return 8 * time.Minute
+	case "shutdownManagedOllama":
+		return 20 * time.Second
 	case "createTaskPR", "commentTaskPR", "mergeTaskPR", "triggerSync":
 		return 45 * time.Second
 	case "openSession", "recreateSession":

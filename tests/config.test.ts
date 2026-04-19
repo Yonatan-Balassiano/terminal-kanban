@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_AI_CHAT_SYSTEM_PROMPT } from '../src/prompts/ai-chat-system-prompt.js';
 import { defaultConfig } from '../src/config/index.js';
 
 describe('defaultConfig', () => {
@@ -17,5 +18,18 @@ describe('defaultConfig', () => {
 
   it('uses the bundled session bootstrap script by default', () => {
     expect(defaultConfig().sessionBootstrapScript).toMatch(/scripts\/session-bootstrap\.sh$/);
+  });
+
+  it('includes the default Ollama chat config and system prompt', () => {
+    expect(defaultConfig().aiChat).toEqual({
+      enabled: true,
+      provider: 'ollama',
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'gemma4:e2b',
+      requestTimeoutMs: 45000,
+      maxToolRounds: 6,
+      historyLimit: 24,
+      systemPrompt: DEFAULT_AI_CHAT_SYSTEM_PROMPT,
+    });
   });
 });

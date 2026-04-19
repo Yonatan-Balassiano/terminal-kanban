@@ -49,19 +49,21 @@ func shouldFlushTerminalInputImmediately(key tea.KeyMsg) bool {
 	return false
 }
 
-func (m *Model) queueTerminalInputCmd(taskID, data string, key tea.KeyMsg, shouldTriggerPushSync bool) tea.Cmd {
+func (m *Model) queueTerminalInputCmd(taskID string, slot SessionSlot, data string, key tea.KeyMsg, shouldTriggerPushSync bool) tea.Cmd {
 	if data == "" {
 		return nil
 	}
 
 	commands := []tea.Cmd{}
-	if m.pendingTerminalInputTaskID != "" && m.pendingTerminalInputTaskID != taskID {
+	normalizedSlot := normalizeSessionSlot(slot)
+	if m.pendingTerminalInputTaskID != "" && (m.pendingTerminalInputTaskID != taskID || m.pendingTerminalInputSlot != normalizedSlot) {
 		if flushCmd := m.flushPendingTerminalInputCmd(); flushCmd != nil {
 			commands = append(commands, flushCmd)
 		}
 	}
 
 	m.pendingTerminalInputTaskID = taskID
+	m.pendingTerminalInputSlot = normalizedSlot
 	m.pendingTerminalInput += data
 	m.pendingTerminalPushSync = m.pendingTerminalPushSync || shouldTriggerPushSync
 
@@ -83,10 +85,12 @@ func (m *Model) queueTerminalInputCmd(taskID, data string, key tea.KeyMsg, shoul
 
 func (m *Model) flushPendingTerminalInputCmd() tea.Cmd {
 	taskID := m.pendingTerminalInputTaskID
+	slot := m.pendingTerminalInputSlot
 	data := m.pendingTerminalInput
 	shouldTriggerPushSync := m.pendingTerminalPushSync
 
 	m.pendingTerminalInputTaskID = ""
+	m.pendingTerminalInputSlot = SessionSlotPrimary
 	m.pendingTerminalInput = ""
 	m.pendingTerminalPushSync = false
 
@@ -94,7 +98,7 @@ func (m *Model) flushPendingTerminalInputCmd() tea.Cmd {
 		return nil
 	}
 
-	commands := []tea.Cmd{m.sendInputCmd(taskID, data)}
+	commands := []tea.Cmd{m.sendInputCmd(taskID, slot, data)}
 	if shouldTriggerPushSync {
 		m.postPushSyncVersion++
 		version := m.postPushSyncVersion

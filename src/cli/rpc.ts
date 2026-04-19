@@ -7,6 +7,11 @@ import type { RPCRequest, RPCResponse, RPCEvent, RPCMethod } from '../types/inde
 
 function rpcTimeoutMs(method: RPCMethod): number {
   switch (method) {
+    case 'chatTurn':
+      // A single chat turn may span multiple Ollama/tool-call rounds.
+      return 480_000;
+    case 'shutdownManagedOllama':
+      return 20_000;
     case 'createTaskPR':
     case 'mergeTaskPR':
     case 'triggerSync':

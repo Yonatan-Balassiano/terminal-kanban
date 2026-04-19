@@ -13,6 +13,7 @@ import type {
   BackendHealth,
   SessionStatus,
   GetBufferResult,
+  SessionSlot,
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
@@ -52,6 +53,7 @@ export class TmuxBackend implements SessionBackend {
     string,
     {
       taskId: string;
+      slot: SessionSlot;
       filePath: string;
       offset: number;
       watcher: FSWatcher;
@@ -59,7 +61,7 @@ export class TmuxBackend implements SessionBackend {
     }
   >();
 
-  constructor(private onOutput?: (taskId: string, data: string) => void) {}
+  constructor(private onOutput?: (taskId: string, slot: SessionSlot, data: string) => void) {}
 
   private streamFilePath(backendSessionId: string): string {
     return join(tmpdir(), `agentboard-${backendSessionId}.stream.log`);
@@ -90,7 +92,7 @@ export class TmuxBackend implements SessionBackend {
       readSync(fd, buffer, 0, length, tap.offset);
       tap.offset = size;
       if (buffer.length > 0) {
-        this.onOutput?.(tap.taskId, buffer.toString('utf8'));
+        this.onOutput?.(tap.taskId, tap.slot, buffer.toString('utf8'));
       }
     } finally {
       closeSync(fd);
@@ -110,10 +112,11 @@ export class TmuxBackend implements SessionBackend {
     tap.timer.unref?.();
   }
 
-  ensureStreaming(taskId: string, backendSessionId: string): void {
+  ensureStreaming(taskId: string, slot: SessionSlot, backendSessionId: string): void {
     const existing = this.streamTaps.get(backendSessionId);
     if (existing) {
       existing.taskId = taskId;
+      existing.slot = slot;
       return;
     }
 
@@ -136,6 +139,7 @@ export class TmuxBackend implements SessionBackend {
 
     this.streamTaps.set(backendSessionId, {
       taskId,
+      slot,
       filePath,
       offset: 0,
       watcher,
@@ -195,7 +199,7 @@ export class TmuxBackend implements SessionBackend {
   }
 
   async create(opts: CreateSessionOpts): Promise<SessionRecord> {
-    const name = buildBackendSessionName(opts.taskTitle, opts.taskId);
+    const name = buildBackendSessionName(opts.taskTitle, opts.taskId, opts.slot);
     const cwd = opts.cwd ?? opts.repoPath;
 
     execSync(`tmux new-session -d -s ${JSON.stringify(name)} -c ${JSON.stringify(cwd)}`);
@@ -214,12 +218,13 @@ export class TmuxBackend implements SessionBackend {
     execSync(
       `tmux send-keys -t ${JSON.stringify(name)} ${JSON.stringify(checkoutCmd)} Enter`,
     );
-    this.ensureStreaming(opts.taskId, name);
+    this.ensureStreaming(opts.taskId, opts.slot, name);
 
     const now = Date.now();
     const session: SessionRecord = {
       id: generateId(),
       taskId: opts.taskId,
+      slot: opts.slot,
       backendType: 'tmux',
       backendSessionId: name,
       attachCommand: `tmux attach -t ${name}`,

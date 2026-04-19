@@ -22,6 +22,8 @@ export interface ServiceContainer {
   view: import('../services/view.js').ViewService;
   events: import('../services/events.js').EventLogService;
   doctor: import('../services/doctor.js').DoctorService;
+  aiChat: import('../services/ai-chat.js').AIChatService;
+  ollama?: import('../services/ollama.js').ManagedOllamaService;
   db: import('../db/index.js').Db;
   dbPath: string;
 }
@@ -98,6 +100,16 @@ function appendLog(logFile: string, message: string): void {
   } catch {
     // Best-effort logging; never crash the daemon over a log write failure.
   }
+}
+
+export function warmOllamaOnStartup(
+  ollama: Pick<import('../services/ollama.js').ManagedOllamaService, 'ensureModelReady'>,
+  logFile: string,
+): void {
+  void ollama.ensureModelReady().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    appendLog(logFile, `[daemon] Ollama model warmup failed: ${message}`);
+  });
 }
 
 const BOARD_TRACKS = [
@@ -327,6 +339,8 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const { SessionManager } = await import('../services/session-manager.js');
   const { WorktreeService } = await import('../services/worktree.js');
   const { TaskLifecycleService } = await import('../services/task-lifecycle.js');
+  const { AIChatService } = await import('../services/ai-chat.js');
+  const { ManagedOllamaService } = await import('../services/ollama.js');
   const { serverEvents, startServer } = await import('./server.js');
   const { loadConfig, defaultConfig } = await import('../config/index.js');
 
@@ -347,14 +361,29 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const doctor = new DoctorService(db, opts.socketPath);
   const buffers = new TerminalBufferService();
   const worktrees = new WorktreeService(db, board, git);
-  const session = new SessionManager(db, board, worktrees, buffers, (taskId, buffer) => {
+  const session = new SessionManager(db, board, worktrees, buffers, (taskId, slot, buffer) => {
     serverEvents.emit('event', {
       type: 'session_update',
-      payload: { taskId, ...buffer },
+      payload: { taskId, slot, ...buffer },
     });
   }, cfg.sessionBootstrapScript);
   const taskLifecycle = new TaskLifecycleService(db, board, git, session);
   const sync = new SyncService(board, missions, github, git, db);
+  const ollama = new ManagedOllamaService(cfg.aiChat);
+  const aiChat = new AIChatService({
+    board,
+    missions,
+    workspace,
+    worktrees,
+    session,
+    sync,
+    github,
+    git,
+    view,
+    events,
+    config: cfg.aiChat,
+    ollama,
+  });
 
   // ---- Load config and seed tracks + poll interval -----------
   let pollIntervalMs = 60000;
@@ -418,9 +447,12 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     view,
     events,
     doctor,
+    aiChat,
+    ollama,
   };
 
   const server = startServer(opts.socketPath, services);
+  warmOllamaOnStartup(ollama, opts.logFile);
 
   // Graceful shutdown handler.
   let shuttingDown = false;
@@ -431,26 +463,33 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     appendLog(opts.logFile, `[daemon] received ${signal}, shutting down`);
 
     server.close(() => {
-      try {
-        sync.stop();
-      } catch {
-        // Ignore stop errors.
-      }
-      try {
-        db.close();
-      } catch {
-        // Ignore close errors.
-      }
-      try {
-        // Remove the socket path before releasing the lock so a fast restart
-        // cannot have its fresh socket unlinked by this older daemon.
-        removeSocketFile(opts.socketPath);
-      } catch {
-        // Socket already gone.
-      }
-      cleanupInstanceFiles();
-      appendLog(opts.logFile, `[daemon] stopped`);
-      process.exit(0);
+      void (async () => {
+        try {
+          sync.stop();
+        } catch {
+          // Ignore stop errors.
+        }
+        try {
+          await ollama.shutdown();
+        } catch {
+          // Ignore Ollama shutdown errors.
+        }
+        try {
+          db.close();
+        } catch {
+          // Ignore close errors.
+        }
+        try {
+          // Remove the socket path before releasing the lock so a fast restart
+          // cannot have its fresh socket unlinked by this older daemon.
+          removeSocketFile(opts.socketPath);
+        } catch {
+          // Socket already gone.
+        }
+        cleanupInstanceFiles();
+        appendLog(opts.logFile, `[daemon] stopped`);
+        process.exit(0);
+      })();
     });
 
     // Force-kill after 5 s if the server hasn't drained.

@@ -9,11 +9,13 @@ interface TaskCleanupContext {
   repoPath: string;
   worktreePath: string | null;
   sessionId: string | null;
+  secondarySessionId: string | null;
   sessionStatus: string | null;
+  secondarySessionStatus: string | null;
 }
 
-function blocksArchiveCleanup(status: string | null): boolean {
-  return status === 'active' || status === 'idle';
+function blocksArchiveCleanup(...statuses: Array<string | null>): boolean {
+  return statuses.some((status) => status === 'active' || status === 'idle');
 }
 
 export class TaskLifecycleService {
@@ -25,7 +27,7 @@ export class TaskLifecycleService {
       setTaskWorktree?: (taskId: string, worktreePath: string | null) => void;
     },
     private git: GitService,
-    private session: Pick<SessionManager, 'terminateSession'>,
+    private session: Pick<SessionManager, 'terminateSession' | 'terminateTaskSessions'>,
   ) {}
 
   private loadTaskCleanupContext(taskId: string): TaskCleanupContext {
@@ -36,10 +38,13 @@ export class TaskLifecycleService {
            r.path AS repoPath,
            t.worktree_path AS worktreePath,
            t.session_id AS sessionId,
-           s.status AS sessionStatus
+           t.secondary_session_id AS secondarySessionId,
+           s.status AS sessionStatus,
+           s2.status AS secondarySessionStatus
          FROM tasks t
          JOIN repos r ON r.id = t.repo_id
          LEFT JOIN sessions s ON s.id = t.session_id
+         LEFT JOIN sessions s2 ON s2.id = t.secondary_session_id
          WHERE t.id = ?`,
       )
       .get(taskId);
@@ -55,7 +60,11 @@ export class TaskLifecycleService {
     const task = this.loadTaskCleanupContext(taskId);
     this.board.archiveTask(taskId);
 
-    if (!task.worktreePath || !existsSync(task.worktreePath) || blocksArchiveCleanup(task.sessionStatus)) {
+    if (
+      !task.worktreePath ||
+      !existsSync(task.worktreePath) ||
+      blocksArchiveCleanup(task.sessionStatus, task.secondarySessionStatus)
+    ) {
       return;
     }
 
@@ -70,8 +79,15 @@ export class TaskLifecycleService {
   async deleteTask(taskId: string): Promise<void> {
     const task = this.loadTaskCleanupContext(taskId);
 
-    if (task.sessionId) {
-      await this.session.terminateSession(task.sessionId);
+    if (this.session.terminateTaskSessions) {
+      await this.session.terminateTaskSessions(taskId);
+    } else {
+      if (task.sessionId) {
+        await this.session.terminateSession(task.sessionId);
+      }
+      if (task.secondarySessionId) {
+        await this.session.terminateSession(task.secondarySessionId);
+      }
     }
 
     if (task.worktreePath && existsSync(task.worktreePath)) {
