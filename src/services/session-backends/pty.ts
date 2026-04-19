@@ -6,6 +6,7 @@ import type {
   AttachMetadata,
   BackendSessionInfo,
   BackendHealth,
+  SessionSlot,
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
@@ -28,7 +29,7 @@ export class PtyBackend implements SessionBackend {
   private ptys = new Map<string, IPty>();
 
   constructor(
-    private onData?: (taskId: string, data: string) => void,
+    private onData?: (taskId: string, slot: SessionSlot, data: string) => void,
   ) {}
 
   async healthCheck(): Promise<BackendHealth> {
@@ -46,7 +47,7 @@ export class PtyBackend implements SessionBackend {
     const shell = process.env.SHELL ?? '/bin/sh';
     const cwd = opts.cwd ?? opts.repoPath;
 
-    const backendSessionId = buildBackendSessionName(opts.taskTitle, opts.taskId);
+    const backendSessionId = buildBackendSessionName(opts.taskTitle, opts.taskId, opts.slot);
 
     const pty = nodePty.spawn(shell, [], {
       name: 'xterm-256color',
@@ -57,7 +58,7 @@ export class PtyBackend implements SessionBackend {
     });
 
     pty.onData((data) => {
-      this.onData?.(opts.taskId, data);
+      this.onData?.(opts.taskId, opts.slot, data);
     });
 
     pty.onExit(() => {
@@ -83,6 +84,7 @@ export class PtyBackend implements SessionBackend {
     const session: SessionRecord = {
       id: generateId(),
       taskId: opts.taskId,
+      slot: opts.slot,
       backendType: 'pty',
       backendSessionId,
       attachCommand: undefined,

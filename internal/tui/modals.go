@@ -66,10 +66,6 @@ type prCommentModalState struct {
 	Value  string
 }
 
-type archiveConfirmModalState struct {
-	TaskID string
-}
-
 type deleteMissionConfirmModalState struct {
 	MissionID string
 	TaskCount int
@@ -113,6 +109,14 @@ type commandPaletteModalState struct {
 	Index int
 }
 
+type aiChatModalState struct {
+	Input         string
+	Transcript    []ChatMessage
+	Executions    []ChatToolExecution
+	Pending       bool
+	PendingPrompt string
+}
+
 type missionDependenciesModalState struct {
 	MissionID              string
 	TaskID                 string
@@ -153,7 +157,6 @@ func (m *Model) closeModal() {
 	m.renameTaskModal = nil
 	m.taskDescriptionModal = nil
 	m.prCommentModal = nil
-	m.archiveConfirmModal = nil
 	m.deleteMissionConfirmModal = nil
 	m.deleteConfirmModal = nil
 	m.createPillarModal = nil
@@ -162,6 +165,7 @@ func (m *Model) closeModal() {
 	m.filterModal = nil
 	m.viewModal = nil
 	m.commandPaletteModal = nil
+	m.aiChatModal = nil
 	m.missionDependenciesModal = nil
 }
 
@@ -329,17 +333,6 @@ func (m *Model) openPRCommentModal(task *TaskRecord) {
 	m.prCommentModal = &prCommentModalState{TaskID: task.ID}
 }
 
-func (m *Model) openArchiveConfirmModal(task *TaskRecord) {
-	if task == nil {
-		m.statusMessage = "Select a task to archive it."
-		return
-	}
-	m.closeModal()
-	m.modal = ModalArchiveConfirm
-	m.focus = FocusModal
-	m.archiveConfirmModal = &archiveConfirmModalState{TaskID: task.ID}
-}
-
 func (m *Model) openDeleteConfirmModal(task *TaskRecord) {
 	if task == nil {
 		m.statusMessage = "Select a task to delete it."
@@ -480,6 +473,13 @@ func (m *Model) openCommandPaletteModal() {
 	m.commandPaletteModal = &commandPaletteModalState{}
 }
 
+func (m *Model) openAIChatModal() {
+	m.closeModal()
+	m.modal = ModalAIChat
+	m.focus = FocusModal
+	m.aiChatModal = &aiChatModalState{}
+}
+
 func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 	switch m.modal {
 	case ModalHelp:
@@ -499,8 +499,6 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleTaskDescriptionModalKey(key)
 	case ModalPRComment:
 		return m.handlePRCommentModalKey(key)
-	case ModalArchiveConfirm:
-		return m.handleArchiveConfirmModalKey(key)
 	case ModalDeleteMission:
 		return m.handleDeleteMissionConfirmModalKey(key)
 	case ModalDeleteConfirm:
@@ -517,6 +515,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleViewModalKey(key)
 	case ModalCommandPalette:
 		return m.handleCommandPaletteModalKey(key)
+	case ModalAIChat:
+		return m.handleAIChatModalKey(key)
 	case ModalMissionDeps:
 		return m.handleMissionDependenciesModalKey(key)
 	default:
@@ -989,24 +989,6 @@ func (m *Model) handlePRCommentModalKey(key tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) handleArchiveConfirmModalKey(key tea.KeyMsg) tea.Cmd {
-	state := m.archiveConfirmModal
-	if state == nil {
-		m.closeModal()
-		return nil
-	}
-	if key.Type == tea.KeyEsc || key.String() == "n" || key.String() == "N" {
-		m.closeModal()
-		return nil
-	}
-	if key.String() == "y" || key.String() == "Y" {
-		taskID := state.TaskID
-		m.closeModal()
-		return m.archiveTaskCmd(taskID)
-	}
-	return nil
-}
-
 func (m *Model) handleDeleteConfirmModalKey(key tea.KeyMsg) tea.Cmd {
 	state := m.deleteConfirmModal
 	if state == nil {
@@ -1271,6 +1253,48 @@ func (m *Model) handleCommandPaletteModalKey(key tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) handleAIChatModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.aiChatModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		if state.Pending {
+			return nil
+		}
+		prompt := strings.TrimSpace(state.Input)
+		if prompt == "" {
+			return nil
+		}
+		state.Pending = true
+		state.PendingPrompt = prompt
+		state.Input = ""
+		m.statusMessage = "AI chat is thinking..."
+		return m.chatTurnCmd(prompt)
+	case tea.KeyBackspace, tea.KeyDelete:
+		if state.Pending {
+			return nil
+		}
+		state.Input = trimLastRune(state.Input)
+		return nil
+	}
+
+	if state.Pending {
+		return nil
+	}
+
+	if next, changed := appendPrintableInput(state.Input, key); changed {
+		state.Input = next
+	}
+	return nil
+}
+
 func (m *Model) handleMissionDependenciesModalKey(key tea.KeyMsg) tea.Cmd {
 	state := m.missionDependenciesModal
 	if state == nil {
@@ -1398,9 +1422,6 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "delete-task":
 		m.openDeleteConfirmModal(contextTask)
 		return nil
-	case "archive-task":
-		m.openArchiveConfirmModal(contextTask)
-		return nil
 	case "assign-pillar":
 		m.openPillarPickerModal(contextTask)
 		return nil
@@ -1431,13 +1452,19 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "open-shell":
 		m.closeModal()
 		if contextTask != nil {
-			return m.openSessionCmd(contextTask.ID, false)
+			return m.openSessionCmd(contextTask.ID, false, SessionSlotPrimary)
 		}
 		return nil
 	case "recreate-shell":
 		m.closeModal()
 		if contextTask != nil {
-			return m.openSessionCmd(contextTask.ID, true)
+			return m.openSessionCmd(contextTask.ID, true, SessionSlotPrimary)
+		}
+		return nil
+	case "toggle-dual-shell":
+		m.closeModal()
+		if contextTask != nil {
+			return m.toggleDualSessionCmd(contextTask)
 		}
 		return nil
 	case "focus-terminal":
@@ -1516,6 +1543,9 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "help":
 		m.openHelpModal()
 		return nil
+	case "ai-chat":
+		m.openAIChatModal()
+		return nil
 	case "quit":
 		m.closeModal()
 		return tea.Quit
@@ -1542,7 +1572,6 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "rename-task", Title: "Rename current task", Section: "Task", Detail: detailOrFallback(contextTask, "Rename %s", "Rename the current task."), Shortcut: "r", Keywords: []string{"title", "edit"}, Disabled: contextTask == nil, DisabledReason: "Select a task to rename it."},
 		{ID: "edit-description", Title: "Edit task description", Section: "Task", Detail: "Open the long-form task description editor.", Shortcut: "Ctrl+D", Keywords: []string{"notes", "description"}, Disabled: contextTask == nil, DisabledReason: "Select a task to edit its description."},
 		{ID: "delete-task", Title: "Delete current task", Section: "Task", Detail: "Delete the selected task after confirmation.", Shortcut: "d", Keywords: []string{"remove"}, Disabled: contextTask == nil, DisabledReason: "Select a task to delete it."},
-		{ID: "archive-task", Title: "Archive current task", Section: "Task", Detail: "Archive the selected task.", Shortcut: "a", Keywords: []string{"done", "hide"}, Disabled: contextTask == nil, DisabledReason: "Select a task to archive it."},
 		{ID: "assign-pillar", Title: "Assign pillar", Section: "Task", Detail: "Attach or change the pillar for the current task.", Shortcut: "p", Keywords: []string{"label", "pillar"}, Disabled: contextTask == nil, DisabledReason: "Select a task to assign a pillar."},
 		{ID: "create-pillar", Title: "Create pillar", Section: "Task", Detail: "Create a new pillar and optionally assign it to the current task.", Shortcut: "P", Keywords: []string{"new pillar"}},
 		{ID: "delete-pillar", Title: "Delete current pillar", Section: "Task", Detail: "Delete the current pillar and every task attached to it.", Shortcut: "D", Keywords: []string{"remove pillar"}, Disabled: contextTask == nil || contextTask.PillarID == "", DisabledReason: "The current task does not have a pillar to delete."},
@@ -1550,6 +1579,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "move-task-right", Title: "Move task right", Section: "Task", Detail: "Move the current task to the next track.", Shortcut: "]", Keywords: []string{"next track", "kanban"}, Disabled: contextTask == nil || contextTrackIndex < 0 || contextTrackIndex >= len(m.sortedTracks())-1, DisabledReason: "The current task is already in the last track."},
 		{ID: "open-shell", Title: "Open task shell", Section: "Session", Detail: "Start or attach the session for the current task.", Shortcut: "Enter", Keywords: []string{"terminal", "session", "shell"}, Disabled: contextTask == nil, DisabledReason: "Select a task to open its shell."},
 		{ID: "recreate-shell", Title: "Recreate task shell", Section: "Session", Detail: "Recreate the current task shell with the native backend.", Shortcut: "R", Keywords: []string{"terminal", "session", "restart"}, Disabled: contextTask == nil, DisabledReason: "Select a task to recreate its shell."},
+		{ID: "toggle-dual-shell", Title: "Toggle dual shell", Section: "Session", Detail: detailOrFallback(contextTask, ternaryString(contextTask != nil && contextTask.SecondarySessionID != "", "Close the lower terminal for %s", "Open a lower dev terminal for %s"), "Open or close the secondary shell for the current task."), Shortcut: "B", Keywords: []string{"terminal", "dual", "secondary", "dev"}, Disabled: contextTask == nil, DisabledReason: "Select a task to toggle its dual shell."},
 		{ID: "focus-terminal", Title: "Focus terminal pane", Section: "Session", Detail: "Jump into the embedded terminal pane.", Shortcut: "t", Keywords: []string{"terminal", "pane"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before focusing the terminal pane."},
 		{ID: "fullscreen-terminal", Title: "Expand terminal workspace", Section: "Session", Detail: "Make the terminal take over the workspace.", Shortcut: "z", Keywords: []string{"terminal", "fullscreen", "expand"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before expanding the terminal."},
 		{ID: "open-ide", Title: "Open workspace in IDE", Section: "Workspace", Detail: "Open the current task workspace in the configured IDE.", Shortcut: "i", Keywords: []string{"editor", "workspace"}, Disabled: contextTask == nil, DisabledReason: "Select a task to open its workspace."},
@@ -1565,6 +1595,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "repo-prev", Title: "Previous repo", Section: "View", Detail: "Switch to the previous repo filter.", Shortcut: ",", Keywords: []string{"repo", "left"}, Disabled: len(m.repos) == 0, DisabledReason: "Add a repo before switching repo scope."},
 		{ID: "repo-next", Title: "Next repo", Section: "View", Detail: "Switch to the next repo filter.", Shortcut: ".", Keywords: []string{"repo", "right"}, Disabled: len(m.repos) == 0, DisabledReason: "Add a repo before switching repo scope."},
 		{ID: "sync", Title: "Sync now", Section: "System", Detail: "Refresh PR, CI, and review state from GitHub.", Shortcut: "s", Keywords: []string{"refresh", "github"}},
+		{ID: "ai-chat", Title: "AI chat", Section: "System", Detail: "Open the local Ollama tool-calling chat modal.", Shortcut: "a/A", Keywords: []string{"assistant", "ollama", "chat", "ai"}},
 		{ID: "help", Title: "Open help", Section: "System", Detail: "Show the keyboard reference.", Shortcut: "?", Keywords: []string{"shortcuts", "keys"}},
 		{ID: "quit", Title: "Quit AgentBoard", Section: "System", Detail: "Exit the application.", Shortcut: "q", Keywords: []string{"exit", "close"}},
 	}
@@ -1733,18 +1764,14 @@ func (m *Model) updateTaskDescriptionCmd(taskID, description string) tea.Cmd {
 	return m.boardActionCmd("updateTaskDescription", map[string]string{"id": taskID, "description": description}, "Saved task description.")
 }
 
-func (m *Model) archiveTaskCmd(taskID string) tea.Cmd {
-	return m.boardActionCmd("archiveTask", map[string]string{"id": taskID}, "Archived task.")
-}
-
 func (m *Model) deleteTaskCmd(taskID string) tea.Cmd {
 	if taskID == m.activeTaskID {
-		m.activeTaskID = ""
-		m.activeSessionBranch = ""
-		m.activeSessionBackendType = ""
-		m.terminalPaneVisible = false
+		m.clearActiveTerminalState()
 	}
-	return m.boardActionCmd("deleteTask", map[string]string{"id": taskID}, "Deleted task.")
+	return tea.Batch(
+		m.syncSessionUpdateWatchCmd(),
+		m.boardActionCmd("deleteTask", map[string]string{"id": taskID}, "Deleted task."),
+	)
 }
 
 func (m *Model) createPillarCmd(label, assignTaskID string) tea.Cmd {
@@ -1891,7 +1918,13 @@ func detailOrFallbackMissionTask(task *MissionTaskRecord, format string, fallbac
 }
 
 func appendPrintableInput(current string, key tea.KeyMsg) (string, bool) {
-	if key.Type != tea.KeyRunes || key.Alt {
+	if key.Alt {
+		return current, false
+	}
+	if key.Type == tea.KeySpace {
+		return current + " ", true
+	}
+	if key.Type != tea.KeyRunes {
 		return current, false
 	}
 	return current + string(key.Runes), true

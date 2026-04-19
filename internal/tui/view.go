@@ -154,7 +154,7 @@ func renderHeader(m *Model) string {
 		if task.SessionAttentionNeeded {
 			attentionTasks++
 		}
-		if task.SessionID != "" {
+		if task.SessionID != "" || task.SecondarySessionID != "" {
 			if activity := m.sessionActivityByTaskID[task.ID]; activity != nil && activity.IsBusy {
 				busySessions++
 			}
@@ -227,11 +227,14 @@ func renderHeader(m *Model) string {
 	row2Right := []string{}
 	if contextTask != nil {
 		branchLabel := contextTask.BranchName
-		if m.activeTaskID == contextTask.ID && m.activeSessionBranch != "" {
-			branchLabel = m.activeSessionBranch
+		if m.activeTaskID == contextTask.ID && m.terminalBranchForSlot(m.focusedTerminalSlot) != "" {
+			branchLabel = m.terminalBranchForSlot(m.focusedTerminalSlot)
 		}
 		if branchLabel != "" {
 			row2Right = append(row2Right, badge(truncateText(branchLabel, 20), "muted", "⎇", false))
+		}
+		if contextTask.SecondarySessionID != "" {
+			row2Right = append(row2Right, badge("dual", "info", "⇵", false))
 		}
 		row2Right = append(row2Right, renderSessionActivityBadge(m, contextTask, true))
 	}
@@ -550,6 +553,9 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 	if pillar := pillarLabel(m.pillars, task.PillarID); pillar != "" {
 		metaParts = append(metaParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(pillar))
 	}
+	if task.SecondarySessionID != "" {
+		metaParts = append(metaParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Warning)).Render("⇵ dual"))
+	}
 	metaParts = append(metaParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("⎇ "+branchLabel))
 	lines = append(lines, strings.Join(metaParts, " "))
 
@@ -596,10 +602,10 @@ func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 	}
 
 	contentWidth := max(1, width)
-	viewportHeight := terminalViewportHeight(height)
-	footerVisible := height > 2
 
 	if m.activeTaskID == "" {
+		viewportHeight := terminalSlotViewportHeight(height)
+		footerVisible := height > 2
 		lines := []string{
 			joinSpaceBetween(badge("TERMINAL", "accent", "", false), badge("NO SESSION", "muted", "", false), contentWidth),
 		}
@@ -631,24 +637,68 @@ func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 		return fitHeight("", height)
 	}
 
+	if !m.activeTaskUsesDualTerminal() {
+		return fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotPrimary, height, contentWidth), height)
+	}
+
+	primaryHeight, secondaryHeight := splitTerminalSlotHeights(true, height)
+	parts := []string{
+		fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotPrimary, primaryHeight, contentWidth), primaryHeight),
+	}
+	if secondaryHeight > 0 {
+		parts = append(parts, fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotSecondary, secondaryHeight, contentWidth), secondaryHeight))
+	}
+	return fitHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), height)
+}
+
+func renderTerminalSlotPane(m *Model, activeTask TaskRecord, slot SessionSlot, height, contentWidth int) string {
 	activeRepo := m.repoByID(activeTask.RepoID)
+	viewportHeight := terminalSlotViewportHeight(height)
+	footerVisible := height > 2
+	normalizedSlot := normalizeSessionSlot(slot)
+	slotLabel := "MAIN"
+	slotTone := "muted"
+	if normalizedSlot == SessionSlotSecondary {
+		slotLabel = "DEV"
+		slotTone = "warning"
+	}
+	if m.focus == FocusTerminal && normalizedSlot == normalizeSessionSlot(m.focusedTerminalSlot) {
+		slotTone = "accent"
+	}
+
+	activity := m.sessionActivity(activeTask.ID, normalizedSlot)
+	label, tone, spinning, icon := sessionBadgeModel(activeTask, activity, m.focus == FocusTerminal && normalizedSlot == normalizeSessionSlot(m.focusedTerminalSlot))
+	if spinning {
+		icon = spinnerFrames[m.spinnerIndex]
+	}
+
+	headerBadges := []string{
+		badge("TERMINAL", "accent", "", false),
+		badge(slotLabel, slotTone, "", false),
+	}
+	if activeTask.SecondarySessionID != "" {
+		headerBadges = append(headerBadges, badge("DUAL", "info", "", false))
+	}
+	if backend := m.terminalBackendTypeForSlot(normalizedSlot); backend != "" {
+		headerBadges = append(headerBadges, badge(strings.ToUpper(string(backend)), "muted", "", false))
+	}
+
+	rightBadges := []string{
+		badge("REPO "+truncateText(valueOrRepo(activeRepo, activeTask.RepoID), 12), "info", "", false),
+		badge(label, tone, icon, false),
+	}
 
 	lines := []string{
 		joinSpaceBetween(
-			strings.Join([]string{
-				badge("TERMINAL", "accent", "", false),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(activeTask.Title, 32)),
-			}, " "),
-			strings.TrimSpace(strings.Join([]string{
-				badge("REPO "+truncateText(valueOrRepo(activeRepo, activeTask.RepoID), 12), "info", "", false),
-				ternaryString(m.activeSessionBackendType != "", badge(strings.ToUpper(string(m.activeSessionBackendType)), "muted", "", false), ""),
-				renderSessionActivityBadge(m, activeTask, true),
-			}, " ")),
+			strings.Join(append(headerBadges,
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(activeTask.Title, 26)),
+			), " "),
+			strings.Join(rightBadges, " "),
 			contentWidth,
 		),
 	}
 
-	rawPlainViewportLines, rawStyledViewportLines := terminalViewport(m, *activeTask, viewportHeight, contentWidth)
+	rawPlainViewportLines, rawStyledViewportLines := terminalViewport(m, normalizedSlot, viewportHeight, contentWidth)
 	for index := range rawStyledViewportLines {
 		line := rawStyledViewportLines[index]
 		plain := rawPlainViewportLines[index]
@@ -657,7 +707,7 @@ func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 		lines = append(lines, rendered+padding)
 	}
 
-	branchLabel := m.activeSessionBranch
+	branchLabel := m.terminalBranchForSlot(normalizedSlot)
 	if branchLabel == "" {
 		branchLabel = activeTask.BranchName
 	}
@@ -666,13 +716,18 @@ func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 	}
 
 	if footerVisible {
-		historyLabel := fmt.Sprintf("live tail %d", max(0, len(m.buffer.Lines)))
-		if m.terminalScrollOffset > 0 {
-			historyLabel = fmt.Sprintf("history -%d", m.terminalScrollOffset)
+		buffer := m.terminalBufferForSlot(normalizedSlot)
+		historyLabel := fmt.Sprintf("live tail %d", max(0, len(buffer.Lines)))
+		if scrollOffset := m.terminalScrollOffsetForSlot(normalizedSlot); scrollOffset > 0 {
+			historyLabel = fmt.Sprintf("history -%d", scrollOffset)
+		}
+		footerHint := "branch " + truncateText(branchLabel, 18) + "  Tab nav  Esc board"
+		if activeTask.SecondarySessionID != "" {
+			footerHint = "branch " + truncateText(branchLabel, 16) + "  Shift+Tab focus  Tab nav"
 		}
 		lines = append(lines, joinSpaceBetween(
 			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(historyLabel),
-			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("branch "+truncateText(branchLabel, 20)+"  Tab nav  Esc board"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(footerHint),
 			contentWidth,
 		))
 	}
@@ -735,12 +790,12 @@ func renderStatusBar(m *Model) string {
 
 func renderHelpModal() string {
 	sections := [][]string{
-		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
+		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "a or A opens the local AI chat modal", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
 		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers, d deletes the selected mission"},
-		{"Task", "n new task, r rename, Ctrl+D edit description, d delete, a archive", "p assign pillar, P create pillar, D delete pillar and its tasks", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
+		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar, D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
-		{"Terminal", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
+		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
 		{"Setup", "If worktree setup fails because the repo uses master, run:", "agentboard repos set-default-base-branch <repo-id> master"},
 	}
 
@@ -798,7 +853,7 @@ func sessionBadgeModel(task TaskRecord, activity *SessionActivitySnapshot, isAct
 	if isActiveSession {
 		return "live", "accent", false, "●"
 	}
-	if task.SessionID != "" || (activity != nil && activity.SessionStatus == "idle") {
+	if task.SessionID != "" || task.SecondarySessionID != "" || (activity != nil && activity.SessionStatus == "idle") {
 		return "idle", "success", false, "◦"
 	}
 	return "shell", "muted", false, "○"
@@ -1224,11 +1279,12 @@ func renderTaskViewport(line string, width int) string {
 	return padWidth(truncateText(line, width), width)
 }
 
-func terminalViewport(m *Model, activeTask TaskRecord, viewportHeight, contentWidth int) ([]string, []string) {
-	bufferLines := m.buffer.Lines
-	bufferANSILines := m.buffer.ANSILines
+func terminalViewport(m *Model, slot SessionSlot, viewportHeight, contentWidth int) ([]string, []string) {
+	buffer := m.terminalBufferForSlot(slot)
+	bufferLines := buffer.Lines
+	bufferANSILines := buffer.ANSILines
 	maxScrollOffset := max(0, len(bufferLines)-viewportHeight)
-	scrollOffset := min(m.terminalScrollOffset, maxScrollOffset)
+	scrollOffset := min(m.terminalScrollOffsetForSlot(slot), maxScrollOffset)
 	viewportStart := max(0, len(bufferLines)-viewportHeight-scrollOffset)
 	viewportEnd := min(len(bufferLines), viewportStart+viewportHeight)
 	hasStyledLines := len(bufferANSILines) == len(bufferLines)
@@ -1238,8 +1294,8 @@ func terminalViewport(m *Model, activeTask TaskRecord, viewportHeight, contentWi
 
 	for index := viewportStart; index < viewportEnd; index++ {
 		plainLine := bufferLines[index]
-		if !hasStyledLines && index == m.buffer.CursorY {
-			plainLine = injectCursor(plainLine, m.buffer.CursorX)
+		if !hasStyledLines && index == buffer.CursorY {
+			plainLine = injectCursor(plainLine, buffer.CursorX)
 		}
 		rawPlain = append(rawPlain, plainLine)
 		if hasStyledLines {
@@ -1450,11 +1506,11 @@ func headerText(icon, value, color string) string {
 func kbdHints(focus AppFocus) string {
 	switch focus {
 	case FocusBoard:
-		return "move  u missions  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
+		return "move  a/A ai chat  B dual shell  u missions  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
 	case FocusMissions:
-		return "j/k move  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
+		return "j/k move  a/A ai chat  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
 	case FocusTerminal:
-		return "Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
+		return "Shift+Tab pane  Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
 	case FocusModal:
 		return "Enter confirm  Esc cancel"
 	case FocusFilterBar, FocusSearch:

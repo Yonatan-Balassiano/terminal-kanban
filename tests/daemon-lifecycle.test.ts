@@ -2,8 +2,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
-import { afterEach, describe, expect, it } from 'vitest';
-import { stopDaemon } from '../src/daemon/index.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { stopDaemon, warmOllamaOnStartup } from '../src/daemon/index.js';
 
 const children: ChildProcess[] = [];
 const tempDirs: string[] = [];
@@ -85,5 +85,33 @@ describe('stopDaemon', () => {
     ).resolves.toBe(true);
 
     expect(isProcessAlive(child.pid!)).toBe(false);
+  });
+});
+
+describe('warmOllamaOnStartup', () => {
+  it('starts the Ollama model warmup without awaiting it', () => {
+    let resolveWarmup: (() => void) | null = null;
+    const ensureModelReady = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWarmup = resolve;
+        }),
+    );
+
+    warmOllamaOnStartup({ ensureModelReady }, path.join(os.tmpdir(), 'agentboard-warmup.log'));
+
+    expect(ensureModelReady).toHaveBeenCalledTimes(1);
+    resolveWarmup?.();
+  });
+
+  it('logs warmup failures instead of throwing during startup', async () => {
+    const stateDir = makeStateDir();
+    const logFile = path.join(stateDir, 'agentboard.log');
+    const ensureModelReady = vi.fn().mockRejectedValue(new Error('model missing'));
+
+    warmOllamaOnStartup({ ensureModelReady }, logFile);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fs.readFileSync(logFile, 'utf8')).toContain('Ollama model warmup failed: model missing');
   });
 });

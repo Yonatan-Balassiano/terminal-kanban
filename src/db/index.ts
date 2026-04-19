@@ -14,7 +14,7 @@ const BetterSqlite3 = require('better-sqlite3') as {
 };
 
 const SCHEMA_VERSION_KEY = 'schema_version';
-export const CURRENT_SCHEMA_VERSION = '2026-04-16-node24';
+export const CURRENT_SCHEMA_VERSION = '2026-04-19-dual-session';
 
 // --------------- ID generator --------------------------------
 

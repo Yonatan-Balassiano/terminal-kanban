@@ -10,6 +10,7 @@ export type CIState = 'none' | 'pending' | 'failed' | 'passed';
 export type ReviewState = 'none' | 'approved' | 'changes_requested' | 'commented';
 export type GitHubSyncStatus = 'idle' | 'syncing' | 'ok' | 'error';
 export type SessionStatus = 'active' | 'idle' | 'orphaned' | 'terminated';
+export type SessionSlot = 'primary' | 'secondary';
 export type SessionBackendType = 'tmux' | 'pty';
 export type RepoHealth = 'ok' | 'missing' | 'not-git';
 export type ThemeMode = 'truecolor' | '256color' | 'monochrome';
@@ -20,6 +21,7 @@ export type TerminalLayoutMode = 'side-by-side' | 'top-bottom';
 export type SessionActivityKind = 'agent' | 'process';
 export type AgentCLI = 'claude' | 'codex';
 export type MissionTaskStatus = 'backlog' | 'in-progress' | 'pr' | 'merged';
+export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export type EventType =
   | 'task.created'
@@ -36,7 +38,9 @@ export type EventType =
   | 'sync.failed'
   | 'recovery.marker'
   | 'repo.added'
-  | 'repo.removed';
+  | 'repo.removed'
+  | 'ai.turn.completed'
+  | 'ai.tool.executed';
 
 // --------------- DB Records ---------------------------------
 
@@ -90,6 +94,7 @@ export interface TaskRecord {
   branchName?: string;
   worktreePath?: string;
   sessionId?: string;
+  secondarySessionId?: string;
   lastSessionCwd?: string;
   /** Floating-point key for manual card ordering within a track */
   sortKey: number;
@@ -159,6 +164,7 @@ export interface MissionSnapshot extends MissionRecord {
 export interface SessionRecord {
   id: string;
   taskId: string;
+  slot: SessionSlot;
   backendType: SessionBackendType;
   /** Backend-specific session identifier (e.g. tmux session name) */
   backendSessionId?: string;
@@ -246,6 +252,7 @@ export interface SessionBackend {
 export interface CreateSessionOpts {
   taskId: string;
   taskTitle: string;
+  slot: SessionSlot;
   repoPath: string;
   branch: string;
   agentCli: AgentCLI;
@@ -272,6 +279,7 @@ export interface BackendSessionInfo {
 export interface SessionActivitySnapshot {
   taskId: string;
   sessionId?: string;
+  slot?: SessionSlot;
   sessionStatus: SessionStatus;
   isBusy: boolean;
   kind?: SessionActivityKind;
@@ -341,8 +349,10 @@ export type RPCMethod =
   | 'deleteSavedView'
   | 'openSession'
   | 'recreateSession'
+  | 'setDualSessionMode'
   | 'acknowledgeSessionAttention'
   | 'sendInput'
+  | 'watchSessionUpdates'
   | 'resizeSession'
   | 'getBuffer'
   | 'inspectSession'
@@ -352,6 +362,8 @@ export type RPCMethod =
   | 'schedulePostPushSync'
   | 'mergeTaskPR'
   | 'triggerSync'
+  | 'chatTurn'
+  | 'shutdownManagedOllama'
   | 'daemonStatus'
   | 'doctor'
   | 'subscribe';
@@ -365,6 +377,10 @@ export interface GetBoardParams {
 export type GetBoardResult = BoardSnapshot;
 
 export type SetUIStateParams = Partial<UIStateRecord>;
+
+export interface WatchSessionUpdatesParams {
+  taskId?: string;
+}
 
 export interface CreateMissionParams {
   title: string;
@@ -490,8 +506,14 @@ export interface DeleteSavedViewParams {
 
 export interface OpenSessionParams {
   taskId: string;
+  slot?: SessionSlot;
 }
 export type OpenSessionResult = SessionRecord;
+
+export interface SetDualSessionModeParams {
+  taskId: string;
+  enabled: boolean;
+}
 
 export interface AcknowledgeSessionAttentionParams {
   taskId: string;
@@ -500,20 +522,24 @@ export interface AcknowledgeSessionAttentionParams {
 export interface SendInputParams {
   taskId: string;
   data: string;
+  slot?: SessionSlot;
 }
 
 export interface ResizeSessionParams {
   taskId: string;
   cols: number;
   rows: number;
+  slot?: SessionSlot;
 }
 
 export interface GetBufferParams {
   taskId: string;
+  slot?: SessionSlot;
 }
 
 export interface InspectSessionParams {
   taskId: string;
+  slot?: SessionSlot;
 }
 
 export interface PrepareTaskWorkspaceParams {
@@ -542,6 +568,44 @@ export interface SchedulePostPushSyncParams {
 
 export interface MergeTaskPRParams {
   taskId: string;
+}
+
+export interface ChatMessage {
+  role: ChatMessageRole;
+  content: string;
+  createdAt: number;
+  toolName?: string;
+}
+
+export interface ChatContext {
+  activeRepoId?: string;
+  selectedTaskId?: string;
+  selectedMissionId?: string;
+  selectedMissionTaskId?: string;
+  activeTaskId?: string;
+  filters?: FilterModel;
+}
+
+export interface ChatTurnParams {
+  prompt: string;
+  transcript?: ChatMessage[];
+  context?: ChatContext;
+}
+
+export interface ChatToolExecution {
+  toolName: string;
+  args: Record<string, unknown>;
+  status: 'started' | 'completed' | 'failed';
+  startedAt: number;
+  finishedAt?: number;
+  summary?: string;
+  error?: string;
+}
+
+export interface ChatTurnResult {
+  assistantMessage: ChatMessage;
+  transcript: ChatMessage[];
+  executions: ChatToolExecution[];
 }
 
 export interface TaskSyncPatch {
@@ -642,11 +706,23 @@ export interface SavedViewConfig {
   filters: FilterModel;
 }
 
+export interface AIChatConfig {
+  enabled: boolean;
+  provider: 'ollama';
+  baseUrl: string;
+  model: string;
+  requestTimeoutMs: number;
+  maxToolRounds: number;
+  historyLimit: number;
+  systemPrompt?: string;
+}
+
 export interface AppConfig {
   sessionBackend: SessionBackendType;
   sessionBootstrapScript: string;
   pollIntervalMs: number;
   githubTokenEnvVar?: string;
+  aiChat: AIChatConfig;
   tracks: TrackConfig[];
   pillars: PillarConfig[];
   repos: RepoConfig[];

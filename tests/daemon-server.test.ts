@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { dispatch, serverEvents } from '../src/daemon/server.js';
+import { dispatch, serverEvents, shouldForwardEventToSubscriber } from '../src/daemon/server.js';
 import type { RepoRecord, TaskRecord } from '../src/types/index.js';
 
 function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
@@ -46,6 +46,52 @@ function makeRepo(patch: Partial<RepoRecord> = {}): RepoRecord {
 
 afterEach(() => {
   serverEvents.removeAllListeners();
+});
+
+describe('daemon session_update subscriptions', () => {
+  it('only forwards session updates for the watched task', () => {
+    expect(
+      shouldForwardEventToSubscriber(
+        {
+          type: 'session_update',
+          payload: {
+            taskId: 'task-1',
+            lines: ['hidden'],
+            ansiLines: ['hidden'],
+            cursorX: 0,
+            cursorY: 0,
+          },
+        },
+        'task-2',
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldForwardEventToSubscriber(
+        {
+          type: 'session_update',
+          payload: {
+            taskId: 'task-2',
+            lines: ['visible'],
+            ansiLines: ['visible'],
+            cursorX: 0,
+            cursorY: 0,
+          },
+        },
+        'task-2',
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldForwardEventToSubscriber(
+        {
+          type: 'board_patch',
+          payload: { tasks: [] },
+        },
+        null,
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('daemon createTask dispatch', () => {
@@ -271,6 +317,65 @@ describe('daemon mergeTaskPR dispatch', () => {
   });
 });
 
+describe('daemon chatTurn dispatch', () => {
+  it('returns the AI chat result and emits a board patch asynchronously', async () => {
+    vi.useFakeTimers();
+    try {
+      const result = {
+        assistantMessage: {
+          role: 'assistant',
+          content: 'Created task.',
+          createdAt: 1,
+        },
+        transcript: [],
+        executions: [],
+      };
+      const chatTurn = vi.fn().mockResolvedValue(result);
+      const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+
+      const boardPatchEvent = new Promise<unknown>((resolve) => {
+        serverEvents.once('event', resolve);
+      });
+
+      const response = await dispatch(
+        {
+          id: 'req-chat',
+          method: 'chatTurn',
+          params: {
+            prompt: 'create a task',
+            transcript: [],
+            context: { activeRepoId: 'repo-1' },
+          },
+        },
+        {
+          aiChat: { chatTurn },
+          view: { getBoardSnapshot },
+        } as never,
+        '/tmp/agentboard.sock',
+      );
+
+      expect(chatTurn).toHaveBeenCalledWith({
+        prompt: 'create a task',
+        transcript: [],
+        context: { activeRepoId: 'repo-1' },
+      });
+      expect(response).toEqual({
+        id: 'req-chat',
+        result,
+      });
+
+      await vi.runAllTimersAsync();
+
+      await expect(boardPatchEvent).resolves.toEqual({
+        type: 'board_patch',
+        payload: { tasks: [] },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('daemon schedulePostPushSync dispatch', () => {
   it('arms the background post-push follow-up without blocking on it', async () => {
     const schedulePostPushSync = vi.fn().mockReturnValue({ scheduled: true });
@@ -291,6 +396,29 @@ describe('daemon schedulePostPushSync dispatch', () => {
     expect(response).toEqual({
       id: 'req-2',
       result: { scheduled: true },
+    });
+  });
+});
+
+describe('daemon shutdownManagedOllama dispatch', () => {
+  it('stops the managed Ollama process when requested', async () => {
+    const shutdown = vi.fn().mockResolvedValue({ stopped: true, managed: true });
+
+    const response = await dispatch(
+      {
+        id: 'req-ollama-stop',
+        method: 'shutdownManagedOllama',
+      },
+      {
+        ollama: { shutdown },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(response).toEqual({
+      id: 'req-ollama-stop',
+      result: { stopped: true, managed: true },
     });
   });
 });

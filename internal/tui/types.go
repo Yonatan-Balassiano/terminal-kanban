@@ -5,6 +5,7 @@ type CIState string
 type ReviewState string
 type GitHubSyncStatus string
 type SessionStatus string
+type SessionSlot string
 type SessionBackendType string
 type RepoHealth string
 type ThemeMode string
@@ -18,6 +19,11 @@ type MissionTaskStatus string
 
 type AppFocus string
 type ModalType string
+
+const (
+	SessionSlotPrimary   SessionSlot = "primary"
+	SessionSlotSecondary SessionSlot = "secondary"
+)
 
 const (
 	FocusBoard     AppFocus = "board"
@@ -38,13 +44,13 @@ const (
 	ModalRenameTask      ModalType = "rename-task"
 	ModalTaskDescription ModalType = "task-description"
 	ModalPRComment       ModalType = "pr-comment"
-	ModalArchiveConfirm  ModalType = "archive-confirm"
 	ModalDeleteConfirm   ModalType = "delete-confirm"
 	ModalFilterPicker    ModalType = "filter-picker"
 	ModalCreatePillar    ModalType = "create-pillar"
 	ModalDeletePillar    ModalType = "delete-pillar-confirm"
 	ModalPillarPicker    ModalType = "pillar-picker"
 	ModalViewPicker      ModalType = "view-picker"
+	ModalAIChat          ModalType = "ai-chat"
 	ModalHelp            ModalType = "help"
 	ModalNone            ModalType = ""
 )
@@ -98,6 +104,7 @@ type TaskRecord struct {
 	BranchName                string           `json:"branchName"`
 	WorktreePath              string           `json:"worktreePath"`
 	SessionID                 string           `json:"sessionId"`
+	SecondarySessionID        string           `json:"secondarySessionId"`
 	LastSessionCWD            string           `json:"lastSessionCwd"`
 	SortKey                   float64          `json:"sortKey"`
 	PRNumber                  *int             `json:"prNumber"`
@@ -172,6 +179,7 @@ type MissionSnapshot struct {
 type SessionRecord struct {
 	ID               string             `json:"id"`
 	TaskID           string             `json:"taskId"`
+	Slot             SessionSlot        `json:"slot"`
 	BackendType      SessionBackendType `json:"backendType"`
 	BackendSessionID string             `json:"backendSessionId"`
 	AttachCommand    string             `json:"attachCommand"`
@@ -232,6 +240,7 @@ type BoardSnapshot struct {
 type SessionActivitySnapshot struct {
 	TaskID        string              `json:"taskId"`
 	SessionID     string              `json:"sessionId"`
+	Slot          SessionSlot         `json:"slot"`
 	SessionStatus SessionStatus       `json:"sessionStatus"`
 	IsBusy        bool                `json:"isBusy"`
 	Kind          SessionActivityKind `json:"kind"`
@@ -257,12 +266,45 @@ type TaskWorkspaceResult struct {
 	Path string `json:"path"`
 }
 
+type ChatMessage struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	CreatedAt int64  `json:"createdAt"`
+	ToolName  string `json:"toolName"`
+}
+
+type ChatToolExecution struct {
+	ToolName   string                 `json:"toolName"`
+	Args       map[string]interface{} `json:"args"`
+	Status     string                 `json:"status"`
+	StartedAt  int64                  `json:"startedAt"`
+	FinishedAt *int64                 `json:"finishedAt"`
+	Summary    string                 `json:"summary"`
+	Error      string                 `json:"error"`
+}
+
+type ChatContext struct {
+	ActiveRepoID          string       `json:"activeRepoId"`
+	SelectedTaskID        string       `json:"selectedTaskId"`
+	SelectedMissionID     string       `json:"selectedMissionId"`
+	SelectedMissionTaskID string       `json:"selectedMissionTaskId"`
+	ActiveTaskID          string       `json:"activeTaskId"`
+	Filters               *FilterModel `json:"filters"`
+}
+
+type ChatTurnResult struct {
+	AssistantMessage ChatMessage         `json:"assistantMessage"`
+	Transcript       []ChatMessage       `json:"transcript"`
+	Executions       []ChatToolExecution `json:"executions"`
+}
+
 type SessionUpdateEvent struct {
-	TaskID    string   `json:"taskId"`
-	Lines     []string `json:"lines"`
-	ANSILines []string `json:"ansiLines"`
-	CursorX   int      `json:"cursorX"`
-	CursorY   int      `json:"cursorY"`
+	TaskID    string      `json:"taskId"`
+	Slot      SessionSlot `json:"slot"`
+	Lines     []string    `json:"lines"`
+	ANSILines []string    `json:"ansiLines"`
+	CursorX   int         `json:"cursorX"`
+	CursorY   int         `json:"cursorY"`
 }
 
 type SyncStatusPayload struct {

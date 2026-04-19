@@ -226,4 +226,26 @@ export class GitService {
     );
     return parseGitWorkspaceStatus(output);
   }
+
+  async fetch(repoPath: string, remote = 'origin'): Promise<void> {
+    await this.execFileAsync('git', ['-C', repoPath, 'fetch', remote], repoPath);
+  }
+
+  async rebaseOnto(repoPath: string, upstream: string): Promise<void> {
+    await this.execFileAsync('git', ['-C', repoPath, 'rebase', upstream], repoPath);
+  }
+
+  async pushCurrentBranch(
+    repoPath: string,
+    branch: string,
+    remote = 'origin',
+    setUpstream = true,
+  ): Promise<void> {
+    const args = ['-C', repoPath, 'push'];
+    if (setUpstream) {
+      args.push('--set-upstream');
+    }
+    args.push(remote, branch);
+    await this.execFileAsync('git', args, repoPath);
+  }
 }

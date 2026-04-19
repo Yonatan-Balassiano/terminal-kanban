@@ -40,11 +40,14 @@ type boardActionMsg struct {
 	selectMissionID     string
 	selectMissionTaskID string
 	openMissionsPane    bool
+	activateTaskID      string
+	focusTerminalSlot   SessionSlot
 	err                 error
 }
 
 type sessionOpenedMsg struct {
 	taskID   string
+	slot     SessionSlot
 	session  SessionRecord
 	board    *BoardSnapshot
 	buffer   *GetBufferResult
@@ -54,12 +57,14 @@ type sessionOpenedMsg struct {
 
 type bufferLoadedMsg struct {
 	taskID string
+	slot   SessionSlot
 	buffer GetBufferResult
 	err    error
 }
 
 type sessionActivityMsg struct {
 	taskID   string
+	slot     SessionSlot
 	activity *SessionActivitySnapshot
 	err      error
 }
@@ -70,6 +75,11 @@ type rpcEventMsg struct {
 
 type asyncErrorMsg struct {
 	err error
+}
+
+type chatTurnMsg struct {
+	result ChatTurnResult
+	err    error
 }
 
 type spinnerTickMsg struct{}
@@ -93,6 +103,11 @@ type missionSelectionRef struct {
 	TaskIndex    int
 }
 
+type sessionTarget struct {
+	TaskID string
+	Slot   SessionSlot
+}
+
 const (
 	missionSummaryRowTaskIndex = -1
 	missionEmptyRowTaskIndex   = -2
@@ -112,40 +127,50 @@ type Model struct {
 	missions   []MissionSnapshot
 	savedViews []SavedViewRecord
 
-	focus                      AppFocus
-	modal                      ModalType
-	activeRepoID               string
-	activeViewID               string
-	filters                    FilterModel
-	selectedTrackIndex         int
-	selectedTaskIndex          int
-	selectedMissionIndex       int
-	selectedMissionTaskIndex   int
-	terminalPaneVisible        bool
-	terminalLayoutMode         TerminalLayoutMode
-	missionsPaneExpanded       bool
-	activeTaskID               string
-	activeSessionBranch        string
-	activeSessionBackendType   SessionBackendType
-	sessionActivityByTaskID    map[string]*SessionActivitySnapshot
-	terminalFullscreen         bool
-	terminalScrollOffset       int
-	syncInProgress             bool
-	statusMessage              string
-	daemonConnected            bool
-	themeMode                  ThemeMode
-	buffer                     GetBufferResult
-	spinnerIndex               int
-	terminalCommand            string
-	pendingTerminalInput       string
-	pendingTerminalInputTaskID string
-	pendingTerminalPushSync    bool
-	terminalInputFlushVersion  int
-	postPushSyncVersion        int
-	terminalBoardNavPending    bool
-	terminalBoardNavTaskID     string
-	terminalBoardNavConsumed   bool
-	terminalBoardNavVersion    int
+	focus                         AppFocus
+	modal                         ModalType
+	activeRepoID                  string
+	activeViewID                  string
+	filters                       FilterModel
+	selectedTrackIndex            int
+	selectedTaskIndex             int
+	selectedMissionIndex          int
+	selectedMissionTaskIndex      int
+	terminalPaneVisible           bool
+	terminalLayoutMode            TerminalLayoutMode
+	missionsPaneExpanded          bool
+	activeTaskID                  string
+	activeSessionBranch           string
+	activeSessionBackendType      SessionBackendType
+	secondarySessionBranch        string
+	secondarySessionBackendType   SessionBackendType
+	sessionActivityByTaskID       map[string]*SessionActivitySnapshot
+	sessionActivityByKey          map[string]*SessionActivitySnapshot
+	terminalFullscreen            bool
+	terminalScrollOffset          int
+	secondaryTerminalScrollOffset int
+	syncInProgress                bool
+	statusMessage                 string
+	daemonConnected               bool
+	themeMode                     ThemeMode
+	buffer                        GetBufferResult
+	secondaryBuffer               GetBufferResult
+	spinnerIndex                  int
+	terminalCommand               string
+	secondaryTerminalCommand      string
+	pendingTerminalInput          string
+	pendingTerminalInputTaskID    string
+	pendingTerminalInputSlot      SessionSlot
+	pendingTerminalPushSync       bool
+	focusedTerminalSlot           SessionSlot
+	watchedSessionTaskID          string
+	terminalInputFlushVersion     int
+	postPushSyncVersion           int
+	terminalBoardNavPending       bool
+	terminalBoardNavTaskID        string
+	terminalBoardNavSlot          SessionSlot
+	terminalBoardNavConsumed      bool
+	terminalBoardNavVersion       int
 
 	createTaskModal           *createTaskModalState
 	createMissionModal        *createMissionModalState
@@ -153,7 +178,6 @@ type Model struct {
 	renameTaskModal           *renameTaskModalState
 	taskDescriptionModal      *taskDescriptionModalState
 	prCommentModal            *prCommentModalState
-	archiveConfirmModal       *archiveConfirmModalState
 	deleteMissionConfirmModal *deleteMissionConfirmModalState
 	deleteConfirmModal        *deleteConfirmModalState
 	createPillarModal         *createPillarModalState
@@ -162,6 +186,7 @@ type Model struct {
 	filterModal               *filterModalState
 	viewModal                 *viewModalState
 	commandPaletteModal       *commandPaletteModalState
+	aiChatModal               *aiChatModalState
 	missionDependenciesModal  *missionDependenciesModalState
 }
 
@@ -178,6 +203,9 @@ func NewModel(socketPath string) (*Model, error) {
 		terminalLayoutMode:       TerminalLayoutMode("side-by-side"),
 		selectedMissionTaskIndex: -1,
 		sessionActivityByTaskID:  map[string]*SessionActivitySnapshot{},
+		sessionActivityByKey:     map[string]*SessionActivitySnapshot{},
+		focusedTerminalSlot:      SessionSlotPrimary,
+		pendingTerminalInputSlot: SessionSlotPrimary,
 		themeMode:                ThemeMode("truecolor"),
 	}
 	return model, nil
@@ -197,6 +225,7 @@ func (m *Model) Close() error {
 	if m.client == nil {
 		return nil
 	}
+	_ = m.client.Call("shutdownManagedOllama", nil, nil)
 	return m.client.Close()
 }
 
@@ -206,7 +235,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		if m.activeTaskID != "" && m.terminalPaneShouldRender() {
-			return m, tea.Batch(m.resizeActiveSessionCmd(), m.loadBufferCmd(m.activeTaskID))
+			return m, tea.Batch(m.resizeActiveSessionCmd(), m.loadVisibleTerminalStateCmd())
 		}
 		return m, nil
 
@@ -237,14 +266,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.flushPendingTerminalBoardNavCmd()
 
 	case sessionPollTickMsg:
-		taskIDs := m.sessionTaskIDs()
-		if len(taskIDs) == 0 || m.focus == FocusTerminal {
+		targets := m.sessionTargets()
+		if len(targets) == 0 || m.focus == FocusTerminal {
 			return m, sessionPollTickCmd()
 		}
 
 		commands := []tea.Cmd{sessionPollTickCmd()}
-		for _, taskID := range taskIDs {
-			commands = append(commands, m.inspectSessionCmd(taskID))
+		for _, target := range targets {
+			commands = append(commands, m.inspectSessionCmd(target.TaskID, target.Slot))
 		}
 		return m, tea.Batch(commands...)
 
@@ -255,7 +284,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applyBoard(msg.board)
-		return m, nil
+		return m, m.syncSessionUpdateWatchCmd()
 
 	case boardActionMsg:
 		if msg.err != nil {
@@ -275,10 +304,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.status != "" {
 			m.statusMessage = msg.status
 		}
-		if m.activeTaskID != "" && m.terminalPaneShouldRender() {
-			return m, tea.Batch(m.loadBufferCmd(m.activeTaskID), m.inspectSessionCmd(m.activeTaskID))
+		if msg.activateTaskID != "" {
+			m.activeTaskID = msg.activateTaskID
+			m.terminalPaneVisible = true
+			m.focusedTerminalSlot = normalizeSessionSlot(msg.focusTerminalSlot)
+			m.normalizeFocusedTerminalSlot()
 		}
-		return m, nil
+		commands := []tea.Cmd{m.syncSessionUpdateWatchCmd()}
+		if m.activeTaskID != "" && m.terminalPaneShouldRender() {
+			commands = append(commands, m.loadVisibleTerminalStateCmd())
+		}
+		return m, tea.Batch(commands...)
 
 	case sessionOpenedMsg:
 		if msg.err != nil {
@@ -290,24 +326,28 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.applyBoard(*msg.board)
 		}
 		m.activeTaskID = msg.taskID
-		m.activeSessionBranch = msg.session.Branch
-		m.activeSessionBackendType = msg.session.BackendType
+		m.focusedTerminalSlot = normalizeSessionSlot(msg.slot)
+		m.setTerminalSessionMetadata(msg.slot, msg.session.Branch, msg.session.BackendType)
 		m.terminalPaneVisible = true
 		m.terminalFullscreen = false
-		m.terminalScrollOffset = 0
+		m.setTerminalScrollOffset(msg.slot, 0)
 		m.focus = FocusTerminal
 		if msg.buffer != nil {
-			m.buffer = *msg.buffer
+			m.setTerminalBuffer(msg.slot, *msg.buffer)
 		}
 		if msg.activity != nil {
-			m.sessionActivityByTaskID[msg.taskID] = msg.activity
+			m.setSessionActivity(msg.taskID, msg.slot, msg.activity)
 		}
 		m.statusMessage = "Opened task shell."
-		return m, tea.Batch(m.resizeActiveSessionCmd(), m.inspectSessionCmd(msg.taskID))
+		return m, tea.Batch(
+			m.syncSessionUpdateWatchCmd(),
+			m.resizeActiveSessionCmd(),
+			m.loadVisibleTerminalStateCmd(),
+		)
 
 	case bufferLoadedMsg:
 		if msg.err == nil && msg.taskID == m.activeTaskID {
-			m.buffer = msg.buffer
+			m.setTerminalBuffer(msg.slot, msg.buffer)
 		}
 		return m, nil
 
@@ -316,16 +356,38 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.activity == nil {
-			delete(m.sessionActivityByTaskID, msg.taskID)
+			m.setSessionActivity(msg.taskID, msg.slot, nil)
 			return m, nil
 		}
-		m.sessionActivityByTaskID[msg.taskID] = msg.activity
+		m.setSessionActivity(msg.taskID, msg.slot, msg.activity)
 		return m, nil
 
 	case asyncErrorMsg:
 		if msg.err != nil {
 			m.statusMessage = msg.err.Error()
 		}
+		return m, nil
+
+	case chatTurnMsg:
+		if m.aiChatModal == nil {
+			return m, nil
+		}
+		m.aiChatModal.Pending = false
+		if msg.err != nil {
+			m.aiChatModal.Input = m.aiChatModal.PendingPrompt
+			m.aiChatModal.PendingPrompt = ""
+			m.statusMessage = msg.err.Error()
+			return m, nil
+		}
+		m.aiChatModal.PendingPrompt = ""
+		m.aiChatModal.Transcript = append([]ChatMessage{}, msg.result.Transcript...)
+		m.aiChatModal.Executions = append([]ChatToolExecution{}, msg.result.Executions...)
+		if shouldAutoCloseAIChatModal(msg.result.Executions) {
+			m.statusMessage = "AI changes applied."
+			m.closeModal()
+			return m, nil
+		}
+		m.statusMessage = "AI chat completed."
 		return m, nil
 
 	case rpcEventMsg:
@@ -342,6 +404,36 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func shouldAutoCloseAIChatModal(executions []ChatToolExecution) bool {
+	if len(executions) == 0 {
+		return false
+	}
+
+	for _, execution := range executions {
+		if execution.Status == "failed" {
+			return false
+		}
+		if execution.Status == "completed" && isBoardCRUDTool(execution.ToolName) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBoardCRUDTool(toolName string) bool {
+	switch toolName {
+	case "create_task",
+		"create_mission",
+		"add_mission_task",
+		"move_task",
+		"assign_pillar",
+		"update_task_description":
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) handleRPCEvent(event RPCEvent) tea.Cmd {
 	switch event.Type {
 	case "board_patch":
@@ -355,9 +447,14 @@ func (m *Model) handleRPCEvent(event RPCEvent) tea.Cmd {
 		if err := json.Unmarshal(event.Payload, &update); err != nil {
 			return func() tea.Msg { return asyncErrorMsg{err: err} }
 		}
+		if update.TaskID == "" || update.TaskID != m.activeTaskID || !m.terminalPaneShouldRender() {
+			return nil
+		}
+		slot := normalizeSessionSlot(update.Slot)
 		return func() tea.Msg {
 			return bufferLoadedMsg{
 				taskID: update.TaskID,
+				slot:   slot,
 				buffer: GetBufferResult{
 					Lines:     update.Lines,
 					ANSILines: defaultANSILines(update.Lines, update.ANSILines),
@@ -418,12 +515,12 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "enter":
 		task := m.selectedTask()
 		if task != nil {
-			return m.openSessionCmd(task.ID, false)
+			return m.openSessionCmd(task.ID, false, SessionSlotPrimary)
 		}
 	case "R":
 		task := m.selectedTask()
 		if task != nil {
-			return m.openSessionCmd(task.ID, true)
+			return m.openSessionCmd(task.ID, true, SessionSlotPrimary)
 		}
 	case "s":
 		return m.syncCmd()
@@ -473,8 +570,14 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		} else {
 			m.statusMessage = "Select a task to delete its pillar."
 		}
-	case "a":
-		m.openArchiveConfirmModal(m.selectedTask())
+	case "B":
+		task := m.selectedTask()
+		if task != nil {
+			return m.toggleDualSessionCmd(task)
+		}
+	case "a", "A":
+		m.openAIChatModal()
+		return nil
 	case "d":
 		m.openDeleteConfirmModal(m.selectedTask())
 	case "c":
@@ -573,6 +676,9 @@ func (m *Model) handleMissionKey(key tea.KeyMsg) tea.Cmd {
 	case "d":
 		m.openDeleteMissionConfirmModal(m.selectedMission())
 		return nil
+	case "a", "A":
+		m.openAIChatModal()
+		return nil
 	case ":":
 		m.openCommandPaletteModal()
 		return nil
@@ -593,29 +699,43 @@ func (m *Model) handleTerminalKey(key tea.KeyMsg) tea.Cmd {
 }
 
 func (m *Model) handleDirectTerminalKey(key tea.KeyMsg) tea.Cmd {
+	if key.String() == "shift+tab" {
+		if !m.activeTaskUsesDualTerminal() {
+			return nil
+		}
+		m.focusedTerminalSlot = m.alternateTerminalSlot(m.focusedTerminalSlot)
+		return m.resizeActiveSessionCmd()
+	}
+
 	switch key.Type {
 	case tea.KeyTab:
 		if m.activeTaskID == "" {
 			return nil
 		}
-		return m.armTerminalBoardNav(m.activeTaskID, false)
+		return m.armTerminalBoardNav(m.activeTaskID, m.focusedTerminalSlot, false)
 	case tea.KeyEsc:
 		flushCmd := m.flushPendingTerminalInputCmd()
-		m.terminalCommand = ""
+		m.setTerminalCommand(m.focusedTerminalSlot, "")
 		m.focus = FocusBoard
 		m.terminalFullscreen = false
 		return flushCmd
 	case tea.KeyPgUp:
-		m.terminalScrollOffset += 10
+		m.setTerminalScrollOffset(m.focusedTerminalSlot, m.terminalScrollOffsetForSlot(m.focusedTerminalSlot)+10)
 		return nil
 	case tea.KeyPgDown:
-		m.terminalScrollOffset = max(0, m.terminalScrollOffset-10)
+		m.setTerminalScrollOffset(
+			m.focusedTerminalSlot,
+			max(0, m.terminalScrollOffsetForSlot(m.focusedTerminalSlot)-10),
+		)
 		return nil
 	case tea.KeyShiftUp:
-		m.terminalScrollOffset += 1
+		m.setTerminalScrollOffset(m.focusedTerminalSlot, m.terminalScrollOffsetForSlot(m.focusedTerminalSlot)+1)
 		return nil
 	case tea.KeyShiftDown:
-		m.terminalScrollOffset = max(0, m.terminalScrollOffset-1)
+		m.setTerminalScrollOffset(
+			m.focusedTerminalSlot,
+			max(0, m.terminalScrollOffsetForSlot(m.focusedTerminalSlot)-1),
+		)
 		return nil
 	}
 
@@ -628,15 +748,17 @@ func (m *Model) handleDirectTerminalKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	commandBeforeSubmit := m.terminalCommand
-	m.terminalCommand = appendTerminalCommand(m.terminalCommand, key)
+	slot := m.focusedTerminalSlot
+	commandBeforeSubmit := m.terminalCommandForSlot(slot)
+	m.setTerminalCommand(slot, appendTerminalCommand(commandBeforeSubmit, key))
 
-	if m.terminalScrollOffset != 0 {
-		m.terminalScrollOffset = 0
+	if m.terminalScrollOffsetForSlot(slot) != 0 {
+		m.setTerminalScrollOffset(slot, 0)
 	}
 
 	return m.queueTerminalInputCmd(
 		m.activeTaskID,
+		slot,
 		data,
 		key,
 		shouldTriggerTerminalPushSync(commandBeforeSubmit, key),
@@ -700,21 +822,33 @@ func (m *Model) selectTaskByID(taskID string) bool {
 	return false
 }
 
-func (m *Model) previewTaskShell(task *TaskRecord) tea.Cmd {
-	if task == nil || task.ID == "" || task.SessionID == "" || task.ID == m.activeTaskID {
+func (m *Model) previewTaskShell(task *TaskRecord, preferredSlot SessionSlot) tea.Cmd {
+	if task == nil || task.ID == "" || task.SessionID == "" {
+		return nil
+	}
+
+	slot := m.resolveTerminalSlotForTask(task, preferredSlot)
+	if task.ID == m.activeTaskID {
+		m.focusedTerminalSlot = slot
+		m.normalizeFocusedTerminalSlot()
 		return nil
 	}
 
 	m.activeTaskID = task.ID
+	m.focusedTerminalSlot = slot
 	m.activeSessionBranch = task.BranchName
 	m.activeSessionBackendType = ""
+	m.secondarySessionBranch = task.BranchName
+	m.secondarySessionBackendType = ""
 	m.terminalPaneVisible = true
 	m.terminalScrollOffset = 0
+	m.secondaryTerminalScrollOffset = 0
 	m.buffer = GetBufferResult{}
+	m.secondaryBuffer = GetBufferResult{}
 
 	return tea.Batch(
-		m.loadBufferCmd(task.ID),
-		m.inspectSessionCmd(task.ID),
+		m.syncSessionUpdateWatchCmd(),
+		m.loadVisibleTerminalStateCmd(),
 	)
 }
 
@@ -722,14 +856,18 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 	if key.Type == tea.KeyEsc {
 		m.clearTerminalBoardNav()
 		flushCmd := m.flushPendingTerminalInputCmd()
-		m.terminalCommand = ""
+		m.setTerminalCommand(m.focusedTerminalSlot, "")
 		m.focus = FocusBoard
 		m.terminalFullscreen = false
 		return flushCmd
 	}
 
 	if key.Type == tea.KeyTab {
-		return m.armTerminalBoardNav(m.terminalBoardNavTaskID, m.terminalBoardNavConsumed)
+		return m.armTerminalBoardNav(
+			m.terminalBoardNavTaskID,
+			m.terminalBoardNavSlot,
+			m.terminalBoardNavConsumed,
+		)
 	}
 
 	if action := boardNavigationActionForKey(key); action != boardNavigationNone {
@@ -737,19 +875,26 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 
 		task := m.selectedTask()
 		nextTaskID := m.terminalBoardNavTaskID
+		nextSlot := m.terminalBoardNavSlot
 		if task != nil {
 			nextTaskID = task.ID
+			nextSlot = m.resolveTerminalSlotForTask(task, m.terminalBoardNavSlot)
 		}
-		rearmCmd := m.armTerminalBoardNav(nextTaskID, true)
+		rearmCmd := m.armTerminalBoardNav(nextTaskID, nextSlot, true)
 
 		if task == nil {
 			m.statusMessage = "Selected track has no task."
 			return rearmCmd
 		}
 		if task.ID == m.activeTaskID {
+			m.focusedTerminalSlot = nextSlot
 			return rearmCmd
 		}
-		return tea.Batch(m.previewTaskShell(task), m.openSessionCmd(task.ID, false), rearmCmd)
+		return tea.Batch(
+			m.previewTaskShell(task, nextSlot),
+			m.openSessionCmd(task.ID, false, nextSlot),
+			rearmCmd,
+		)
 	}
 
 	if m.terminalBoardNavConsumed {
@@ -762,27 +907,28 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	slot := m.terminalBoardNavSlot
 	switch key.Type {
 	case tea.KeyPgUp:
 		taskID := m.terminalBoardNavTaskID
 		m.clearTerminalBoardNav()
-		m.terminalScrollOffset += 10
-		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+		m.setTerminalScrollOffset(slot, m.terminalScrollOffsetForSlot(slot)+10)
+		return m.queueTerminalInputCmd(taskID, slot, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
 	case tea.KeyPgDown:
 		taskID := m.terminalBoardNavTaskID
 		m.clearTerminalBoardNav()
-		m.terminalScrollOffset = max(0, m.terminalScrollOffset-10)
-		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+		m.setTerminalScrollOffset(slot, max(0, m.terminalScrollOffsetForSlot(slot)-10))
+		return m.queueTerminalInputCmd(taskID, slot, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
 	case tea.KeyShiftUp:
 		taskID := m.terminalBoardNavTaskID
 		m.clearTerminalBoardNav()
-		m.terminalScrollOffset += 1
-		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+		m.setTerminalScrollOffset(slot, m.terminalScrollOffsetForSlot(slot)+1)
+		return m.queueTerminalInputCmd(taskID, slot, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
 	case tea.KeyShiftDown:
 		taskID := m.terminalBoardNavTaskID
 		m.clearTerminalBoardNav()
-		m.terminalScrollOffset = max(0, m.terminalScrollOffset-1)
-		return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+		m.setTerminalScrollOffset(slot, max(0, m.terminalScrollOffsetForSlot(slot)-1))
+		return m.queueTerminalInputCmd(taskID, slot, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
 	}
 
 	data := encodeTerminalKey(key)
@@ -792,15 +938,16 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 	}
 
 	taskID := m.terminalBoardNavTaskID
-	commandBeforeSubmit := m.terminalCommand
+	commandBeforeSubmit := m.terminalCommandForSlot(slot)
 	m.clearTerminalBoardNav()
-	m.terminalCommand = appendTerminalCommand(m.terminalCommand, key)
-	if m.terminalScrollOffset != 0 {
-		m.terminalScrollOffset = 0
+	m.setTerminalCommand(slot, appendTerminalCommand(commandBeforeSubmit, key))
+	if m.terminalScrollOffsetForSlot(slot) != 0 {
+		m.setTerminalScrollOffset(slot, 0)
 	}
 
 	return m.queueTerminalInputCmd(
 		taskID,
+		slot,
 		"\t"+data,
 		key,
 		shouldTriggerTerminalPushSync(commandBeforeSubmit, key),
@@ -809,24 +956,27 @@ func (m *Model) handlePendingTerminalBoardNavKey(key tea.KeyMsg) tea.Cmd {
 
 func (m *Model) flushPendingTerminalBoardNavCmd() tea.Cmd {
 	taskID := m.terminalBoardNavTaskID
+	slot := m.terminalBoardNavSlot
 	consumed := m.terminalBoardNavConsumed
 	m.clearTerminalBoardNav()
 	if taskID == "" || consumed {
 		return nil
 	}
-	return m.queueTerminalInputCmd(taskID, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
+	return m.queueTerminalInputCmd(taskID, slot, "\t", tea.KeyMsg{Type: tea.KeyTab}, false)
 }
 
 func (m *Model) clearTerminalBoardNav() {
 	m.terminalBoardNavPending = false
 	m.terminalBoardNavTaskID = ""
+	m.terminalBoardNavSlot = SessionSlotPrimary
 	m.terminalBoardNavConsumed = false
 }
 
-func (m *Model) armTerminalBoardNav(taskID string, consumed bool) tea.Cmd {
+func (m *Model) armTerminalBoardNav(taskID string, slot SessionSlot, consumed bool) tea.Cmd {
 	m.selectTaskByID(taskID)
 	m.terminalBoardNavPending = true
 	m.terminalBoardNavTaskID = taskID
+	m.terminalBoardNavSlot = normalizeSessionSlot(slot)
 	m.terminalBoardNavConsumed = consumed
 	m.terminalBoardNavVersion++
 	version := m.terminalBoardNavVersion
@@ -890,15 +1040,16 @@ func (m *Model) boardActionCmd(method string, params interface{}, status string)
 	}
 }
 
-func (m *Model) openSessionCmd(taskID string, recreate bool) tea.Cmd {
+func (m *Model) openSessionCmd(taskID string, recreate bool, slot SessionSlot) tea.Cmd {
 	return func() tea.Msg {
 		method := "openSession"
 		if recreate {
 			method = "recreateSession"
 		}
+		normalizedSlot := normalizeSessionSlot(slot)
 
 		var session SessionRecord
-		if err := m.client.Call(method, map[string]string{"taskId": taskID}, &session); err != nil {
+		if err := m.client.Call(method, map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &session); err != nil {
 			return sessionOpenedMsg{err: err}
 		}
 
@@ -908,19 +1059,20 @@ func (m *Model) openSessionCmd(taskID string, recreate bool) tea.Cmd {
 		}
 
 		var buffer GetBufferResult
-		if err := m.client.Call("getBuffer", map[string]string{"taskId": taskID}, &buffer); err != nil {
+		if err := m.client.Call("getBuffer", map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &buffer); err != nil {
 			return sessionOpenedMsg{err: err}
 		}
 		buffer.ANSILines = defaultANSILines(buffer.Lines, buffer.ANSILines)
 
 		var activity *SessionActivitySnapshot
 		var nextActivity SessionActivitySnapshot
-		if err := m.client.Call("inspectSession", map[string]string{"taskId": taskID}, &nextActivity); err == nil && nextActivity.TaskID != "" {
+		if err := m.client.Call("inspectSession", map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &nextActivity); err == nil && nextActivity.TaskID != "" {
 			activity = &nextActivity
 		}
 
 		return sessionOpenedMsg{
 			taskID:   taskID,
+			slot:     normalizedSlot,
 			session:  session,
 			board:    &board,
 			buffer:   &buffer,
@@ -936,6 +1088,7 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 
 	m.terminalPaneVisible = true
 	m.terminalFullscreen = fullscreen
+	m.normalizeFocusedTerminalSlot()
 	m.focus = FocusTerminal
 
 	return tea.Batch(
@@ -944,26 +1097,59 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 	)
 }
 
-func (m *Model) loadBufferCmd(taskID string) tea.Cmd {
+func (m *Model) loadBufferCmd(taskID string, slot SessionSlot) tea.Cmd {
 	return func() tea.Msg {
+		normalizedSlot := normalizeSessionSlot(slot)
 		var buffer GetBufferResult
-		err := m.client.Call("getBuffer", map[string]string{"taskId": taskID}, &buffer)
+		err := m.client.Call("getBuffer", map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &buffer)
 		buffer.ANSILines = defaultANSILines(buffer.Lines, buffer.ANSILines)
-		return bufferLoadedMsg{taskID: taskID, buffer: buffer, err: err}
+		return bufferLoadedMsg{taskID: taskID, slot: normalizedSlot, buffer: buffer, err: err}
 	}
 }
 
-func (m *Model) inspectSessionCmd(taskID string) tea.Cmd {
+func (m *Model) inspectSessionCmd(taskID string, slot SessionSlot) tea.Cmd {
 	return func() tea.Msg {
+		normalizedSlot := normalizeSessionSlot(slot)
 		var activity SessionActivitySnapshot
-		err := m.client.Call("inspectSession", map[string]string{"taskId": taskID}, &activity)
+		err := m.client.Call("inspectSession", map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &activity)
 		if err != nil {
-			return sessionActivityMsg{taskID: taskID, activity: nil, err: err}
+			return sessionActivityMsg{taskID: taskID, slot: normalizedSlot, activity: nil, err: err}
 		}
 		if activity.TaskID == "" {
-			return sessionActivityMsg{taskID: taskID, activity: nil}
+			return sessionActivityMsg{taskID: taskID, slot: normalizedSlot, activity: nil}
 		}
-		return sessionActivityMsg{taskID: taskID, activity: &activity}
+		return sessionActivityMsg{taskID: taskID, slot: normalizedSlot, activity: &activity}
+	}
+}
+
+func (m *Model) desiredSessionUpdateWatchTaskID() string {
+	if !m.terminalPaneShouldRender() {
+		return ""
+	}
+	return m.activeTaskID
+}
+
+func (m *Model) syncSessionUpdateWatchCmd() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+
+	taskID := m.desiredSessionUpdateWatchTaskID()
+	if taskID == m.watchedSessionTaskID {
+		return nil
+	}
+
+	m.watchedSessionTaskID = taskID
+
+	return func() tea.Msg {
+		params := map[string]string{}
+		if taskID != "" {
+			params["taskId"] = taskID
+		}
+		if err := m.client.Call("watchSessionUpdates", params, nil); err != nil {
+			return asyncErrorMsg{err: err}
+		}
+		return nil
 	}
 }
 
@@ -980,9 +1166,9 @@ func (m *Model) acknowledgeSessionAttentionCmd(taskID string) tea.Cmd {
 	}
 }
 
-func (m *Model) sendInputCmd(taskID, data string) tea.Cmd {
+func (m *Model) sendInputCmd(taskID string, slot SessionSlot, data string) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.client.Notify("sendInput", map[string]string{"taskId": taskID, "data": data}); err != nil {
+		if err := m.client.Notify("sendInput", map[string]string{"taskId": taskID, "slot": string(normalizeSessionSlot(slot)), "data": data}); err != nil {
 			return asyncErrorMsg{err: err}
 		}
 		return nil
@@ -1079,6 +1265,18 @@ func (m *Model) schedulePostPushSyncCmd(taskID string) tea.Cmd {
 	}
 }
 
+func (m *Model) chatTurnCmd(prompt string) tea.Cmd {
+	return func() tea.Msg {
+		var result ChatTurnResult
+		err := m.client.Call("chatTurn", map[string]interface{}{
+			"prompt":     prompt,
+			"transcript": m.chatTranscript(),
+			"context":    m.chatContext(),
+		}, &result)
+		return chatTurnMsg{result: result, err: err}
+	}
+}
+
 func (m *Model) moveContextTaskCmd(task *TaskRecord, direction int) tea.Cmd {
 	trackIndex := indexTrack(m.sortedTracks(), task.TrackID)
 	nextIndex := trackIndex + direction
@@ -1127,6 +1325,47 @@ func (m *Model) toggleMissionsPaneCmd(open bool) tea.Cmd {
 	})
 }
 
+func (m *Model) toggleDualSessionCmd(task *TaskRecord) tea.Cmd {
+	if task == nil {
+		return nil
+	}
+
+	enable := task.SecondarySessionID == ""
+	status := "Closed dual shell."
+	focusSlot := SessionSlotPrimary
+	if enable {
+		status = "Opened dual shell."
+		focusSlot = SessionSlotSecondary
+	}
+
+	m.statusMessage = map[bool]string{
+		true:  "Opening dual shell...",
+		false: "Closing dual shell...",
+	}[enable]
+
+	taskID := task.ID
+	return func() tea.Msg {
+		if err := m.client.Call("setDualSessionMode", map[string]interface{}{
+			"taskId":  taskID,
+			"enabled": enable,
+		}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+
+		var board BoardSnapshot
+		if err := m.client.Call("getBoard", nil, &board); err != nil {
+			return boardActionMsg{err: err}
+		}
+
+		return boardActionMsg{
+			board:             &board,
+			status:            status,
+			activateTaskID:    taskID,
+			focusTerminalSlot: focusSlot,
+		}
+	}
+}
+
 func (m *Model) resizeActiveSessionCmd() tea.Cmd {
 	taskID := m.activeTaskID
 	if taskID == "" || !m.terminalPaneShouldRender() {
@@ -1134,25 +1373,48 @@ func (m *Model) resizeActiveSessionCmd() tea.Cmd {
 	}
 
 	columns := m.terminalContentWidth()
-	rows := m.terminalViewportHeight()
 	if columns < 20 {
 		columns = 20
 	}
-	if rows < 5 {
-		rows = 5
-	}
 
-	return func() tea.Msg {
-		err := m.client.Call("resizeSession", map[string]interface{}{
-			"taskId": taskID,
-			"cols":   columns,
-			"rows":   rows,
-		}, nil)
-		if err != nil {
-			return asyncErrorMsg{err: err}
-		}
+	task := m.taskByID(taskID)
+	if task == nil {
 		return nil
 	}
+
+	commands := []tea.Cmd{}
+	primaryHeight, secondaryHeight := splitTerminalSlotHeights(m.activeTaskUsesDualTerminal(), m.terminalPaneHeight())
+	for _, target := range []struct {
+		slot   SessionSlot
+		height int
+	}{
+		{slot: SessionSlotPrimary, height: primaryHeight},
+		{slot: SessionSlotSecondary, height: secondaryHeight},
+	} {
+		if !m.taskHasSessionSlot(task, target.slot) || target.height <= 0 {
+			continue
+		}
+		rows := terminalSlotViewportHeight(target.height)
+		if rows < 5 {
+			rows = 5
+		}
+		slot := target.slot
+		height := rows
+		commands = append(commands, func() tea.Msg {
+			err := m.client.Call("resizeSession", map[string]interface{}{
+				"taskId": taskID,
+				"slot":   string(slot),
+				"cols":   columns,
+				"rows":   height,
+			}, nil)
+			if err != nil {
+				return asyncErrorMsg{err: err}
+			}
+			return nil
+		})
+	}
+
+	return tea.Batch(commands...)
 }
 
 func (m *Model) openPRCmd(task *TaskRecord, checks bool) tea.Cmd {
@@ -1181,20 +1443,27 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	m.savedViews = board.SavedViews
 	m.daemonConnected = true
 
-	sessionTaskIDs := map[string]struct{}{}
+	sessionKeys := map[string]struct{}{}
 	for _, task := range board.Tasks {
 		if task.SessionID != "" {
-			sessionTaskIDs[task.ID] = struct{}{}
+			sessionKeys[m.sessionKey(task.ID, SessionSlotPrimary)] = struct{}{}
+		}
+		if task.SecondarySessionID != "" {
+			sessionKeys[m.sessionKey(task.ID, SessionSlotSecondary)] = struct{}{}
 		}
 	}
 
-	nextActivity := map[string]*SessionActivitySnapshot{}
-	for taskID, activity := range m.sessionActivityByTaskID {
-		if _, ok := sessionTaskIDs[taskID]; ok {
-			nextActivity[taskID] = activity
+	nextActivityByKey := map[string]*SessionActivitySnapshot{}
+	for key, activity := range m.sessionActivityByKey {
+		if _, ok := sessionKeys[key]; ok {
+			nextActivityByKey[key] = activity
 		}
 	}
-	m.sessionActivityByTaskID = nextActivity
+	m.sessionActivityByKey = nextActivityByKey
+	m.sessionActivityByTaskID = map[string]*SessionActivitySnapshot{}
+	for _, task := range board.Tasks {
+		m.refreshTaskSessionActivity(task.ID)
+	}
 
 	if board.UIState.ActiveRepoID != "" || m.activeRepoID == "" {
 		m.activeRepoID = board.UIState.ActiveRepoID
@@ -1222,17 +1491,49 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	}
 
 	if m.activeTaskID != "" && m.taskByID(m.activeTaskID) == nil {
-		m.activeTaskID = ""
-		m.activeSessionBranch = ""
-		m.activeSessionBackendType = ""
-		m.terminalPaneVisible = false
-		m.terminalFullscreen = false
-		m.terminalScrollOffset = 0
+		m.clearActiveTerminalState()
+	} else {
+		m.normalizeFocusedTerminalSlot()
+		if !m.activeTaskUsesDualTerminal() {
+			m.clearTerminalSlotState(SessionSlotSecondary)
+		}
 	}
 
 	m.selectedTrackIndex = clamp(m.selectedTrackIndex, 0, max(0, len(m.sortedTracks())-1))
 	m.selectedTaskIndex = clamp(m.selectedTaskIndex, 0, max(0, len(m.selectedTrackTasks())-1))
 	m.clampMissionSelection()
+}
+
+func (m *Model) chatTranscript() []ChatMessage {
+	if m.aiChatModal == nil || len(m.aiChatModal.Transcript) == 0 {
+		return nil
+	}
+	return append([]ChatMessage{}, m.aiChatModal.Transcript...)
+}
+
+func (m *Model) chatContext() ChatContext {
+	selectedTaskID := ""
+	if task := m.selectedTask(); task != nil {
+		selectedTaskID = task.ID
+	}
+	selectedMissionID := ""
+	if mission := m.selectedMission(); mission != nil {
+		selectedMissionID = mission.ID
+	}
+	selectedMissionTaskID := ""
+	if missionTask := m.selectedMissionTask(); missionTask != nil {
+		selectedMissionTaskID = missionTask.TaskID
+	}
+
+	filters := m.filters
+	return ChatContext{
+		ActiveRepoID:          m.activeRepoID,
+		SelectedTaskID:        selectedTaskID,
+		SelectedMissionID:     selectedMissionID,
+		SelectedMissionTaskID: selectedMissionTaskID,
+		ActiveTaskID:          m.activeTaskID,
+		Filters:               &filters,
+	}
 }
 
 func (m *Model) switchRepo(direction int) {
@@ -1463,21 +1764,260 @@ func (m *Model) repoByID(repoID string) *RepoRecord {
 	return nil
 }
 
-func (m *Model) sessionTaskIDs() []string {
+func normalizeSessionSlot(slot SessionSlot) SessionSlot {
+	if slot == SessionSlotSecondary {
+		return SessionSlotSecondary
+	}
+	return SessionSlotPrimary
+}
+
+func splitTerminalSlotHeights(dual bool, totalHeight int) (int, int) {
+	if !dual {
+		return max(1, totalHeight), 0
+	}
+
+	totalHeight = max(2, totalHeight)
+	bottom := max(1, totalHeight/4)
+	top := totalHeight - bottom
+	const minPaneHeight = 4
+	if totalHeight >= minPaneHeight*2 {
+		if bottom < minPaneHeight {
+			bottom = minPaneHeight
+			top = totalHeight - bottom
+		}
+		if top < minPaneHeight {
+			top = minPaneHeight
+			bottom = totalHeight - top
+		}
+	}
+	if bottom <= 0 {
+		bottom = 1
+		top = max(1, totalHeight-bottom)
+	}
+	return top, bottom
+}
+
+func terminalSlotViewportHeight(height int) int {
+	if height <= 2 {
+		return max(1, height-terminalHeaderHeight)
+	}
+	return max(1, height-terminalHeaderHeight-terminalFooterHeight)
+}
+
+func (m *Model) sessionKey(taskID string, slot SessionSlot) string {
+	return taskID + ":" + string(normalizeSessionSlot(slot))
+}
+
+func (m *Model) taskHasSessionSlot(task *TaskRecord, slot SessionSlot) bool {
+	if task == nil {
+		return false
+	}
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return task.SecondarySessionID != ""
+	}
+	return task.SessionID != ""
+}
+
+func (m *Model) activeTaskUsesDualTerminal() bool {
+	return m.taskHasSessionSlot(m.taskByID(m.activeTaskID), SessionSlotSecondary)
+}
+
+func (m *Model) visibleTerminalSlotsForTask(task *TaskRecord) []SessionSlot {
+	if task == nil {
+		return nil
+	}
+	slots := []SessionSlot{SessionSlotPrimary}
+	if task.SecondarySessionID != "" {
+		slots = append(slots, SessionSlotSecondary)
+	}
+	return slots
+}
+
+func (m *Model) sessionTargets() []sessionTarget {
+	targets := []sessionTarget{}
 	seen := map[string]struct{}{}
-	ids := []string{}
 	for _, task := range m.tasks {
-		if task.SessionID != "" {
-			seen[task.ID] = struct{}{}
-			ids = append(ids, task.ID)
+		for _, slot := range m.visibleTerminalSlotsForTask(&task) {
+			if !m.taskHasSessionSlot(&task, slot) {
+				continue
+			}
+			key := m.sessionKey(task.ID, slot)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			targets = append(targets, sessionTarget{TaskID: task.ID, Slot: slot})
 		}
 	}
 	if m.activeTaskID != "" {
-		if _, ok := seen[m.activeTaskID]; !ok {
-			ids = append(ids, m.activeTaskID)
+		task := m.taskByID(m.activeTaskID)
+		for _, slot := range m.visibleTerminalSlotsForTask(task) {
+			key := m.sessionKey(m.activeTaskID, slot)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			targets = append(targets, sessionTarget{TaskID: m.activeTaskID, Slot: slot})
 		}
 	}
-	return ids
+	return targets
+}
+
+func (m *Model) terminalCommandForSlot(slot SessionSlot) string {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return m.secondaryTerminalCommand
+	}
+	return m.terminalCommand
+}
+
+func (m *Model) setTerminalCommand(slot SessionSlot, command string) {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		m.secondaryTerminalCommand = command
+		return
+	}
+	m.terminalCommand = command
+}
+
+func (m *Model) terminalScrollOffsetForSlot(slot SessionSlot) int {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return m.secondaryTerminalScrollOffset
+	}
+	return m.terminalScrollOffset
+}
+
+func (m *Model) setTerminalScrollOffset(slot SessionSlot, offset int) {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		m.secondaryTerminalScrollOffset = offset
+		return
+	}
+	m.terminalScrollOffset = offset
+}
+
+func (m *Model) terminalBufferForSlot(slot SessionSlot) GetBufferResult {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return m.secondaryBuffer
+	}
+	return m.buffer
+}
+
+func (m *Model) setTerminalBuffer(slot SessionSlot, buffer GetBufferResult) {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		m.secondaryBuffer = buffer
+		return
+	}
+	m.buffer = buffer
+}
+
+func (m *Model) terminalBranchForSlot(slot SessionSlot) string {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return m.secondarySessionBranch
+	}
+	return m.activeSessionBranch
+}
+
+func (m *Model) terminalBackendTypeForSlot(slot SessionSlot) SessionBackendType {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return m.secondarySessionBackendType
+	}
+	return m.activeSessionBackendType
+}
+
+func (m *Model) setTerminalSessionMetadata(slot SessionSlot, branch string, backendType SessionBackendType) {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		m.secondarySessionBranch = branch
+		m.secondarySessionBackendType = backendType
+		return
+	}
+	m.activeSessionBranch = branch
+	m.activeSessionBackendType = backendType
+}
+
+func (m *Model) clearTerminalSlotState(slot SessionSlot) {
+	m.setTerminalSessionMetadata(slot, "", "")
+	m.setTerminalBuffer(slot, GetBufferResult{})
+	m.setTerminalScrollOffset(slot, 0)
+	m.setTerminalCommand(slot, "")
+}
+
+func (m *Model) clearActiveTerminalState() {
+	m.activeTaskID = ""
+	m.terminalPaneVisible = false
+	m.terminalFullscreen = false
+	m.focusedTerminalSlot = SessionSlotPrimary
+	m.clearTerminalSlotState(SessionSlotPrimary)
+	m.clearTerminalSlotState(SessionSlotSecondary)
+}
+
+func (m *Model) resolveTerminalSlotForTask(task *TaskRecord, preferred SessionSlot) SessionSlot {
+	if normalizeSessionSlot(preferred) == SessionSlotSecondary && !m.taskHasSessionSlot(task, SessionSlotSecondary) {
+		return SessionSlotPrimary
+	}
+	return normalizeSessionSlot(preferred)
+}
+
+func (m *Model) alternateTerminalSlot(slot SessionSlot) SessionSlot {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return SessionSlotPrimary
+	}
+	return SessionSlotSecondary
+}
+
+func (m *Model) normalizeFocusedTerminalSlot() {
+	m.focusedTerminalSlot = m.resolveTerminalSlotForTask(m.taskByID(m.activeTaskID), m.focusedTerminalSlot)
+}
+
+func (m *Model) sessionActivity(taskID string, slot SessionSlot) *SessionActivitySnapshot {
+	return m.sessionActivityByKey[m.sessionKey(taskID, slot)]
+}
+
+func (m *Model) refreshTaskSessionActivity(taskID string) {
+	primary := m.sessionActivity(taskID, SessionSlotPrimary)
+	secondary := m.sessionActivity(taskID, SessionSlotSecondary)
+	next := primary
+	switch {
+	case primary != nil && primary.IsBusy:
+		next = primary
+	case secondary != nil && secondary.IsBusy:
+		next = secondary
+	case primary != nil:
+		next = primary
+	default:
+		next = secondary
+	}
+	if next == nil {
+		delete(m.sessionActivityByTaskID, taskID)
+		return
+	}
+	m.sessionActivityByTaskID[taskID] = next
+}
+
+func (m *Model) setSessionActivity(taskID string, slot SessionSlot, activity *SessionActivitySnapshot) {
+	key := m.sessionKey(taskID, slot)
+	if activity == nil {
+		delete(m.sessionActivityByKey, key)
+		m.refreshTaskSessionActivity(taskID)
+		return
+	}
+	activity.Slot = normalizeSessionSlot(slot)
+	m.sessionActivityByKey[key] = activity
+	m.refreshTaskSessionActivity(taskID)
+}
+
+func (m *Model) loadVisibleTerminalStateCmd() tea.Cmd {
+	if !m.terminalPaneShouldRender() || m.activeTaskID == "" {
+		return nil
+	}
+
+	task := m.taskByID(m.activeTaskID)
+	if task == nil {
+		return nil
+	}
+
+	commands := []tea.Cmd{}
+	for _, slot := range m.visibleTerminalSlotsForTask(task) {
+		commands = append(commands, m.loadBufferCmd(task.ID, slot), m.inspectSessionCmd(task.ID, slot))
+	}
+	return tea.Batch(commands...)
 }
 
 func (m *Model) terminalPaneShouldRender() bool {
@@ -1508,7 +2048,7 @@ func (m *Model) terminalContentWidth() int {
 	return max(1, m.width-m.boardRenderWidth()-terminalDividerWidth)
 }
 
-func (m *Model) terminalViewportHeight() int {
+func (m *Model) terminalPaneHeight() int {
 	contentHeight := m.contentHeight()
 	height := contentHeight
 	if m.terminalPaneShouldRender() && m.terminalLayoutMode == TerminalLayoutMode("top-bottom") && !m.terminalTakesOver() {
@@ -1519,10 +2059,15 @@ func (m *Model) terminalViewportHeight() int {
 		boardHeight := max(1, (contentHeight-divider+1)/2)
 		height = max(1, contentHeight-boardHeight-divider)
 	}
-	if height <= 2 {
-		return max(1, height-terminalHeaderHeight)
+	return max(1, height)
+}
+
+func (m *Model) terminalViewportHeight() int {
+	primaryHeight, secondaryHeight := splitTerminalSlotHeights(m.activeTaskUsesDualTerminal(), m.terminalPaneHeight())
+	if normalizeSessionSlot(m.focusedTerminalSlot) == SessionSlotSecondary && secondaryHeight > 0 {
+		return terminalSlotViewportHeight(secondaryHeight)
 	}
-	return max(1, height-terminalHeaderHeight-terminalFooterHeight)
+	return terminalSlotViewportHeight(primaryHeight)
 }
 
 func (m *Model) contentHeight() int {

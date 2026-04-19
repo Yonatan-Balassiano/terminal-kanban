@@ -37,10 +37,15 @@ import type {
   ResizeSessionParams,
   InspectSessionParams,
   AcknowledgeSessionAttentionParams,
+  OpenSessionParams,
+  SendInputParams,
+  GetBufferParams,
   PrepareTaskWorkspaceParams,
   CreateTaskPRParams,
   CommentTaskPRParams,
   SchedulePostPushSyncParams,
+  ChatTurnParams,
+  SetDualSessionModeParams,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
 
@@ -51,6 +56,29 @@ import type { ServiceContainer } from './index.js';
  * currently subscribed socket connections.
  */
 export const serverEvents = new EventEmitter();
+
+function sessionUpdateTaskId(event: RPCEvent): string | null {
+  if (event.type !== 'session_update') {
+    return null;
+  }
+
+  const payload = event.payload as { taskId?: unknown } | null;
+  return typeof payload?.taskId === 'string' && payload.taskId.length > 0
+    ? payload.taskId
+    : null;
+}
+
+export function shouldForwardEventToSubscriber(
+  event: RPCEvent,
+  watchedSessionTaskId: string | null,
+): boolean {
+  if (event.type !== 'session_update') {
+    return true;
+  }
+
+  const taskId = sessionUpdateTaskId(event);
+  return taskId !== null && watchedSessionTaskId !== null && taskId === watchedSessionTaskId;
+}
 
 function emitBoardPatchAsync(services: ServiceContainer): void {
   if (!services.view) {
@@ -113,6 +141,13 @@ export async function dispatch(
           dbPath: services.dbPath,
           socketPath,
         };
+        return { id: req.id, result };
+      }
+
+      case 'shutdownManagedOllama': {
+        const result = services.ollama
+          ? await services.ollama.shutdown()
+          : { stopped: false, managed: false };
         return { id: req.id, result };
       }
 
@@ -341,7 +376,8 @@ export async function dispatch(
 
       // ---- sessions -------------------------------------------
       case 'openSession': {
-        const session = await services.session.openSession(p['taskId'] as string);
+        const params = p as unknown as OpenSessionParams;
+        const session = await services.session.openSession(params.taskId, params.slot);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
@@ -350,12 +386,23 @@ export async function dispatch(
       }
 
       case 'recreateSession': {
-        const session = await services.session.recreateSession(p['taskId'] as string);
+        const params = p as unknown as OpenSessionParams;
+        const session = await services.session.recreateSession(params.taskId, params.slot);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
         });
         return { id: req.id, result: session };
+      }
+
+      case 'setDualSessionMode': {
+        const params = p as unknown as SetDualSessionModeParams;
+        await services.session.setDualSessionMode(params.taskId, params.enabled);
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        return { id: req.id, result: null };
       }
 
       case 'acknowledgeSessionAttention': {
@@ -372,9 +419,11 @@ export async function dispatch(
       }
 
       case 'sendInput': {
+        const params = p as unknown as SendInputParams;
         const attentionChanged = await services.session.sendInput(
-          p['taskId'] as string,
-          p['data'] as string
+          params.taskId,
+          params.data,
+          params.slot,
         );
         if (attentionChanged) {
           serverEvents.emit('event', {
@@ -385,20 +434,27 @@ export async function dispatch(
         return { id: req.id, result: null };
       }
 
+      case 'watchSessionUpdates':
+        // Handled at connection level so each client can watch a different task.
+        return { id: req.id, result: { watchingTaskId: p['taskId'] ?? null } };
+
       case 'resizeSession': {
         const params = p as unknown as ResizeSessionParams;
-        await services.session.resizeSession(params.taskId, params.cols, params.rows);
+        await services.session.resizeSession(params.taskId, params.cols, params.rows, params.slot);
         return { id: req.id, result: null };
       }
 
       case 'getBuffer': {
-        const buf = await services.session.getBuffer(p['taskId'] as string);
+        const params = p as unknown as GetBufferParams;
+        const buf = await services.session.getBuffer(params.taskId, params.slot);
         return { id: req.id, result: buf };
       }
 
       case 'inspectSession': {
+        const params = p as unknown as InspectSessionParams;
         const { activity, attentionChanged } = await services.session.inspectSessionState(
-          (p as unknown as InspectSessionParams).taskId
+          params.taskId,
+          params.slot,
         );
         if (attentionChanged) {
           serverEvents.emit('event', {
@@ -524,6 +580,12 @@ export async function dispatch(
         return { id: req.id, result };
       }
 
+      case 'chatTurn': {
+        const result = await services.aiChat.chatTurn(p as unknown as ChatTurnParams);
+        emitBoardPatchAsync(services);
+        return { id: req.id, result };
+      }
+
       // ---- doctor ---------------------------------------------
       case 'doctor': {
         const results = await services.doctor.run();
@@ -556,6 +618,7 @@ export function startServer(socketPath: string, services: ServiceContainer): net
 
   const server = net.createServer((socket) => {
     let subscribed = false;
+    let watchedSessionTaskId: string | null = null;
     let removeListener: (() => void) | null = null;
 
     // Newline-delimited JSON framing.
@@ -603,6 +666,9 @@ export function startServer(socketPath: string, services: ServiceContainer): net
           subscribed = true;
 
           const handler = (event: RPCEvent) => {
+            if (!shouldForwardEventToSubscriber(event, watchedSessionTaskId)) {
+              return;
+            }
             writeResponse(event);
           };
 
@@ -613,6 +679,19 @@ export function startServer(socketPath: string, services: ServiceContainer): net
           };
 
           writeResponse({ id: req.id, result: { subscribed: true } });
+          continue;
+        }
+
+        if (req.method === 'watchSessionUpdates') {
+          const taskId =
+            typeof (req.params as { taskId?: unknown } | null)?.taskId === 'string'
+              ? ((req.params as { taskId?: string }).taskId ?? '').trim()
+              : '';
+          watchedSessionTaskId = taskId.length > 0 ? taskId : null;
+          writeResponse({
+            id: req.id,
+            result: { watchingTaskId: watchedSessionTaskId },
+          });
           continue;
         }
 

@@ -3,6 +3,7 @@ import type {
   SessionBackend,
   SessionBackendType,
   SessionStatus,
+  SessionSlot,
   GetBufferResult,
 } from '../types/index.js';
 import type { Db } from '../db/index.js';
@@ -26,6 +27,7 @@ import {
 interface SessionRow {
   id: string;
   task_id: string;
+  slot: SessionSlot;
   backend_type: string;
   backend_session_id: string | null;
   attach_command: string | null;
@@ -47,6 +49,7 @@ interface TaskRow {
   branch_name: string | null;
   worktree_path: string | null;
   session_id: string | null;
+  secondary_session_id: string | null;
 }
 
 interface RepoRow {
@@ -72,6 +75,7 @@ function rowToRecord(row: SessionRow): SessionRecord {
   return {
     id: row.id,
     taskId: row.task_id,
+    slot: row.slot,
     backendType: row.backend_type as SessionBackendType,
     backendSessionId: row.backend_session_id ?? undefined,
     attachCommand: row.attach_command ?? undefined,
@@ -92,15 +96,20 @@ export class SessionManager {
   private ptyBackend?: PtyBackend;
   private bufferPushInFlight = new Map<string, Promise<void>>();
   private bufferPushQueued = new Set<string>();
-  private lastOutputAtByTaskId = new Map<string, number>();
-  private lastBusyByTaskId = new Map<string, boolean>();
+  private lastOutputAtBySessionKey = new Map<string, number>();
+  private lastBusyBySessionKey = new Map<string, boolean>();
   private processTableCache?: { rows: ProcessRow[]; loadedAt: number };
   private processTableLoadInFlight?: Promise<ProcessRow[] | null>;
 
   constructor(
     private db: Db,
     private board: BoardService & {
-      linkSession?: (taskId: string, sessionId: string) => Promise<void> | void;
+      linkSession?: (
+        taskId: string,
+        sessionId: string,
+        slot?: SessionSlot,
+      ) => Promise<void> | void;
+      clearTaskSession?: (taskId: string, slot?: SessionSlot) => Promise<void> | void;
       setTaskBranch?: (taskId: string, branchName: string) => Promise<void> | void;
       setTaskLastSessionCwd?: (taskId: string, cwd: string | null) => Promise<void> | void;
       setTaskSessionAttention?: (taskId: string) => boolean;
@@ -108,11 +117,11 @@ export class SessionManager {
     },
     private worktrees: WorktreeService,
     private buffers: TerminalBufferService,
-    private onBufferUpdate?: (taskId: string, buffer: GetBufferResult) => void,
+    private onBufferUpdate?: (taskId: string, slot: SessionSlot, buffer: GetBufferResult) => void,
     private sessionBootstrapScript = '',
   ) {
-    this.buffers.subscribeAll((taskId, buffer) => {
-      this.onBufferUpdate?.(taskId, buffer);
+    this.buffers.subscribeAll((taskId, slot, buffer) => {
+      this.onBufferUpdate?.(taskId, slot, buffer);
     });
   }
 
@@ -121,21 +130,21 @@ export class SessionManager {
   getBackend(type: SessionBackendType): SessionBackend {
     if (type === 'tmux') {
       if (!this.tmuxBackend) {
-        this.tmuxBackend = new TmuxBackend((taskId, data) => {
+        this.tmuxBackend = new TmuxBackend((taskId, slot, data) => {
           if (hasMeaningfulTerminalOutput(data)) {
-            this.noteSessionOutput(taskId);
+            this.noteSessionOutput(taskId, slot);
           }
-          void this.scheduleBufferPush(taskId);
+          void this.scheduleBufferPush(taskId, slot);
         });
       }
       return this.tmuxBackend;
     }
     if (!this.ptyBackend) {
-      this.ptyBackend = new PtyBackend((taskId, data) => {
+      this.ptyBackend = new PtyBackend((taskId, slot, data) => {
         if (hasMeaningfulTerminalOutput(data)) {
-          this.noteSessionOutput(taskId);
+          this.noteSessionOutput(taskId, slot);
         }
-        this.buffers.write(taskId, data);
+        this.buffers.write(taskId, slot, data);
         const cwd = extractLastOsc7Cwd(data);
         if (cwd) {
           this.board.setTaskLastSessionCwd?.(taskId, cwd);
@@ -145,8 +154,20 @@ export class SessionManager {
     return this.ptyBackend;
   }
 
-  private noteSessionOutput(taskId: string): void {
-    this.lastOutputAtByTaskId.set(taskId, Date.now());
+  private sessionKey(taskId: string, slot: SessionSlot): string {
+    return `${taskId}:${slot}`;
+  }
+
+  private linkedSessionColumn(slot: SessionSlot): 'session_id' | 'secondary_session_id' {
+    return slot === 'secondary' ? 'secondary_session_id' : 'session_id';
+  }
+
+  private linkedSessionId(task: TaskRow, slot: SessionSlot): string | null {
+    return slot === 'secondary' ? task.secondary_session_id : task.session_id;
+  }
+
+  private noteSessionOutput(taskId: string, slot: SessionSlot): void {
+    this.lastOutputAtBySessionKey.set(this.sessionKey(taskId, slot), Date.now());
   }
 
   private clearTaskAttention(taskId: string): boolean {
@@ -184,28 +205,29 @@ export class SessionManager {
     return this.processTableLoadInFlight;
   }
 
-  private async scheduleBufferPush(taskId: string): Promise<void> {
-    const existing = this.bufferPushInFlight.get(taskId);
+  private async scheduleBufferPush(taskId: string, slot: SessionSlot): Promise<void> {
+    const key = this.sessionKey(taskId, slot);
+    const existing = this.bufferPushInFlight.get(key);
     if (existing) {
-      this.bufferPushQueued.add(taskId);
+      this.bufferPushQueued.add(key);
       await existing;
       return;
     }
 
     const run = (async () => {
       do {
-        this.bufferPushQueued.delete(taskId);
-        const buffer = await this.getBuffer(taskId);
-        this.onBufferUpdate?.(taskId, buffer);
-      } while (this.bufferPushQueued.has(taskId));
+        this.bufferPushQueued.delete(key);
+        const buffer = await this.getBuffer(taskId, slot);
+        this.onBufferUpdate?.(taskId, slot, buffer);
+      } while (this.bufferPushQueued.has(key));
     })();
 
-    this.bufferPushInFlight.set(taskId, run);
+    this.bufferPushInFlight.set(key, run);
 
     try {
       await run;
     } finally {
-      this.bufferPushInFlight.delete(taskId);
+      this.bufferPushInFlight.delete(key);
     }
   }
 
@@ -268,18 +290,22 @@ export class SessionManager {
 
   // ---- openSession -----------------------------------------
 
-  async openSession(taskId: string): Promise<SessionRecord> {
-    return this.openSessionWithPreferredBackend(taskId);
+  async openSession(taskId: string, slot: SessionSlot = 'primary'): Promise<SessionRecord> {
+    return this.openSessionWithPreferredBackend(taskId, slot);
   }
 
   private async openSessionWithPreferredBackend(
     taskId: string,
+    slot: SessionSlot,
     preferredBackend?: SessionBackendType,
   ): Promise<SessionRecord> {
     // 1. Load task
     const taskRow = this.db
       .prepare<[string], TaskRow>(
-        'SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path, session_id FROM tasks WHERE id = ?',
+        `SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path,
+                session_id, secondary_session_id
+           FROM tasks
+          WHERE id = ?`,
       )
       .get(taskId);
 
@@ -293,28 +319,25 @@ export class SessionManager {
     if (!repoRow) throw new Error(`Repo not found for task ${taskId} (repoId=${taskRow.repo_id})`);
 
     // 3. Check for a live session already linked to this task
-    if (taskRow.session_id) {
+    const linkedSessionId = this.linkedSessionId(taskRow, slot);
+    if (linkedSessionId) {
       const existingRow = this.db
         .prepare<[string], SessionRow>(
           `SELECT * FROM sessions WHERE id = ? AND status IN ('active','idle')`,
         )
-        .get(taskRow.session_id);
+        .get(linkedSessionId);
 
       if (existingRow) {
         const existing = rowToRecord(existingRow);
         if (preferredBackend && existing.backendType !== preferredBackend) {
           await this.terminateSession(existing.id);
-          this.db
-            .prepare<[string | null, number, string], void>(
-              'UPDATE tasks SET session_id = ?, updated_at = ? WHERE id = ?',
-            )
-            .run(null, Date.now(), taskId);
+          await this.board.clearTaskSession?.(taskId, slot);
         } else if (existing.backendSessionId) {
           const backend = this.getBackend(existing.backendType);
           const info = await backend.inspect(existing.backendSessionId);
           if (info) {
             if (backend instanceof TmuxBackend) {
-              backend.ensureStreaming(existing.taskId, existing.backendSessionId);
+              backend.ensureStreaming(existing.taskId, existing.slot, existing.backendSessionId);
             }
             // Still alive — reattach
             const currentBranch = resolveTaskBranchName(
@@ -342,7 +365,7 @@ export class SessionManager {
               this.persistSessionBranch(existing.id, currentBranch);
             }
             this.clearTaskAttention(taskId);
-            return { ...existing, branch: currentBranch };
+            return { ...existing, branch: currentBranch, slot };
           }
         }
       }
@@ -377,9 +400,10 @@ export class SessionManager {
     const backend = this.getBackend(backendType);
     const workspace = await this.prepareWorkspaceForSession(taskId, repoRow.path);
 
-    const sessionRecord = await backend.create({
+    const createdSession = await backend.create({
       taskId,
       taskTitle: taskRow.title,
+      slot,
       repoPath: repoRow.path,
       branch,
       agentCli: taskRow.agent_cli ?? 'claude',
@@ -389,21 +413,30 @@ export class SessionManager {
       bootstrapNotice: workspace.bootstrapNotice,
       sessionBootstrapScript: this.sessionBootstrapScript,
     });
+    const sessionRecord: SessionRecord = {
+      ...createdSession,
+      taskId,
+      slot,
+    };
 
     // 6. Persist to DB
     await this.board.setTaskBranch?.(taskId, branch);
 
     const now = Date.now();
     this.db
-      .prepare<[string, string, string, string | null, string | null, string, string | null, string | null, number, number, number], void>(
+      .prepare<
+        [string, string, SessionSlot, string, string | null, string | null, string, string | null, string | null, number, number, number],
+        void
+      >(
         `INSERT INTO sessions
-           (id, task_id, backend_type, backend_session_id, attach_command,
+           (id, task_id, slot, backend_type, backend_session_id, attach_command,
             status, cwd, branch, last_heartbeat, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         sessionRecord.id,
         taskId,
+        sessionRecord.slot,
         sessionRecord.backendType,
         sessionRecord.backendSessionId ?? null,
         sessionRecord.attachCommand ?? null,
@@ -416,7 +449,7 @@ export class SessionManager {
       );
 
     // 7. Link session to task
-    await this.board.linkSession?.(taskId, sessionRecord.id);
+    await this.board.linkSession?.(taskId, sessionRecord.id, slot);
     if (taskRow.track_id === 'backlog') {
       this.board.moveTask({ id: taskId, trackId: 'in-progress' });
     }
@@ -427,24 +460,36 @@ export class SessionManager {
 
   // ---- getSession ------------------------------------------
 
-  getSession(taskId: string): SessionRecord | null {
-    const row = this.db
-      .prepare<[string], SessionRow>(
-        `SELECT s.* FROM sessions s
-         JOIN tasks t ON t.session_id = s.id
-         WHERE t.id = ?
-         ORDER BY s.created_at DESC
-         LIMIT 1`,
+  getSession(taskId: string, slot: SessionSlot = 'primary'): SessionRecord | null {
+    const task = this.db
+      .prepare<[string], TaskRow>(
+        `SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path,
+                session_id, secondary_session_id
+           FROM tasks
+          WHERE id = ?`,
       )
       .get(taskId);
+
+    if (!task) {
+      return null;
+    }
+
+    const sessionId = this.linkedSessionId(task, slot);
+    if (!sessionId) {
+      return null;
+    }
+
+    const row = this.db
+      .prepare<[string], SessionRow>('SELECT * FROM sessions WHERE id = ?')
+      .get(sessionId);
 
     return row ? rowToRecord(row) : null;
   }
 
   // ---- sendInput -------------------------------------------
 
-  async sendInput(taskId: string, data: string): Promise<boolean> {
-    const session = this.getSession(taskId);
+  async sendInput(taskId: string, data: string, slot: SessionSlot = 'primary'): Promise<boolean> {
+    const session = this.getSession(taskId, slot);
     if (!session) throw new Error(`No active session for task: ${taskId}`);
     if (!session.backendSessionId) throw new Error(`Session has no backend ID: ${session.id}`);
 
@@ -457,14 +502,19 @@ export class SessionManager {
     return this.clearTaskAttention(taskId);
   }
 
-  async resizeSession(taskId: string, cols: number, rows: number): Promise<void> {
-    const session = this.getSession(taskId);
+  async resizeSession(
+    taskId: string,
+    cols: number,
+    rows: number,
+    slot: SessionSlot = 'primary',
+  ): Promise<void> {
+    const session = this.getSession(taskId, slot);
     if (!session?.backendSessionId) {
       return;
     }
 
     if (session.backendType === 'pty') {
-      this.buffers.resize(taskId, cols, rows);
+      this.buffers.resize(taskId, slot, cols, rows);
     }
 
     const backend = this.getBackend(session.backendType);
@@ -473,10 +523,10 @@ export class SessionManager {
 
   // ---- getBuffer -------------------------------------------
 
-  async getBuffer(taskId: string): Promise<GetBufferResult> {
-    const session = this.getSession(taskId);
+  async getBuffer(taskId: string, slot: SessionSlot = 'primary'): Promise<GetBufferResult> {
+    const session = this.getSession(taskId, slot);
     if (!session) {
-      return this.buffers.getBuffer(taskId);
+      return this.buffers.getBuffer(taskId, slot);
     }
 
     if (session.backendType === 'tmux' && session.backendSessionId) {
@@ -486,13 +536,17 @@ export class SessionManager {
       }
     }
 
-    return this.buffers.getBuffer(taskId);
+    return this.buffers.getBuffer(taskId, slot);
   }
 
-  async inspectSessionState(taskId: string): Promise<InspectSessionStateResult> {
-    const session = this.getSession(taskId);
+  async inspectSessionState(
+    taskId: string,
+    slot: SessionSlot = 'primary',
+  ): Promise<InspectSessionStateResult> {
+    const sessionKey = this.sessionKey(taskId, slot);
+    const session = this.getSession(taskId, slot);
     if (!session) {
-      this.lastBusyByTaskId.delete(taskId);
+      this.lastBusyBySessionKey.delete(sessionKey);
       return { activity: null, attentionChanged: false };
     }
 
@@ -506,12 +560,13 @@ export class SessionManager {
         activity = {
           taskId,
           sessionId: session.id,
+          slot,
           sessionStatus: 'orphaned',
           isBusy: false,
           updatedAt: Date.now(),
         };
       } else {
-        const lastOutputAt = this.lastOutputAtByTaskId.get(taskId);
+        const lastOutputAt = this.lastOutputAtBySessionKey.get(sessionKey);
         if (info.status !== 'active' || info.shellPid === undefined || info.shellPid <= 0) {
           activity = deriveFallbackSessionActivity(
             taskId,
@@ -543,24 +598,31 @@ export class SessionManager {
       }
     }
 
+    if (activity) {
+      activity = { ...activity, slot };
+    }
+
     let attentionChanged = false;
-    const previousBusy = this.lastBusyByTaskId.get(taskId) ?? false;
+    const previousBusy = this.lastBusyBySessionKey.get(sessionKey) ?? false;
     if (activity.sessionStatus === 'active') {
       if (activity.isBusy) {
         attentionChanged = this.clearTaskAttention(taskId);
       } else if (previousBusy) {
         attentionChanged = this.board.setTaskSessionAttention?.(taskId) ?? false;
       }
-      this.lastBusyByTaskId.set(taskId, activity.isBusy);
+      this.lastBusyBySessionKey.set(sessionKey, activity.isBusy);
     } else {
-      this.lastBusyByTaskId.delete(taskId);
+      this.lastBusyBySessionKey.delete(sessionKey);
     }
 
     return { activity, attentionChanged };
   }
 
-  async inspectSession(taskId: string): Promise<import('../types/index.js').SessionActivitySnapshot | null> {
-    const result = await this.inspectSessionState(taskId);
+  async inspectSession(
+    taskId: string,
+    slot: SessionSlot = 'primary',
+  ): Promise<import('../types/index.js').SessionActivitySnapshot | null> {
+    const result = await this.inspectSessionState(taskId, slot);
     return result.activity;
   }
 
@@ -579,37 +641,60 @@ export class SessionManager {
       await backend.terminate(session.backendSessionId);
     }
 
-    this.buffers.destroy(session.taskId);
-    this.lastOutputAtByTaskId.delete(session.taskId);
-    this.lastBusyByTaskId.delete(session.taskId);
+    this.buffers.destroy(session.taskId, session.slot);
+    const key = this.sessionKey(session.taskId, session.slot);
+    this.lastOutputAtBySessionKey.delete(key);
+    this.lastBusyBySessionKey.delete(key);
 
     this.db
       .prepare<[string, number, string], void>(
         'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
       )
       .run('terminated', Date.now(), sessionId);
+    await this.board.clearTaskSession?.(session.taskId, session.slot);
   }
 
-  async recreateSession(taskId: string): Promise<SessionRecord> {
-    return this.recreateSessionWithPreferredBackend(taskId);
+  async recreateSession(taskId: string, slot: SessionSlot = 'primary'): Promise<SessionRecord> {
+    return this.recreateSessionWithPreferredBackend(taskId, slot);
   }
 
   private async recreateSessionWithPreferredBackend(
     taskId: string,
+    slot: SessionSlot,
     preferredBackend?: SessionBackendType,
   ): Promise<SessionRecord> {
-    const existing = this.getSession(taskId);
+    const existing = this.getSession(taskId, slot);
     if (existing) {
       await this.terminateSession(existing.id);
     }
 
-    this.db
-      .prepare<[string | null, number, string], void>(
-        'UPDATE tasks SET session_id = ?, updated_at = ? WHERE id = ?',
-      )
-      .run(null, Date.now(), taskId);
+    await this.board.clearTaskSession?.(taskId, slot);
 
-    return this.openSessionWithPreferredBackend(taskId, preferredBackend);
+    return this.openSessionWithPreferredBackend(taskId, slot, preferredBackend);
+  }
+
+  async setDualSessionMode(taskId: string, enabled: boolean): Promise<void> {
+    if (enabled) {
+      await this.openSession(taskId, 'primary');
+      await this.openSession(taskId, 'secondary');
+      return;
+    }
+
+    const secondary = this.getSession(taskId, 'secondary');
+    if (secondary) {
+      await this.terminateSession(secondary.id);
+    } else {
+      await this.board.clearTaskSession?.(taskId, 'secondary');
+    }
+  }
+
+  async terminateTaskSessions(taskId: string): Promise<void> {
+    const sessions = [this.getSession(taskId, 'primary'), this.getSession(taskId, 'secondary')];
+    for (const session of sessions) {
+      if (session) {
+        await this.terminateSession(session.id);
+      }
+    }
   }
 
   // ---- reconcile -------------------------------------------

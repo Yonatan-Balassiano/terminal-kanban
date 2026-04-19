@@ -87,6 +87,45 @@ describe('TaskLifecycleService', () => {
     expect(board.getTask(task.id)?.worktreePath).toBe(worktreePath);
   });
 
+  it('keeps the worktree when archiving a task that still has an active secondary session', async () => {
+    const task = board.createTask({ title: 'Dev server still running', repoId: 'repo-1' });
+    board.setTaskWorktree(task.id, worktreePath);
+    board.linkSession(task.id, 'session-2', 'secondary');
+
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, slot, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'session-2',
+      task.id,
+      'secondary',
+      'pty',
+      'ab_dev_shell',
+      null,
+      'active',
+      worktreePath,
+      task.branchName,
+      1,
+      1,
+      1,
+    );
+
+    const git = {
+      removeWorktree: vi.fn(),
+    };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateSession: vi.fn(),
+    } as never);
+
+    await lifecycle.archiveTask(task.id);
+
+    expect(git.removeWorktree).not.toHaveBeenCalled();
+    expect(board.getTask(task.id)?.archivedAt).toBeDefined();
+    expect(board.getTask(task.id)?.worktreePath).toBe(worktreePath);
+  });
+
   it('keeps the archived task intact when archive cleanup fails', async () => {
     const task = board.createTask({ title: 'Archive but keep path', repoId: 'repo-1' });
     board.setTaskWorktree(task.id, worktreePath);

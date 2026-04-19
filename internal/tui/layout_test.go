@@ -602,6 +602,12 @@ func TestTaskCardBorderColorUsesAccentForSelectedNeutralCard(t *testing.T) {
 func TestBoardKeyboardHintsIncludeManualPRRetry(t *testing.T) {
 	hints := kbdHints(FocusBoard)
 
+	if !strings.Contains(hints, "a/A ai chat") {
+		t.Fatalf("kbdHints(FocusBoard) = %q, want ai chat hint", hints)
+	}
+	if !strings.Contains(hints, "B dual shell") {
+		t.Fatalf("kbdHints(FocusBoard) = %q, want dual shell hint", hints)
+	}
 	if !strings.Contains(hints, "j comment") {
 		t.Fatalf("kbdHints(FocusBoard) = %q, want PR comment hint", hints)
 	}
@@ -610,6 +616,31 @@ func TestBoardKeyboardHintsIncludeManualPRRetry(t *testing.T) {
 	}
 	if !strings.Contains(hints, "C retry PR") {
 		t.Fatalf("kbdHints(FocusBoard) = %q, want retry PR hint", hints)
+	}
+}
+
+func TestTerminalKeyboardHintsIncludePaneSwitching(t *testing.T) {
+	hints := kbdHints(FocusTerminal)
+
+	if !strings.Contains(hints, "Shift+Tab pane") {
+		t.Fatalf("kbdHints(FocusTerminal) = %q, want pane switching hint", hints)
+	}
+	if !strings.Contains(hints, "Tab+h/j/k/l switch shell") {
+		t.Fatalf("kbdHints(FocusTerminal) = %q, want shell navigation hint", hints)
+	}
+}
+
+func TestSplitTerminalSlotHeightsUsesSeventyFiveTwentyFiveLayout(t *testing.T) {
+	top, bottom := splitTerminalSlotHeights(true, 20)
+	if top != 15 || bottom != 5 {
+		t.Fatalf("splitTerminalSlotHeights(true, 20) = (%d, %d), want (15, 5)", top, bottom)
+	}
+}
+
+func TestSplitTerminalSlotHeightsClampsSmallDualPanes(t *testing.T) {
+	top, bottom := splitTerminalSlotHeights(true, 8)
+	if top != 4 || bottom != 4 {
+		t.Fatalf("splitTerminalSlotHeights(true, 8) = (%d, %d), want (4, 4)", top, bottom)
 	}
 }
 
@@ -673,8 +704,64 @@ func TestHandleTerminalKeyTabArmsBoardNavigation(t *testing.T) {
 	if model.terminalBoardNavTaskID != "task-1" {
 		t.Fatalf("terminalBoardNavTaskID = %q, want task-1", model.terminalBoardNavTaskID)
 	}
+	if model.terminalBoardNavSlot != SessionSlotPrimary {
+		t.Fatalf("terminalBoardNavSlot = %q, want %q", model.terminalBoardNavSlot, SessionSlotPrimary)
+	}
 	if model.selectedTrackIndex != 1 || model.selectedTaskIndex != 0 {
 		t.Fatalf("selection = (%d,%d), want active task coordinates (1,0)", model.selectedTrackIndex, model.selectedTaskIndex)
+	}
+	if cmd == nil {
+		t.Fatal("handleTerminalKey(tab) returned nil cmd")
+	}
+}
+
+func TestHandleTerminalKeyShiftTabSwitchesFocusedPane(t *testing.T) {
+	model := &Model{
+		focus:               FocusTerminal,
+		activeTaskID:        "task-1",
+		terminalPaneVisible: true,
+		width:               160,
+		height:              40,
+		focusedTerminalSlot: SessionSlotPrimary,
+		tasks: []TaskRecord{
+			{ID: "task-1", SessionID: "session-1", SecondarySessionID: "session-2"},
+		},
+	}
+
+	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+
+	if model.focusedTerminalSlot != SessionSlotSecondary {
+		t.Fatalf("focusedTerminalSlot = %q, want %q", model.focusedTerminalSlot, SessionSlotSecondary)
+	}
+	if cmd == nil {
+		t.Fatal("handleTerminalKey(shift+tab) returned nil cmd")
+	}
+}
+
+func TestHandleTerminalKeyTabKeepsFocusedSecondarySlotForBoardNavigation(t *testing.T) {
+	model := &Model{
+		focus:               FocusTerminal,
+		activeTaskID:        "task-1",
+		focusedTerminalSlot: SessionSlotSecondary,
+		selectedTrackIndex:  0,
+		selectedTaskIndex:   0,
+		tracks: []TrackRecord{
+			{ID: "backlog", SortOrder: 1},
+			{ID: "in-progress", SortOrder: 2},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "Active", SessionID: "session-1", SecondarySessionID: "session-2"},
+			{ID: "task-2", TrackID: "backlog", SortKey: 1, Title: "Selected", SessionID: "session-3"},
+		},
+	}
+
+	cmd := model.handleTerminalKey(tea.KeyMsg{Type: tea.KeyTab})
+
+	if !model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should be armed")
+	}
+	if model.terminalBoardNavSlot != SessionSlotSecondary {
+		t.Fatalf("terminalBoardNavSlot = %q, want %q", model.terminalBoardNavSlot, SessionSlotSecondary)
 	}
 	if cmd == nil {
 		t.Fatal("handleTerminalKey(tab) returned nil cmd")

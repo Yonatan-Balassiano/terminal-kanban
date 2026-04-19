@@ -35,6 +35,7 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     branchName: (row['branch_name'] as string | null) ?? undefined,
     worktreePath: (row['worktree_path'] as string | null) ?? undefined,
     sessionId: (row['session_id'] as string | null) ?? undefined,
+    secondarySessionId: (row['secondary_session_id'] as string | null) ?? undefined,
     lastSessionCwd: (row['last_session_cwd'] as string | null) ?? undefined,
     sortKey: row['sort_key'] as number,
     prNumber: (row['pr_number'] as number | null) ?? undefined,
@@ -201,12 +202,15 @@ export class BoardService {
 
   renameTask(id: string, title: string): void {
     const current = this.db
-      .prepare<[string], { branch_name: string | null; session_id: string | null }>(
-        'SELECT branch_name, session_id FROM tasks WHERE id = ?',
+      .prepare<
+        [string],
+        { branch_name: string | null; session_id: string | null; secondary_session_id: string | null }
+      >(
+        'SELECT branch_name, session_id, secondary_session_id FROM tasks WHERE id = ?',
       )
       .get(id);
 
-    if (current && current.session_id == null) {
+    if (current && current.session_id == null && current.secondary_session_id == null) {
       this.db
         .prepare<[string, string, number, string], void>(
           'UPDATE tasks SET title = ?, branch_name = ?, updated_at = ? WHERE id = ?',
@@ -413,12 +417,29 @@ export class BoardService {
       .run(...values);
   }
 
-  linkSession(taskId: string, sessionId: string): void {
+  linkSession(
+    taskId: string,
+    sessionId: string,
+    slot: import('../types/index.js').SessionSlot = 'primary',
+  ): void {
+    const column = slot === 'secondary' ? 'secondary_session_id' : 'session_id';
     this.db
-      .prepare<[string, number, string], void>(
-        'UPDATE tasks SET session_id = ?, updated_at = ? WHERE id = ?',
+      .prepare<unknown[], void>(
+        `UPDATE tasks SET ${column} = ?, updated_at = ? WHERE id = ?`,
       )
       .run(sessionId, Date.now(), taskId);
+  }
+
+  clearTaskSession(
+    taskId: string,
+    slot: import('../types/index.js').SessionSlot = 'primary',
+  ): void {
+    const column = slot === 'secondary' ? 'secondary_session_id' : 'session_id';
+    this.db
+      .prepare<unknown[], void>(
+        `UPDATE tasks SET ${column} = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(null, Date.now(), taskId);
   }
 
   setTaskBranch(taskId: string, branchName: string): void {

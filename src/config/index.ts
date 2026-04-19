@@ -7,8 +7,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
+import { DEFAULT_AI_CHAT_SYSTEM_PROMPT } from '../prompts/ai-chat-system-prompt.js';
 import type {
   AppConfig,
+  AIChatConfig,
   RepoOverlayConfig,
   SessionBackendType,
 } from '../types/index.js';
@@ -82,6 +84,17 @@ const AgentMacroSchema = z.object({
   env: z.record(z.string()).optional(),
 });
 
+const AIChatConfigSchema = z.object({
+  enabled: z.boolean(),
+  provider: z.literal('ollama'),
+  baseUrl: z.string(),
+  model: z.string(),
+  requestTimeoutMs: z.number().int().positive(),
+  maxToolRounds: z.number().int().positive(),
+  historyLimit: z.number().int().positive(),
+  systemPrompt: z.string().optional(),
+});
+
 /**
  * Full AppConfig schema — used when reading from disk.
  * Fields are individually optional so partial configs on disk are tolerated;
@@ -94,6 +107,7 @@ export const AppConfigSchema = z
     sessionBootstrapScript: z.string(),
     pollIntervalMs: z.number().int().positive(),
     githubTokenEnvVar: z.string().optional(),
+    aiChat: AIChatConfigSchema,
     tracks: z.array(TrackConfigSchema),
     pillars: z.array(PillarConfigSchema),
     repos: z.array(RepoConfigSchema),
@@ -142,11 +156,25 @@ function resolveSessionBootstrapScriptPath(scriptPath: string, baseDir: string):
   return path.resolve(baseDir, scriptPath);
 }
 
+function defaultAIChatConfig(): AIChatConfig {
+  return {
+    enabled: true,
+    provider: 'ollama',
+    baseUrl: 'http://127.0.0.1:11434',
+    model: 'gemma4:e2b',
+    requestTimeoutMs: 45_000,
+    maxToolRounds: 6,
+    historyLimit: 24,
+    systemPrompt: DEFAULT_AI_CHAT_SYSTEM_PROMPT,
+  };
+}
+
 export function defaultConfig(): AppConfig {
   return {
     sessionBackend: 'tmux' as SessionBackendType,
     sessionBootstrapScript: bundledSessionBootstrapScriptPath(),
     pollIntervalMs: 60000,
+    aiChat: defaultAIChatConfig(),
     tracks: [
       { id: 'backlog', label: 'Backlog', sortOrder: 0 },
       { id: 'in-progress', label: 'In Progress', sortOrder: 1 },

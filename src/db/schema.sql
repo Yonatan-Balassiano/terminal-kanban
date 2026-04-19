@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   branch_name TEXT,
   worktree_path TEXT,
   session_id TEXT,
+  secondary_session_id TEXT,
   sort_key REAL NOT NULL DEFAULT 0,
   pr_number INTEGER,
   pr_state TEXT NOT NULL DEFAULT 'none',
@@ -92,6 +93,7 @@ CREATE TABLE IF NOT EXISTS task_labels (
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  slot TEXT NOT NULL DEFAULT 'primary',
   backend_type TEXT NOT NULL DEFAULT 'tmux',
   backend_session_id TEXT,
   attach_command TEXT,
