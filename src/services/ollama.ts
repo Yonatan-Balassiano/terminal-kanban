@@ -251,6 +251,36 @@ interface OllamaChatResponse {
   error?: string;
 }
 
+function summarizeOllamaErrorDetail(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: unknown };
+    if (typeof parsed.error === 'string' && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+  } catch {
+    // Fall back to the raw response body.
+  }
+
+  const singleLine = trimmed.replace(/\s+/g, ' ');
+  if (singleLine.length <= 400) {
+    return singleLine;
+  }
+  return `${singleLine.slice(0, 397)}...`;
+}
+
+async function readOllamaErrorDetail(response: Response): Promise<string> {
+  try {
+    return summarizeOllamaErrorDetail(await response.text());
+  } catch {
+    return '';
+  }
+}
+
 export class OllamaClient implements ChatModelClient {
   constructor(private readonly config: AIChatConfig) {}
 
@@ -281,7 +311,12 @@ export class OllamaClient implements ChatModelClient {
       });
 
       if (!response.ok) {
-        throw new Error(`Ollama request failed with ${response.status}`);
+        const detail = await readOllamaErrorDetail(response);
+        throw new Error(
+          detail
+            ? `Ollama request failed with ${response.status}: ${detail}`
+            : `Ollama request failed with ${response.status}`,
+        );
       }
 
       const payload = (await response.json()) as OllamaChatResponse;

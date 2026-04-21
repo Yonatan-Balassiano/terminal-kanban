@@ -17,7 +17,7 @@ export class DoctorService {
     const checks = await Promise.all([
       this.checkNodeVersion(),
       this.checkGit(),
-      this.checkTmux(),
+      this.checkNodePty(),
       this.checkGh(),
       this.checkGhAuth(),
       this.checkDelta(),
@@ -55,16 +55,17 @@ export class DoctorService {
     }
   }
 
-  private checkTmux(): DoctorCheck {
+  private checkNodePty(): DoctorCheck {
     try {
-      const out = execSync('tmux -V', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-      return { name: 'tmux', status: 'pass', message: out };
-    } catch {
+      require('node-pty');
+      return { name: 'node-pty', status: 'pass', message: 'node-pty available' };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       return {
-        name: 'tmux',
+        name: 'node-pty',
         status: 'fail',
-        message: 'tmux not found',
-        remediation: 'Install tmux: brew install tmux',
+        message: `node-pty not available: ${message}`,
+        remediation: 'Reinstall dependencies (npm install) or use a supported Node/OS combo for native addons',
       };
     }
   }

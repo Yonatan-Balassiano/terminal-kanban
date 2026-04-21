@@ -54,7 +54,7 @@ func NewRPCClient(socketPath string) (*RPCClient, error) {
 
 	client := &RPCClient{
 		conn:    conn,
-		events:  make(chan RPCEvent, 64),
+		events:  make(chan RPCEvent, 512),
 		closed:  make(chan struct{}),
 		pending: make(map[string]chan rpcResponse),
 	}

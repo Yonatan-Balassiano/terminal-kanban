@@ -113,6 +113,7 @@ type aiChatModalState struct {
 	Input         string
 	Transcript    []ChatMessage
 	Executions    []ChatToolExecution
+	LastError     string
 	Pending       bool
 	PendingPrompt string
 }
@@ -1272,11 +1273,16 @@ func (m *Model) handleAIChatModalKey(key tea.KeyMsg) tea.Cmd {
 		if prompt == "" {
 			return nil
 		}
+		state.LastError = ""
 		state.Pending = true
 		state.PendingPrompt = prompt
 		state.Input = ""
 		m.statusMessage = "AI chat is thinking..."
-		return m.chatTurnCmd(prompt)
+		chat := m.chatTurnCmd(prompt)
+		if spin := m.startSpinnerChainCmd(); spin != nil {
+			return tea.Batch(chat, spin)
+		}
+		return chat
 	case tea.KeyBackspace, tea.KeyDelete:
 		if state.Pending {
 			return nil

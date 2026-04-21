@@ -8,7 +8,7 @@ import type {
 } from '../types/index.js';
 import type { Db } from '../db/index.js';
 import type { BoardService } from './board.js';
-import { TmuxBackend } from './session-backends/tmux.js';
+import { execFileSync } from 'child_process';
 import { PtyBackend } from './session-backends/pty.js';
 import type { TerminalBufferService } from './terminal-buffer.js';
 import { resolveTaskBranchName } from './branch-name.js';
@@ -67,7 +67,7 @@ export interface InspectSessionStateResult {
   attentionChanged: boolean;
 }
 
-const processTableCacheWindowMs = 250;
+const processTableCacheWindowMs = 2000;
 
 // --------------- Helpers -------------------------------------
 
@@ -89,13 +89,18 @@ function rowToRecord(row: SessionRow): SessionRecord {
   };
 }
 
+function killLegacyTmuxSession(backendSessionId: string): void {
+  try {
+    execFileSync('tmux', ['kill-session', '-t', backendSessionId], { stdio: 'ignore' });
+  } catch {
+    // Session may already be gone.
+  }
+}
+
 // --------------- SessionManager ------------------------------
 
 export class SessionManager {
-  private tmuxBackend?: TmuxBackend;
   private ptyBackend?: PtyBackend;
-  private bufferPushInFlight = new Map<string, Promise<void>>();
-  private bufferPushQueued = new Set<string>();
   private lastOutputAtBySessionKey = new Map<string, number>();
   private lastBusyBySessionKey = new Map<string, boolean>();
   private processTableCache?: { rows: ProcessRow[]; loadedAt: number };
@@ -125,20 +130,8 @@ export class SessionManager {
     });
   }
 
-  // ---- Backend factory (lazy singletons) -------------------
-
-  getBackend(type: SessionBackendType): SessionBackend {
-    if (type === 'tmux') {
-      if (!this.tmuxBackend) {
-        this.tmuxBackend = new TmuxBackend((taskId, slot, data) => {
-          if (hasMeaningfulTerminalOutput(data)) {
-            this.noteSessionOutput(taskId, slot);
-          }
-          void this.scheduleBufferPush(taskId, slot);
-        });
-      }
-      return this.tmuxBackend;
-    }
+  /** PTY backend; tests may override. */
+  protected getBackend(): SessionBackend {
     if (!this.ptyBackend) {
       this.ptyBackend = new PtyBackend((taskId, slot, data) => {
         if (hasMeaningfulTerminalOutput(data)) {
@@ -205,32 +198,6 @@ export class SessionManager {
     return this.processTableLoadInFlight;
   }
 
-  private async scheduleBufferPush(taskId: string, slot: SessionSlot): Promise<void> {
-    const key = this.sessionKey(taskId, slot);
-    const existing = this.bufferPushInFlight.get(key);
-    if (existing) {
-      this.bufferPushQueued.add(key);
-      await existing;
-      return;
-    }
-
-    const run = (async () => {
-      do {
-        this.bufferPushQueued.delete(key);
-        const buffer = await this.getBuffer(taskId, slot);
-        this.onBufferUpdate?.(taskId, slot, buffer);
-      } while (this.bufferPushQueued.has(key));
-    })();
-
-    this.bufferPushInFlight.set(key, run);
-
-    try {
-      await run;
-    } finally {
-      this.bufferPushInFlight.delete(key);
-    }
-  }
-
   private async ensureSessionBranch(
     session: SessionRecord,
     cwd: string,
@@ -241,7 +208,7 @@ export class SessionManager {
       return;
     }
 
-    const backend = this.getBackend(session.backendType);
+    const backend = this.getBackend();
     const commands: string[] = [];
 
     if (previousBranch && previousBranch !== branch) {
@@ -288,17 +255,33 @@ export class SessionManager {
     }
   }
 
+  private async retireLegacyTmuxSession(taskId: string, slot: SessionSlot, sessionId: string): Promise<void> {
+    const row = this.db
+      .prepare<[string], SessionRow>('SELECT * FROM sessions WHERE id = ?')
+      .get(sessionId);
+    if (!row) {
+      return;
+    }
+    const session = rowToRecord(row);
+    if (session.backendSessionId) {
+      killLegacyTmuxSession(session.backendSessionId);
+    }
+    this.buffers.destroy(taskId, slot);
+    this.db
+      .prepare<[string, number, string], void>(
+        'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
+      )
+      .run('terminated', Date.now(), sessionId);
+    await this.board.clearTaskSession?.(taskId, slot);
+  }
+
   // ---- openSession -----------------------------------------
 
   async openSession(taskId: string, slot: SessionSlot = 'primary'): Promise<SessionRecord> {
-    return this.openSessionWithPreferredBackend(taskId, slot);
+    return this.openSessionInner(taskId, slot);
   }
 
-  private async openSessionWithPreferredBackend(
-    taskId: string,
-    slot: SessionSlot,
-    preferredBackend?: SessionBackendType,
-  ): Promise<SessionRecord> {
+  private async openSessionInner(taskId: string, slot: SessionSlot): Promise<SessionRecord> {
     // 1. Load task
     const taskRow = this.db
       .prepare<[string], TaskRow>(
@@ -329,16 +312,12 @@ export class SessionManager {
 
       if (existingRow) {
         const existing = rowToRecord(existingRow);
-        if (preferredBackend && existing.backendType !== preferredBackend) {
-          await this.terminateSession(existing.id);
-          await this.board.clearTaskSession?.(taskId, slot);
+        if (existing.backendType === 'tmux') {
+          await this.retireLegacyTmuxSession(taskId, slot, existing.id);
         } else if (existing.backendSessionId) {
-          const backend = this.getBackend(existing.backendType);
+          const backend = this.getBackend();
           const info = await backend.inspect(existing.backendSessionId);
           if (info) {
-            if (backend instanceof TmuxBackend) {
-              backend.ensureStreaming(existing.taskId, existing.slot, existing.backendSessionId);
-            }
             // Still alive — reattach
             const currentBranch = resolveTaskBranchName(
               taskRow.title,
@@ -374,30 +353,13 @@ export class SessionManager {
     // 4. Determine branch
     const branch = resolveTaskBranchName(taskRow.title, taskRow.id, taskRow.branch_name ?? undefined);
 
-    // 5. Pick backend — prefer PTY for low-latency interactive sessions.
-    let backendType: SessionBackendType = 'pty';
-    if (preferredBackend) {
-      const preferredHealth = await this.getBackend(preferredBackend).healthCheck();
-      if (!preferredHealth.available) {
-        throw new Error(
-          `Preferred backend unavailable: ${preferredHealth.error ?? 'unavailable'}`,
-        );
-      }
-      backendType = preferredBackend;
-    } else {
-      const ptyHealth = await this.getBackend('pty').healthCheck();
-      if (!ptyHealth.available) {
-        const tmuxHealth = await this.getBackend('tmux').healthCheck();
-        if (!tmuxHealth.available) {
-          throw new Error(
-            `No session backend available (pty: ${ptyHealth.error ?? 'unavailable'}, tmux: ${tmuxHealth.error ?? 'unavailable'})`,
-          );
-        }
-        backendType = 'tmux';
-      }
+    // 5. PTY only
+    const backend = this.getBackend();
+    const ptyHealth = await backend.healthCheck();
+    if (!ptyHealth.available) {
+      throw new Error(`PTY session backend unavailable: ${ptyHealth.error ?? 'node-pty not available'}`);
     }
 
-    const backend = this.getBackend(backendType);
     const workspace = await this.prepareWorkspaceForSession(taskId, repoRow.path);
 
     const createdSession = await backend.create({
@@ -492,8 +454,11 @@ export class SessionManager {
     const session = this.getSession(taskId, slot);
     if (!session) throw new Error(`No active session for task: ${taskId}`);
     if (!session.backendSessionId) throw new Error(`Session has no backend ID: ${session.id}`);
+    if (session.backendType === 'tmux') {
+      throw new Error('Legacy tmux session row; close the shell and open a new session.');
+    }
 
-    const backend = this.getBackend(session.backendType);
+    const backend = this.getBackend();
     await backend.sendInput(session.backendSessionId, data);
     return this.clearTaskAttention(taskId);
   }
@@ -509,15 +474,13 @@ export class SessionManager {
     slot: SessionSlot = 'primary',
   ): Promise<void> {
     const session = this.getSession(taskId, slot);
-    if (!session?.backendSessionId) {
+    if (!session?.backendSessionId || session.backendType === 'tmux') {
       return;
     }
 
-    if (session.backendType === 'pty') {
-      this.buffers.resize(taskId, slot, cols, rows);
-    }
+    this.buffers.resize(taskId, slot, cols, rows);
 
-    const backend = this.getBackend(session.backendType);
+    const backend = this.getBackend();
     await backend.resize(session.backendSessionId, cols, rows);
   }
 
@@ -527,13 +490,6 @@ export class SessionManager {
     const session = this.getSession(taskId, slot);
     if (!session) {
       return this.buffers.getBuffer(taskId, slot);
-    }
-
-    if (session.backendType === 'tmux' && session.backendSessionId) {
-      const backend = this.getBackend('tmux');
-      if (backend instanceof TmuxBackend) {
-        return backend.capture(session.backendSessionId);
-      }
     }
 
     return this.buffers.getBuffer(taskId, slot);
@@ -550,11 +506,23 @@ export class SessionManager {
       return { activity: null, attentionChanged: false };
     }
 
+    if (session.backendType === 'tmux') {
+      const activity: import('../types/index.js').SessionActivitySnapshot = {
+        taskId,
+        sessionId: session.id,
+        slot,
+        sessionStatus: 'orphaned',
+        isBusy: false,
+        updatedAt: Date.now(),
+      };
+      return { activity, attentionChanged: false };
+    }
+
     let activity: import('../types/index.js').SessionActivitySnapshot | null;
     if (!session.backendSessionId) {
       activity = deriveFallbackSessionActivity(taskId, session.id, session.status);
     } else {
-      const backend = this.getBackend(session.backendType);
+      const backend = this.getBackend();
       const info = await backend.inspect(session.backendSessionId);
       if (!info) {
         activity = {
@@ -637,8 +605,12 @@ export class SessionManager {
 
     const session = rowToRecord(row);
     if (session.backendSessionId) {
-      const backend = this.getBackend(session.backendType);
-      await backend.terminate(session.backendSessionId);
+      if (session.backendType === 'tmux') {
+        killLegacyTmuxSession(session.backendSessionId);
+      } else {
+        const backend = this.getBackend();
+        await backend.terminate(session.backendSessionId);
+      }
     }
 
     this.buffers.destroy(session.taskId, session.slot);
@@ -655,14 +627,6 @@ export class SessionManager {
   }
 
   async recreateSession(taskId: string, slot: SessionSlot = 'primary'): Promise<SessionRecord> {
-    return this.recreateSessionWithPreferredBackend(taskId, slot);
-  }
-
-  private async recreateSessionWithPreferredBackend(
-    taskId: string,
-    slot: SessionSlot,
-    preferredBackend?: SessionBackendType,
-  ): Promise<SessionRecord> {
     const existing = this.getSession(taskId, slot);
     if (existing) {
       await this.terminateSession(existing.id);
@@ -670,7 +634,7 @@ export class SessionManager {
 
     await this.board.clearTaskSession?.(taskId, slot);
 
-    return this.openSessionWithPreferredBackend(taskId, slot, preferredBackend);
+    return this.openSessionInner(taskId, slot);
   }
 
   async setDualSessionMode(taskId: string, enabled: boolean): Promise<void> {
@@ -710,8 +674,17 @@ export class SessionManager {
       const session = rowToRecord(row);
       if (!session.backendSessionId) continue;
 
+      if (session.backendType === 'tmux') {
+        this.db
+          .prepare<[string, number, string], void>(
+            'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
+          )
+          .run('orphaned', Date.now(), session.id);
+        continue;
+      }
+
       try {
-        const backend = this.getBackend(session.backendType);
+        const backend = this.getBackend();
         const info = await backend.inspect(session.backendSessionId);
         if (!info) {
           this.db

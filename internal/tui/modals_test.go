@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -298,6 +299,7 @@ func TestOpenAIChatModalResetsContext(t *testing.T) {
 			Input:      "stale",
 			Transcript: []ChatMessage{{Role: "assistant", Content: "old"}},
 			Executions: []ChatToolExecution{{ToolName: "create_task", Status: "completed"}},
+			LastError:  "old error",
 		},
 	}
 
@@ -314,6 +316,9 @@ func TestOpenAIChatModalResetsContext(t *testing.T) {
 	}
 	if len(model.aiChatModal.Executions) != 0 {
 		t.Fatalf("Executions length = %d, want 0", len(model.aiChatModal.Executions))
+	}
+	if model.aiChatModal.LastError != "" {
+		t.Fatalf("LastError = %q, want empty", model.aiChatModal.LastError)
 	}
 }
 
@@ -404,6 +409,42 @@ func TestChatTurnReadOnlyResultKeepsAIChatModalOpen(t *testing.T) {
 	}
 }
 
+func TestChatTurnErrorKeepsAIChatModalOpenAndStoresError(t *testing.T) {
+	model := &Model{
+		modal: ModalAIChat,
+		focus: FocusModal,
+		aiChatModal: &aiChatModalState{
+			Pending:       true,
+			PendingPrompt: "hello",
+		},
+	}
+
+	nextModel, cmd := model.Update(chatTurnMsg{
+		err: errors.New("Ollama request failed with 500: model requires more system memory"),
+	})
+
+	if cmd != nil {
+		t.Fatal("Update(chatTurnMsg) returned cmd, want nil")
+	}
+
+	updated := nextModel.(*Model)
+	if updated.modal != ModalAIChat {
+		t.Fatalf("modal = %q, want %q", updated.modal, ModalAIChat)
+	}
+	if updated.aiChatModal == nil {
+		t.Fatal("aiChatModal = nil, want state")
+	}
+	if updated.aiChatModal.Pending {
+		t.Fatal("Pending = true, want false")
+	}
+	if updated.aiChatModal.Input != "hello" {
+		t.Fatalf("Input = %q, want %q", updated.aiChatModal.Input, "hello")
+	}
+	if updated.aiChatModal.LastError != "Ollama request failed with 500: model requires more system memory" {
+		t.Fatalf("LastError = %q, want stored error", updated.aiChatModal.LastError)
+	}
+}
+
 func TestRenderAIChatModalShowsTranscriptAndExecution(t *testing.T) {
 	model := &Model{
 		aiChatModal: &aiChatModalState{
@@ -414,6 +455,7 @@ func TestRenderAIChatModalShowsTranscriptAndExecution(t *testing.T) {
 			Executions: []ChatToolExecution{
 				{ToolName: "create_task", Status: "completed", Summary: "Created task API"},
 			},
+			LastError: "Ollama request failed with 500: model requires more system memory",
 		},
 	}
 
@@ -427,5 +469,11 @@ func TestRenderAIChatModalShowsTranscriptAndExecution(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "create_task") {
 		t.Fatalf("rendered modal missing tool execution:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "REQUEST FAILED") {
+		t.Fatalf("rendered modal missing error section:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "model requires more system memory") {
+		t.Fatalf("rendered modal missing error detail:\n%s", rendered)
 	}
 }

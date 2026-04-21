@@ -77,7 +77,7 @@ describe('terminal render snapshot', () => {
     terminal.dispose();
   });
 
-  it('rebuilds styled lines from tmux capture output', async () => {
+  it('rebuilds styled lines from capture-style output', async () => {
     const snapshot = await renderAnsiCapture(
       '\u001b[31mred\u001b[0m plain',
       40,

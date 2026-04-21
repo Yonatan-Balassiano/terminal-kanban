@@ -669,6 +669,21 @@ func renderAIChatModal(m *Model) string {
 		lines = append(lines, "")
 	}
 
+	if state.LastError != "" {
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Warning)).Render("Last Error"))
+		lines = append(lines, lipgloss.NewStyle().
+			Width(aiChatModalWidth-4).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(uiChrome.Danger)).
+			Padding(0, 1).
+			Render(
+				lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Danger)).Bold(true).Render("REQUEST FAILED")+"\n"+
+					lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(wrapText(state.LastError, aiChatModalWidth-8)),
+			),
+		)
+		lines = append(lines, "")
+	}
+
 	inputLabel := ": " + state.Input
 	if state.Pending {
 		inputLabel = ": waiting for response..."

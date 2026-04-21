@@ -26,6 +26,7 @@ export interface ServiceContainer {
   ollama?: import('../services/ollama.js').ManagedOllamaService;
   db: import('../db/index.js').Db;
   dbPath: string;
+  logError?: (message: string, error?: unknown) => void;
 }
 
 // --------------- PID file helpers ---------------------------
@@ -100,6 +101,19 @@ function appendLog(logFile: string, message: string): void {
   } catch {
     // Best-effort logging; never crash the daemon over a log write failure.
   }
+}
+
+function appendErrorLog(logFile: string, message: string, error: unknown): void {
+  if (error instanceof Error) {
+    const stack = error.stack?.trim();
+    appendLog(
+      logFile,
+      stack && stack !== error.message ? `${message}: ${error.message}\n${stack}` : `${message}: ${error.message}`,
+    );
+    return;
+  }
+
+  appendLog(logFile, `${message}: ${String(error)}`);
 }
 
 export function warmOllamaOnStartup(
@@ -342,6 +356,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const { AIChatService } = await import('../services/ai-chat.js');
   const { ManagedOllamaService } = await import('../services/ollama.js');
   const { serverEvents, startServer } = await import('./server.js');
+  const { shouldEmitSessionUpdate } = await import('./session-update-watch.js');
   const { loadConfig, defaultConfig } = await import('../config/index.js');
 
   let cfg = defaultConfig();
@@ -362,6 +377,9 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const buffers = new TerminalBufferService();
   const worktrees = new WorktreeService(db, board, git);
   const session = new SessionManager(db, board, worktrees, buffers, (taskId, slot, buffer) => {
+    if (!shouldEmitSessionUpdate(taskId)) {
+      return;
+    }
     serverEvents.emit('event', {
       type: 'session_update',
       payload: { taskId, slot, ...buffer },
@@ -435,6 +453,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const services: ServiceContainer = {
     db,
     dbPath: opts.dbPath,
+    logError: (message, error) => appendErrorLog(opts.logFile, `[daemon] ${message}`, error),
     board,
     missions,
     workspace,

@@ -374,6 +374,38 @@ describe('daemon chatTurn dispatch', () => {
       vi.useRealTimers();
     }
   });
+
+  it('logs chatTurn failures before returning the RPC error', async () => {
+    const error = new Error('Ollama request failed with 500: model requires more system memory');
+    const chatTurn = vi.fn().mockRejectedValue(error);
+    const logError = vi.fn();
+
+    const response = await dispatch(
+      {
+        id: 'req-chat-fail',
+        method: 'chatTurn',
+        params: {
+          prompt: 'hello',
+          transcript: [],
+          context: { activeRepoId: 'repo-1' },
+        },
+      },
+      {
+        aiChat: { chatTurn },
+        logError,
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(logError).toHaveBeenCalledWith('RPC chatTurn failed (id=req-chat-fail)', error);
+    expect(response).toEqual({
+      id: 'req-chat-fail',
+      error: {
+        code: -32000,
+        message: 'Ollama request failed with 500: model requires more system memory',
+      },
+    });
+  });
 });
 
 describe('daemon schedulePostPushSync dispatch', () => {

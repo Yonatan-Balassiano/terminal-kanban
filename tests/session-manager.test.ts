@@ -22,7 +22,7 @@ class TestSessionManager extends SessionManager {
       write(taskId: string, data: string): void;
       has(taskId: string): boolean;
       getBuffer(taskId: string): GetBufferResult;
-      subscribeAll(cb: (taskId: string, buffer: GetBufferResult) => void): () => void;
+      subscribeAll(cb: (taskId: string, _slot: string, buffer: GetBufferResult) => void): () => void;
       destroy(taskId: string): void;
     },
     worktrees: {
@@ -48,7 +48,7 @@ class ProcessTableSessionManager extends TestSessionManager {
       write(taskId: string, data: string): void;
       has(taskId: string): boolean;
       getBuffer(taskId: string): GetBufferResult;
-      subscribeAll(cb: (taskId: string, buffer: GetBufferResult) => void): () => void;
+      subscribeAll(cb: (taskId: string, _slot: string, buffer: GetBufferResult) => void): () => void;
       destroy(taskId: string): void;
     },
     worktrees: {
@@ -93,9 +93,9 @@ describe('SessionManager branch fallback', () => {
     const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
       id: 'session-1',
       taskId: opts.taskId,
-      backendType: 'tmux',
+      backendType: 'pty',
       backendSessionId: 'ab_friday_thing_1234',
-      attachCommand: 'tmux attach -t ab_friday_thing_1234',
+      attachCommand: undefined,
       status: 'active',
       cwd: opts.cwd ?? opts.repoPath,
       branch: opts.branch,
@@ -106,7 +106,7 @@ describe('SessionManager branch fallback', () => {
     const backend: SessionBackend = {
       create,
       attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
-        command: 'tmux attach -t ab_friday_thing_1234',
+        command: '(embedded PTY — attach not supported)',
       })),
       sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
       resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
@@ -159,9 +159,9 @@ describe('SessionManager branch fallback', () => {
     const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
       id: 'session-1',
       taskId: opts.taskId,
-      backendType: 'tmux',
+      backendType: 'pty',
       backendSessionId: 'ab_use_codex_1234',
-      attachCommand: 'tmux attach -t ab_use_codex_1234',
+      attachCommand: undefined,
       status: 'active',
       cwd: opts.cwd ?? opts.repoPath,
       branch: opts.branch,
@@ -172,7 +172,7 @@ describe('SessionManager branch fallback', () => {
     const backend: SessionBackend = {
       create,
       attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
-        command: 'tmux attach -t ab_use_codex_1234',
+        command: '(embedded PTY — attach not supported)',
       })),
       sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
       resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
@@ -216,6 +216,70 @@ describe('SessionManager branch fallback', () => {
     );
   });
 
+  it('passes the stored repo default base branch into new session creation', async () => {
+    db.prepare('UPDATE repos SET default_base_branch = ? WHERE id = ?').run('master', 'repo-1');
+    const task = board.createTask({ title: 'Use master', repoId: 'repo-1' });
+
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'pty',
+      backendSessionId: 'ab_use_master_1234',
+      attachCommand: undefined,
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    await manager.openSession(task.id);
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.id,
+        baseBranch: 'master',
+      }),
+    );
+  });
+
   it('migrates a stored legacy branch to the title-based format on reattach', async () => {
     const task = board.createTask({ title: 'RL noes', repoId: 'repo-1' });
     board.setTaskBranch(task.id, `ab/${task.id}`);
@@ -229,9 +293,9 @@ describe('SessionManager branch fallback', () => {
     ).run(
       'session-1',
       task.id,
-      'tmux',
+      'pty',
       'ab_task_1',
-      'tmux attach -t ab_task_1',
+      null,
       'active',
       '/tmp/repo-1',
       `ab/${task.id}`,
@@ -246,7 +310,7 @@ describe('SessionManager branch fallback', () => {
         throw new Error('should not create a new session');
       }),
       attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
-        command: 'tmux attach -t ab_task_1',
+        command: '(embedded PTY — attach not supported)',
       })),
       sendInput,
       resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
@@ -308,9 +372,9 @@ describe('SessionManager branch fallback', () => {
     ).run(
       'session-1',
       task.id,
-      'tmux',
+      'pty',
       'ab_friday_thing_1234',
-      'tmux attach -t ab_friday_thing_1234',
+      null,
       'active',
       '/tmp/repo-1',
       task.branchName,
@@ -325,7 +389,7 @@ describe('SessionManager branch fallback', () => {
         throw new Error('should not create a new session');
       }),
       attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
-        command: 'tmux attach -t ab_friday_thing_1234',
+        command: '(embedded PTY — attach not supported)',
       })),
       sendInput,
       resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),

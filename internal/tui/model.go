@@ -157,6 +157,7 @@ type Model struct {
 	buffer                        GetBufferResult
 	secondaryBuffer               GetBufferResult
 	spinnerIndex                  int
+	spinnerChainActive            bool
 	terminalCommand               string
 	secondaryTerminalCommand      string
 	pendingTerminalInput          string
@@ -217,7 +218,6 @@ func (m *Model) Init() tea.Cmd {
 		m.subscribeCmd(),
 		m.loadBoardCmd(),
 		waitForEventCmd(m.client.Events()),
-		spinnerTickCmd(),
 		sessionPollTickCmd(),
 	)
 }
@@ -242,6 +242,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		m.spinnerIndex = (m.spinnerIndex + 1) % len(spinnerFrames)
+		if !m.needsSpinnerTick() {
+			m.spinnerChainActive = false
+			return m, nil
+		}
+		m.spinnerChainActive = true
 		return m, spinnerTickCmd()
 
 	case flushTerminalInputMsg:
@@ -285,7 +290,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applyBoard(msg.board)
-		return m, m.syncSessionUpdateWatchCmd()
+		cmds := []tea.Cmd{m.syncSessionUpdateWatchCmd()}
+		if spin := m.startSpinnerChainCmd(); spin != nil {
+			cmds = append(cmds, spin)
+		}
+		return m, tea.Batch(cmds...)
 
 	case boardActionMsg:
 		if msg.err != nil {
@@ -315,6 +324,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeTaskID != "" && m.terminalPaneShouldRender() {
 			commands = append(commands, m.loadVisibleTerminalStateCmd())
 		}
+		if spin := m.startSpinnerChainCmd(); spin != nil {
+			commands = append(commands, spin)
+		}
 		return m, tea.Batch(commands...)
 
 	case sessionOpenedMsg:
@@ -340,11 +352,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.setSessionActivity(msg.taskID, msg.slot, msg.activity)
 		}
 		m.statusMessage = "Opened task shell."
-		return m, tea.Batch(
+		cmds := []tea.Cmd{
 			m.syncSessionUpdateWatchCmd(),
 			m.resizeActiveSessionCmd(),
 			m.loadVisibleTerminalStateCmd(),
-		)
+		}
+		if spin := m.startSpinnerChainCmd(); spin != nil {
+			cmds = append(cmds, spin)
+		}
+		return m, tea.Batch(cmds...)
 
 	case bufferLoadedMsg:
 		if msg.err == nil && msg.taskID == m.activeTaskID {
@@ -361,6 +377,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.setSessionActivity(msg.taskID, msg.slot, msg.activity)
+		if spin := m.startSpinnerChainCmd(); spin != nil {
+			return m, spin
+		}
 		return m, nil
 
 	case asyncErrorMsg:
@@ -377,10 +396,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.aiChatModal.Input = m.aiChatModal.PendingPrompt
 			m.aiChatModal.PendingPrompt = ""
+			m.aiChatModal.LastError = msg.err.Error()
 			m.statusMessage = msg.err.Error()
 			return m, nil
 		}
 		m.aiChatModal.PendingPrompt = ""
+		m.aiChatModal.LastError = ""
 		m.aiChatModal.Transcript = append([]ChatMessage{}, msg.result.Transcript...)
 		m.aiChatModal.Executions = append([]ChatToolExecution{}, msg.result.Executions...)
 		if shouldAutoCloseAIChatModal(msg.result.Executions) {
@@ -472,6 +493,9 @@ func (m *Model) handleRPCEvent(event RPCEvent) tea.Cmd {
 			} else {
 				m.syncInProgress = false
 			}
+		}
+		if spin := m.startSpinnerChainCmd(); spin != nil {
+			return spin
 		}
 		return nil
 	default:
@@ -1020,12 +1044,36 @@ func waitForEventCmd(events <-chan RPCEvent) tea.Cmd {
 	}
 }
 
+
+func (m *Model) needsSpinnerTick() bool {
+	if m.syncInProgress {
+		return true
+	}
+	if m.aiChatModal != nil && m.aiChatModal.Pending {
+		return true
+	}
+	for _, a := range m.sessionActivityByKey {
+		if a != nil && a.IsBusy {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) startSpinnerChainCmd() tea.Cmd {
+	if !m.needsSpinnerTick() || m.spinnerChainActive {
+		return nil
+	}
+	m.spinnerChainActive = true
+	return spinnerTickCmd()
+}
+
 func spinnerTickCmd() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(_ time.Time) tea.Msg { return spinnerTickMsg{} })
 }
 
 func sessionPollTickCmd() tea.Cmd {
-	return tea.Tick(1500*time.Millisecond, func(_ time.Time) tea.Msg { return sessionPollTickMsg{} })
+	return tea.Tick(2500*time.Millisecond, func(_ time.Time) tea.Msg { return sessionPollTickMsg{} })
 }
 
 func (m *Model) boardActionCmd(method string, params interface{}, status string) tea.Cmd {
@@ -1178,7 +1226,11 @@ func (m *Model) sendInputCmd(taskID string, slot SessionSlot, data string) tea.C
 
 func (m *Model) syncCmd() tea.Cmd {
 	m.syncInProgress = true
-	return m.boardActionCmd("triggerSync", nil, "Sync complete.")
+	base := m.boardActionCmd("triggerSync", nil, "Sync complete.")
+	if spin := m.startSpinnerChainCmd(); spin != nil {
+		return tea.Batch(base, spin)
+	}
+	return base
 }
 
 func (m *Model) createTaskPRCmd(task *TaskRecord) tea.Cmd {

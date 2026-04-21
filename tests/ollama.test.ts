@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ManagedOllamaService } from '../src/services/ollama.js';
+import { ManagedOllamaService, OllamaClient } from '../src/services/ollama.js';
 import type { AIChatConfig } from '../src/types/index.js';
 
 function jsonResponse(payload: unknown, status = 200): Response {
+  const body = JSON.stringify(payload);
   return {
     ok: status >= 200 && status < 300,
     status,
     json: async () => payload,
+    text: async () => body,
   } as Response;
 }
 
@@ -83,5 +85,19 @@ describe('ManagedOllamaService', () => {
 
     const warmCalls = fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/chat'));
     expect(warmCalls).toHaveLength(2);
+  });
+
+  it('includes Ollama response details when chat returns 500', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: 'model requires more system memory' }, 500));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const client = new OllamaClient(config);
+
+    await expect(
+      client.chat(
+        [{ role: 'user', content: 'hello' }],
+        [],
+      ),
+    ).rejects.toThrow('Ollama request failed with 500: model requires more system memory');
   });
 });

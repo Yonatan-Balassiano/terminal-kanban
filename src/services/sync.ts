@@ -67,6 +67,15 @@ function sameValue(left: unknown, right: unknown): boolean {
   return left === right;
 }
 
+function normalizeBaseBranch(value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return normalized ? normalized : undefined;
+}
+
 export class SyncService {
   private board: BoardService;
   private missions?: Pick<MissionService, 'reconcileTaskCompletion'>;
@@ -460,11 +469,11 @@ export class SyncService {
     const repoPath = repoRow['path'] as string;
     const githubOwner = (repoRow['github_owner'] as string | null) ?? undefined;
     const githubRepo = (repoRow['github_repo'] as string | null) ?? undefined;
-    const storedBaseBranch = (repoRow['default_base_branch'] as string | null) ?? 'main';
-    const detectedBaseBranch = await this.git.defaultBranch(repoPath);
-    const baseBranch = detectedBaseBranch || storedBaseBranch;
+    const storedBaseBranch = normalizeBaseBranch(repoRow['default_base_branch'] as string | null);
+    let baseBranch = storedBaseBranch;
 
-    if (baseBranch !== storedBaseBranch) {
+    if (!baseBranch) {
+      baseBranch = normalizeBaseBranch(await this.git.defaultBranch(repoPath)) ?? 'main';
       this.db
         .prepare<[string, number, string], void>(
           'UPDATE repos SET default_base_branch = ?, updated_at = ? WHERE id = ?',

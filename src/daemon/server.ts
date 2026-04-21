@@ -48,6 +48,7 @@ import type {
   SetDualSessionModeParams,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
+import { trackWatchedSessionTask } from './session-update-watch.js';
 
 // --------------- Server event emitter -----------------------
 
@@ -601,6 +602,7 @@ export async function dispatch(
       }
     }
   } catch (err: unknown) {
+    services.logError?.(`RPC ${req.method} failed (id=${req.id})`, err);
     const message = err instanceof Error ? err.message : String(err);
     return { id: req.id, error: { code: -32000, message } };
   }
@@ -687,7 +689,9 @@ export function startServer(socketPath: string, services: ServiceContainer): net
             typeof (req.params as { taskId?: unknown } | null)?.taskId === 'string'
               ? ((req.params as { taskId?: string }).taskId ?? '').trim()
               : '';
-          watchedSessionTaskId = taskId.length > 0 ? taskId : null;
+          const nextWatch = taskId.length > 0 ? taskId : null;
+          trackWatchedSessionTask(watchedSessionTaskId, nextWatch);
+          watchedSessionTaskId = nextWatch;
           writeResponse({
             id: req.id,
             result: { watchingTaskId: watchedSessionTaskId },
@@ -719,6 +723,8 @@ export function startServer(socketPath: string, services: ServiceContainer): net
 
     socket.on('close', () => {
       subscribed = false;
+      trackWatchedSessionTask(watchedSessionTaskId, null);
+      watchedSessionTaskId = null;
       if (removeListener) {
         removeListener();
         removeListener = null;

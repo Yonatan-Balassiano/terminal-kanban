@@ -171,7 +171,7 @@ function defaultAIChatConfig(): AIChatConfig {
 
 export function defaultConfig(): AppConfig {
   return {
-    sessionBackend: 'tmux' as SessionBackendType,
+    sessionBackend: 'pty' as SessionBackendType,
     sessionBootstrapScript: bundledSessionBootstrapScriptPath(),
     pollIntervalMs: 60000,
     aiChat: defaultAIChatConfig(),

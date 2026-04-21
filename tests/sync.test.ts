@@ -136,6 +136,90 @@ describe('SyncService', () => {
     });
   });
 
+  it('uses the stored repo default base branch without overwriting it during sync', async () => {
+    const { board } = makeBoard();
+    const prInfo = makePrInfo();
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue(null),
+      getPR: vi.fn(),
+      createPR: vi.fn().mockResolvedValue(prInfo),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const statement = {
+      get: vi.fn().mockReturnValue(makeRepoRow({ default_base_branch: 'master' })),
+      run: vi.fn(),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue(statement),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+    await sync.trigger();
+
+    expect(git.defaultBranch).not.toHaveBeenCalled();
+    expect(statement.run).not.toHaveBeenCalled();
+    expect(github.createPR).toHaveBeenCalledWith('/repo', {
+      githubRepo: 'org/proj',
+      branch: 'ab/task-1',
+      baseBranch: 'master',
+      title: '[auto|task-1] My task',
+      body: 'Created by AgentBoard for task task-1.',
+    });
+  });
+
+  it('backfills the repo default base branch from git only when the DB value is missing', async () => {
+    const { board } = makeBoard();
+    const prInfo = makePrInfo();
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue(null),
+      getPR: vi.fn(),
+      createPR: vi.fn().mockResolvedValue(prInfo),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('master'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const statement = {
+      get: vi.fn().mockReturnValue(makeRepoRow({ default_base_branch: null })),
+      run: vi.fn(),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue(statement),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+    await sync.trigger();
+
+    expect(git.defaultBranch).toHaveBeenCalledWith('/repo');
+    expect(statement.run).toHaveBeenCalledWith('master', expect.any(Number), 'repo-1');
+    expect(github.createPR).toHaveBeenCalledWith('/repo', {
+      githubRepo: 'org/proj',
+      branch: 'ab/task-1',
+      baseBranch: 'master',
+      title: '[auto|task-1] My task',
+      body: 'Created by AgentBoard for task task-1.',
+    });
+  });
+
   it('retries remote branch detection during a manual sync before creating a PR', async () => {
     const { board } = makeBoard();
     const prInfo = makePrInfo();
