@@ -13,6 +13,7 @@ import type {
   AIChatConfig,
   RepoOverlayConfig,
   SessionBackendType,
+  TmuxConfig,
 } from '../types/index.js';
 
 // ============================================================
@@ -29,15 +30,9 @@ const FilterModelSchema = z.object({
   pillarIds: z.array(z.string()).optional(),
   labelIds: z.array(z.string()).optional(),
   trackIds: z.array(z.string()).optional(),
-  prState: z
-    .array(z.enum(['none', 'draft', 'open', 'merged', 'closed'] as const))
-    .optional(),
-  ciState: z
-    .array(z.enum(['none', 'pending', 'failed', 'passed'] as const))
-    .optional(),
-  sessionState: z
-    .array(z.enum(['active', 'idle', 'orphaned', 'terminated'] as const))
-    .optional(),
+  prState: z.array(z.enum(['none', 'draft', 'open', 'merged', 'closed'] as const)).optional(),
+  ciState: z.array(z.enum(['none', 'pending', 'failed', 'passed'] as const)).optional(),
+  sessionState: z.array(z.enum(['active', 'idle', 'orphaned', 'terminated'] as const)).optional(),
   searchText: z.string().optional(),
   includeArchived: z.boolean().optional(),
 });
@@ -95,6 +90,11 @@ const AIChatConfigSchema = z.object({
   systemPrompt: z.string().optional(),
 });
 
+const TmuxConfigSchema = z.object({
+  autoLayout: z.boolean().optional(),
+  layoutSessionName: z.string().min(1).optional(),
+});
+
 /**
  * Full AppConfig schema — used when reading from disk.
  * Fields are individually optional so partial configs on disk are tolerated;
@@ -104,6 +104,7 @@ const AIChatConfigSchema = z.object({
 export const AppConfigSchema = z
   .object({
     sessionBackend: SessionBackendTypeSchema,
+    tmux: TmuxConfigSchema,
     sessionBootstrapScript: z.string(),
     pollIntervalMs: z.number().int().positive(),
     githubTokenEnvVar: z.string().optional(),
@@ -171,7 +172,11 @@ function defaultAIChatConfig(): AIChatConfig {
 
 export function defaultConfig(): AppConfig {
   return {
-    sessionBackend: 'pty' as SessionBackendType,
+    sessionBackend: 'tmux' as SessionBackendType,
+    tmux: {
+      autoLayout: true,
+      layoutSessionName: 'agentboard',
+    },
     sessionBootstrapScript: bundledSessionBootstrapScriptPath(),
     pollIntervalMs: 60000,
     aiChat: defaultAIChatConfig(),
@@ -258,7 +263,7 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
       ...merged,
       sessionBootstrapScript: resolveSessionBootstrapScriptPath(
         merged.sessionBootstrapScript,
-        configDir,
+        configDir
       ),
     };
   }
@@ -268,7 +273,7 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
     raw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
   } catch (err) {
     throw new Error(
-      `AgentBoard: failed to read config file at ${configFile}: ${(err as Error).message}`,
+      `AgentBoard: failed to read config file at ${configFile}: ${(err as Error).message}`
     );
   }
 
@@ -280,7 +285,7 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
       .join('\n');
     console.error(
       `AgentBoard: config validation failed for the following fields:\n${summary}\n` +
-        `Falling back to default values for invalid fields.`,
+        `Falling back to default values for invalid fields.`
     );
     // Collect the field paths that are invalid so we can strip them
     const invalidPaths = new Set(issues.map((i) => i.path[0]?.toString() ?? ''));
@@ -299,7 +304,7 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
       ...merged,
       sessionBootstrapScript: resolveSessionBootstrapScriptPath(
         merged.sessionBootstrapScript,
-        configDir,
+        configDir
       ),
     };
   }
@@ -309,7 +314,7 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
     ...merged,
     sessionBootstrapScript: resolveSessionBootstrapScriptPath(
       merged.sessionBootstrapScript,
-      configDir,
+      configDir
     ),
   };
 }
@@ -334,7 +339,7 @@ export function loadRepoOverlay(repoPath: string): RepoOverlayConfig | null {
     raw = JSON.parse(fs.readFileSync(overlayFile, 'utf8'));
   } catch (err) {
     throw new Error(
-      `AgentBoard: failed to read repo overlay at ${overlayFile}: ${(err as Error).message}`,
+      `AgentBoard: failed to read repo overlay at ${overlayFile}: ${(err as Error).message}`
     );
   }
 
@@ -344,9 +349,7 @@ export function loadRepoOverlay(repoPath: string): RepoOverlayConfig | null {
     const summary = issues
       .map((i) => `  • ${i.path.join('.') || '(root)'}: ${i.message}`)
       .join('\n');
-    throw new Error(
-      `AgentBoard: repo overlay at ${overlayFile} has invalid fields:\n${summary}`,
-    );
+    throw new Error(`AgentBoard: repo overlay at ${overlayFile} has invalid fields:\n${summary}`);
   }
 
   return result.data as RepoOverlayConfig;
@@ -431,14 +434,21 @@ export function ensureDirectories(): void {
  * Merges one or more partial configs on top of a base config.
  * Only defined (non-undefined) values from each partial are applied.
  */
-function mergePartial(
-  base: AppConfig,
-  ...partials: (Partial<AppConfig> | undefined)[]
-): AppConfig {
+function mergePartial(base: AppConfig, ...partials: (Partial<AppConfig> | undefined)[]): AppConfig {
   let result: AppConfig = { ...base };
   for (const partial of partials) {
     if (!partial) continue;
-    result = { ...result, ...removeUndefined(partial) };
+    const cleaned = removeUndefined(partial) as Partial<AppConfig> & {
+      tmux?: Partial<TmuxConfig>;
+    };
+    const { tmux, ...rest } = cleaned;
+    result = { ...result, ...rest };
+    if (tmux !== undefined) {
+      result.tmux = {
+        ...result.tmux,
+        ...removeUndefined(tmux),
+      };
+    }
   }
   return result;
 }

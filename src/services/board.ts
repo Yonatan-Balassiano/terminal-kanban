@@ -642,6 +642,8 @@ export class BoardService {
       state.terminalPaneVisible = map.get('terminalPaneVisible') as boolean;
     if (map.has('terminalLayoutMode'))
       state.terminalLayoutMode = map.get('terminalLayoutMode') as import('../types/index.js').TerminalLayoutMode;
+    if (map.has('terminalPaneWidth'))
+      state.terminalPaneWidth = map.get('terminalPaneWidth') as number;
     if (map.has('missionsPaneExpanded'))
       state.missionsPaneExpanded = map.get('missionsPaneExpanded') as boolean;
     if (map.has('themeMode')) state.themeMode = map.get('themeMode') as ThemeMode;

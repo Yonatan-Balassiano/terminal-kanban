@@ -11,6 +11,7 @@ import type {
   CreateSessionOpts,
   GetBufferResult,
   SessionBackend,
+  SessionBackendType,
   SessionRecord,
 } from '../src/types/index.js';
 
@@ -22,13 +23,15 @@ class TestSessionManager extends SessionManager {
       write(taskId: string, data: string): void;
       has(taskId: string): boolean;
       getBuffer(taskId: string): GetBufferResult;
-      subscribeAll(cb: (taskId: string, _slot: string, buffer: GetBufferResult) => void): () => void;
+      subscribeAll(
+        cb: (taskId: string, _slot: string, buffer: GetBufferResult) => void
+      ): () => void;
       destroy(taskId: string): void;
     },
     worktrees: {
       prepareTaskWorkspace(taskId: string): TaskWorkspaceInfo;
     },
-    private backend: SessionBackend,
+    private backend: SessionBackend
   ) {
     super(db, board, worktrees as never, buffers as never);
   }
@@ -48,14 +51,16 @@ class ProcessTableSessionManager extends TestSessionManager {
       write(taskId: string, data: string): void;
       has(taskId: string): boolean;
       getBuffer(taskId: string): GetBufferResult;
-      subscribeAll(cb: (taskId: string, _slot: string, buffer: GetBufferResult) => void): () => void;
+      subscribeAll(
+        cb: (taskId: string, _slot: string, buffer: GetBufferResult) => void
+      ): () => void;
       destroy(taskId: string): void;
     },
     worktrees: {
       prepareTaskWorkspace(taskId: string): TaskWorkspaceInfo;
     },
     backend: SessionBackend,
-    private processRows: ProcessRow[] | null,
+    private processRows: ProcessRow[] | null
   ) {
     super(db, board, buffers, worktrees, backend);
   }
@@ -64,6 +69,32 @@ class ProcessTableSessionManager extends TestSessionManager {
     this.processTableLoads += 1;
     await new Promise((resolve) => setTimeout(resolve, 1));
     return this.processRows;
+  }
+}
+
+class BackendSelectingSessionManager extends SessionManager {
+  constructor(
+    db: Db,
+    board: BoardService,
+    buffers: {
+      write(taskId: string, slot: string, data: string): void;
+      has(taskId: string, slot?: string): boolean;
+      getBuffer(taskId: string, slot?: string): GetBufferResult;
+      subscribeAll(cb: (taskId: string, slot: string, buffer: GetBufferResult) => void): () => void;
+      destroy(taskId: string, slot?: string): void;
+      resize(taskId: string, slot: string, cols: number, rows: number): void;
+    },
+    worktrees: {
+      prepareTaskWorkspace(taskId: string): TaskWorkspaceInfo;
+    },
+    private selectableBackends: Record<SessionBackendType, SessionBackend>,
+    sessionBackend: SessionBackendType
+  ) {
+    super(db, board, worktrees as never, buffers as never, undefined, '', sessionBackend);
+  }
+
+  protected override createBackend(backendType: SessionBackendType): SessionBackend {
+    return this.selectableBackends[backendType];
   }
 }
 
@@ -78,7 +109,7 @@ describe('SessionManager branch fallback', () => {
       `INSERT INTO repos
          (id, label, path, github_owner, github_repo, default_base_branch,
           default_pillar_id, health, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
   });
 
@@ -137,7 +168,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     const session = await manager.openSession(task.id);
@@ -147,7 +178,7 @@ describe('SessionManager branch fallback', () => {
       expect.objectContaining({
         taskTitle: 'Friday thing',
         branch: expect.stringMatching(/^ab\/friday-thing-\d{4}$/),
-      }),
+      })
     );
     expect(board.getTask(task.id)?.branchName).toBe(session.branch);
     expect(board.getTask(task.id)?.trackId).toBe('in-progress');
@@ -203,7 +234,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     await manager.openSession(task.id);
@@ -212,7 +243,7 @@ describe('SessionManager branch fallback', () => {
       expect.objectContaining({
         taskId: task.id,
         agentCli: 'codex',
-      }),
+      })
     );
   });
 
@@ -267,7 +298,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     await manager.openSession(task.id);
@@ -276,8 +307,174 @@ describe('SessionManager branch fallback', () => {
       expect.objectContaining({
         taskId: task.id,
         baseBranch: 'master',
-      }),
+      })
     );
+  });
+
+  it('selects the configured tmux backend for new sessions', async () => {
+    const task = board.createTask({ title: 'Use tmux', repoId: 'repo-1' });
+
+    const tmuxCreate = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-tmux',
+      taskId: opts.taskId,
+      slot: opts.slot,
+      backendType: 'tmux',
+      backendSessionId: 'ab_use_tmux_1234_p',
+      attachCommand: 'env -u TMUX tmux attach-session -t ab_use_tmux_1234_p',
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+    const ptyCreate = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
+      throw new Error('pty backend should not be selected');
+    });
+
+    const backends: Record<SessionBackendType, SessionBackend> = {
+      tmux: {
+        create: tmuxCreate,
+        attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async (id) => ({
+          command: `env -u TMUX tmux attach-session -t ${id}`,
+        })),
+        sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+        resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+        list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+        inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+        terminate: vi.fn<[string], Promise<void>>(async () => {}),
+        healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+      },
+      pty: {
+        create: ptyCreate,
+        attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+          command: '(embedded PTY — attach not supported)',
+        })),
+        sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+        resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+        list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+        inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+        terminate: vi.fn<[string], Promise<void>>(async () => {}),
+        healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+      },
+    };
+
+    const manager = new BackendSelectingSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+        resize() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backends,
+      'tmux'
+    );
+
+    const session = await manager.openSession(task.id);
+
+    expect(session.backendType).toBe('tmux');
+    expect(tmuxCreate).toHaveBeenCalledWith(expect.objectContaining({ taskId: task.id }));
+    expect(ptyCreate).not.toHaveBeenCalled();
+    expect(board.getTask(task.id)?.sessionId).toBe('session-tmux');
+  });
+
+  it('reattaches live tmux session rows instead of treating them as legacy orphaned rows', async () => {
+    const task = board.createTask({ title: 'Resume tmux', repoId: 'repo-1' });
+    board.linkSession(task.id, 'session-1');
+
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'session-1',
+      task.id,
+      'tmux',
+      'ab_resume_tmux_1234_p',
+      'env -u TMUX tmux attach-session -t ab_resume_tmux_1234_p',
+      'active',
+      '/tmp/repo-1',
+      task.branchName,
+      1,
+      1,
+      1
+    );
+
+    const inspect = vi.fn<[string], Promise<BackendSessionInfo | null>>(
+      async (backendSessionId) => ({
+        backendSessionId,
+        status: 'active',
+      })
+    );
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
+      throw new Error('should reattach existing tmux session');
+    });
+
+    const tmuxBackend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async (id) => ({
+        command: `env -u TMUX tmux attach-session -t ${id}`,
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect,
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new BackendSelectingSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+        resize() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      {
+        tmux: tmuxBackend,
+        pty: tmuxBackend,
+      },
+      'tmux'
+    );
+
+    const session = await manager.openSession(task.id);
+    const activity = await manager.inspectSession(task.id);
+
+    expect(session.id).toBe('session-1');
+    expect(session.backendType).toBe('tmux');
+    expect(create).not.toHaveBeenCalled();
+    expect(inspect).toHaveBeenCalledWith('ab_resume_tmux_1234_p');
+    expect(activity?.sessionStatus).toBe('active');
   });
 
   it('migrates a stored legacy branch to the title-based format on reattach', async () => {
@@ -289,7 +486,7 @@ describe('SessionManager branch fallback', () => {
       `INSERT INTO sessions
          (id, task_id, backend_type, backend_session_id, attach_command, status,
           cwd, branch, last_heartbeat, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'session-1',
       task.id,
@@ -301,7 +498,7 @@ describe('SessionManager branch fallback', () => {
       `ab/${task.id}`,
       1,
       1,
-      1,
+      1
     );
 
     const sendInput = vi.fn<[string, string], Promise<void>>(async () => {});
@@ -344,7 +541,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     const session = await manager.openSession(task.id);
@@ -354,9 +551,13 @@ describe('SessionManager branch fallback', () => {
     expect(sendInput).toHaveBeenNthCalledWith(
       1,
       'ab_task_1',
-      expect.stringContaining(`git -C ${JSON.stringify('/tmp/repo-1')} checkout ab/${task.id}`),
+      expect.stringContaining(`git -C ${JSON.stringify('/tmp/repo-1')} checkout ab/${task.id}`)
     );
-    expect(sendInput).toHaveBeenNthCalledWith(1, 'ab_task_1', expect.stringContaining(session.branch!));
+    expect(sendInput).toHaveBeenNthCalledWith(
+      1,
+      'ab_task_1',
+      expect.stringContaining(session.branch!)
+    );
     expect(sendInput).toHaveBeenNthCalledWith(2, 'ab_task_1', '\r');
   });
 
@@ -368,7 +569,7 @@ describe('SessionManager branch fallback', () => {
       `INSERT INTO sessions
          (id, task_id, backend_type, backend_session_id, attach_command, status,
           cwd, branch, last_heartbeat, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'session-1',
       task.id,
@@ -380,7 +581,7 @@ describe('SessionManager branch fallback', () => {
       task.branchName,
       1,
       1,
-      1,
+      1
     );
 
     const sendInput = vi.fn<[string, string], Promise<void>>(async () => {});
@@ -423,7 +624,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     const session = await manager.openSession(task.id);
@@ -441,7 +642,7 @@ describe('SessionManager branch fallback', () => {
       `INSERT INTO sessions
          (id, task_id, backend_type, backend_session_id, attach_command, status,
           cwd, branch, last_heartbeat, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'session-1',
       task.id,
@@ -453,7 +654,7 @@ describe('SessionManager branch fallback', () => {
       task.branchName,
       1,
       1,
-      1,
+      1
     );
 
     const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
@@ -503,7 +704,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     const session = await manager.recreateSession(task.id);
@@ -514,7 +715,7 @@ describe('SessionManager branch fallback', () => {
       expect.objectContaining({
         taskId: task.id,
         taskTitle: task.title,
-      }),
+      })
     );
     expect(session.id).toBe('session-2');
     expect(board.getTask(task.id)?.sessionId).toBe('session-2');
@@ -528,7 +729,7 @@ describe('SessionManager branch fallback', () => {
       `INSERT INTO sessions
          (id, task_id, backend_type, backend_session_id, attach_command, status,
           cwd, branch, last_heartbeat, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'session-1',
       task.id,
@@ -540,7 +741,7 @@ describe('SessionManager branch fallback', () => {
       task.branchName,
       1,
       1,
-      1,
+      1
     );
 
     const backend: SessionBackend = {
@@ -579,17 +780,20 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     (
-      manager as { lastBusyBySessionKey: Map<string, boolean>; sessionKey(taskId: string, slot: 'primary' | 'secondary'): string }
+      manager as {
+        lastBusyBySessionKey: Map<string, boolean>;
+        sessionKey(taskId: string, slot: 'primary' | 'secondary'): string;
+      }
     ).lastBusyBySessionKey.set(
       (manager as { sessionKey(taskId: string, slot: 'primary' | 'secondary'): string }).sessionKey(
         task.id,
-        'primary',
+        'primary'
       ),
-      true,
+      true
     );
 
     const result = await manager.inspectSessionState(task.id);
@@ -647,7 +851,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     await manager.openSession(task.id);
@@ -704,7 +908,7 @@ describe('SessionManager branch fallback', () => {
           throw new Error('Git command failed: git worktree add -b "ab/recover-me-1234"');
         },
       },
-      backend,
+      backend
     );
 
     const session = await manager.openSession(task.id);
@@ -716,7 +920,7 @@ describe('SessionManager branch fallback', () => {
         cwd: '/tmp/repo-1',
         usesWorktree: false,
         bootstrapNotice: expect.stringContaining('Git command failed: git worktree add'),
-      }),
+      })
     );
     expect(board.getTask(task.id)?.sessionId).toBe('session-1');
     expect(board.getTask(task.id)?.lastSessionCwd).toBe('/tmp/repo-1');
@@ -731,7 +935,7 @@ describe('SessionManager branch fallback', () => {
       `INSERT INTO sessions
          (id, task_id, backend_type, backend_session_id, attach_command, status,
           cwd, branch, last_heartbeat, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'session-1',
       task.id,
@@ -743,7 +947,7 @@ describe('SessionManager branch fallback', () => {
       task.branchName,
       1,
       1,
-      1,
+      1
     );
 
     const sendInput = vi.fn<[string, string], Promise<void>>(async () => {});
@@ -783,13 +987,13 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
-    const attentionChanged = await manager.sendInput(task.id, "continue\n");
+    const attentionChanged = await manager.sendInput(task.id, 'continue\n');
 
     expect(attentionChanged).toBe(true);
-    expect(sendInput).toHaveBeenCalledWith('ab_continue_me', "continue\n");
+    expect(sendInput).toHaveBeenCalledWith('ab_continue_me', 'continue\n');
     expect(board.getTask(task.id)?.sessionAttentionNeeded).toBe(false);
   });
 
@@ -833,7 +1037,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     const attentionChanged = manager.acknowledgeSessionAttention(task.id);
@@ -852,7 +1056,7 @@ describe('SessionManager branch fallback', () => {
       `INSERT INTO sessions
          (id, task_id, backend_type, backend_session_id, attach_command, status,
           cwd, branch, last_heartbeat, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'session-1',
       first.id,
@@ -864,13 +1068,13 @@ describe('SessionManager branch fallback', () => {
       first.branchName,
       1,
       1,
-      1,
+      1
     );
     db.prepare(
       `INSERT INTO sessions
          (id, task_id, backend_type, backend_session_id, attach_command, status,
           cwd, branch, last_heartbeat, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'session-2',
       second.id,
@@ -882,26 +1086,28 @@ describe('SessionManager branch fallback', () => {
       second.branchName,
       1,
       1,
-      1,
+      1
     );
 
-    const inspect = vi.fn<[string], Promise<BackendSessionInfo | null>>(async (backendSessionId) => {
-      if (backendSessionId === 'ab_first_session') {
+    const inspect = vi.fn<[string], Promise<BackendSessionInfo | null>>(
+      async (backendSessionId) => {
+        if (backendSessionId === 'ab_first_session') {
+          return {
+            backendSessionId,
+            status: 'active',
+            shellPid: 100,
+            currentCommand: 'zsh',
+          };
+        }
+
         return {
           backendSessionId,
           status: 'active',
-          shellPid: 100,
+          shellPid: 200,
           currentCommand: 'zsh',
         };
       }
-
-      return {
-        backendSessionId,
-        status: 'active',
-        shellPid: 200,
-        currentCommand: 'zsh',
-      };
-    });
+    );
 
     const backend: SessionBackend = {
       create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
@@ -969,7 +1175,7 @@ describe('SessionManager branch fallback', () => {
           command: 'node',
           args: 'node server.js',
         },
-      ],
+      ]
     );
 
     const [firstResult, secondResult] = await Promise.all([
@@ -991,8 +1197,7 @@ describe('SessionManager branch fallback', () => {
       taskId: opts.taskId,
       slot: opts.slot,
       backendType: 'pty',
-      backendSessionId:
-        opts.slot === 'secondary' ? 'ab_dual_me_2e30_s' : 'ab_dual_me_2e30_p',
+      backendSessionId: opts.slot === 'secondary' ? 'ab_dual_me_2e30_s' : 'ab_dual_me_2e30_p',
       status: 'active',
       cwd: opts.cwd ?? opts.repoPath,
       branch: opts.branch,
@@ -1034,7 +1239,7 @@ describe('SessionManager branch fallback', () => {
           return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
         },
       },
-      backend,
+      backend
     );
 
     await manager.setDualSessionMode(task.id, true);
@@ -1042,11 +1247,11 @@ describe('SessionManager branch fallback', () => {
     expect(create).toHaveBeenCalledTimes(2);
     expect(create).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ taskId: task.id, slot: 'primary' }),
+      expect.objectContaining({ taskId: task.id, slot: 'primary' })
     );
     expect(create).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ taskId: task.id, slot: 'secondary' }),
+      expect.objectContaining({ taskId: task.id, slot: 'secondary' })
     );
     expect(board.getTask(task.id)?.sessionId).toBe('session-1');
     expect(board.getTask(task.id)?.secondarySessionId).toBe('session-2');

@@ -17,6 +17,7 @@ import {
 import { ensureRunning, stopDaemon } from '../daemon/index.js';
 import { createRPCClient } from './rpc.js';
 import type {
+  AppConfig,
   DoctorCheck,
   DoctorResult,
   TaskRecord,
@@ -61,7 +62,7 @@ function shouldFallbackToDirectRepoUpdate(error: unknown): boolean {
 
 async function updateRepoWithFallback(
   paths: ConfigPaths,
-  params: UpdateRepoParams,
+  params: UpdateRepoParams
 ): Promise<RepoRecord> {
   try {
     const rpc = await createRPCClient(paths.socketPath);
@@ -91,9 +92,12 @@ async function updateRepoWithFallback(
 
 function statusSymbol(status: DoctorCheck['status']): string {
   switch (status) {
-    case 'pass': return '✓ pass';
-    case 'warn': return '⚠ warn';
-    case 'fail': return '✗ fail';
+    case 'pass':
+      return '✓ pass';
+    case 'warn':
+      return '⚠ warn';
+    case 'fail':
+      return '✗ fail';
   }
 }
 
@@ -114,18 +118,9 @@ function printTaskTable(tasks: TaskRecord[], emptyMessage = 'No tasks found.'): 
     return;
   }
   const header = ['ID', 'Title', 'Track', 'PR', 'CI'];
-  const rows = tasks.map((t) => [
-    t.id,
-    t.title,
-    t.trackId,
-    t.prState,
-    t.ciState,
-  ]);
-  const widths = header.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => String(r[i]).length)),
-  );
-  const fmt = (cols: string[]) =>
-    cols.map((c, i) => c.padEnd(widths[i])).join('  ');
+  const rows = tasks.map((t) => [t.id, t.title, t.trackId, t.prState, t.ciState]);
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
+  const fmt = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i])).join('  ');
   console.log(fmt(header));
   console.log(widths.map((w) => '-'.repeat(w)).join('  '));
   for (const row of rows) {
@@ -148,11 +143,8 @@ function printRepoTable(repos: RepoRecord[]): void {
   }
   const header = ['ID', 'Label', 'Path', 'Base', 'Health'];
   const rows = repos.map((r) => [r.id, r.label, r.path, r.defaultBaseBranch, r.health]);
-  const widths = header.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => String(r[i]).length)),
-  );
-  const fmt = (cols: string[]) =>
-    cols.map((c, i) => c.padEnd(widths[i])).join('  ');
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
+  const fmt = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i])).join('  ');
   console.log(fmt(header));
   console.log(widths.map((w) => '-'.repeat(w)).join('  '));
   for (const row of rows) {
@@ -176,10 +168,63 @@ function resolveGoTUIBinary(): string | null {
   return null;
 }
 
-function launchGoTUI(socketPath: string): void {
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_/:=.,+-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function shouldLaunchManagedTmux(config: AppConfig): boolean {
+  return (
+    config.sessionBackend === 'tmux' &&
+    config.tmux.autoLayout &&
+    !process.env['TMUX'] &&
+    process.env['AGENTBOARD_TMUX_MANAGED'] !== '1'
+  );
+}
+
+function launchManagedTmux(binary: string, socketPath: string, config: AppConfig): void {
+  const command =
+    `AGENTBOARD_SOCKET_PATH=${shellQuote(socketPath)} ` +
+    `AGENTBOARD_TMUX_MANAGED=1 ${shellQuote(binary)}`;
+
+  const result = spawnSync(
+    'tmux',
+    ['new-session', '-A', '-s', config.tmux.layoutSessionName, command],
+    {
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        AGENTBOARD_SOCKET_PATH: socketPath,
+        AGENTBOARD_TMUX_MANAGED: '1',
+      },
+    }
+  );
+
+  if (result.error) {
+    if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        'tmux not found. Install tmux or set "sessionBackend": "pty" in AgentBoard config.'
+      );
+    }
+    throw result.error;
+  }
+
+  if (typeof result.status === 'number' && result.status !== 0) {
+    process.exit(result.status);
+  }
+}
+
+function launchGoTUI(socketPath: string, config: AppConfig): void {
   const binary = resolveGoTUIBinary();
   if (!binary) {
     throw new Error('Go TUI binary not found. Run `npm run build:go` or `npm run build` first.');
+  }
+
+  if (shouldLaunchManagedTmux(config)) {
+    launchManagedTmux(binary, socketPath, config);
+    return;
   }
 
   const result = spawnSync(binary, [], {
@@ -217,8 +262,9 @@ export function buildCli(): Command {
   program.action(async () => {
     try {
       const paths = configPaths();
+      const config = loadConfig();
       await ensureRunning(daemonOpts(paths));
-      launchGoTUI(paths.socketPath);
+      launchGoTUI(paths.socketPath, config);
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
       process.exit(1);
@@ -291,10 +337,9 @@ export function buildCli(): Command {
         const paths = configPaths();
         await ensureRunning(daemonOpts(paths));
         const rpc = await createRPCClient(paths.socketPath);
-        const session = await rpc.call<import('../types/index.js').SessionRecord>(
-          'openSession',
-          { taskId: task },
-        );
+        const session = await rpc.call<import('../types/index.js').SessionRecord>('openSession', {
+          taskId: task,
+        });
         rpc.disconnect();
         if (session.attachCommand) {
           console.log(session.attachCommand);
@@ -321,13 +366,10 @@ export function buildCli(): Command {
         const paths = configPaths();
         await ensureRunning(daemonOpts(paths));
         const rpc = await createRPCClient(paths.socketPath);
-        const board = await rpc.call<import('../types/index.js').BoardSnapshot>(
-          'getBoard',
-          {
-            ...(opts.repo ? { repoId: opts.repo } : {}),
-            ...(opts.archived ? { filter: { includeArchived: true } } : {}),
-          },
-        );
+        const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard', {
+          ...(opts.repo ? { repoId: opts.repo } : {}),
+          ...(opts.archived ? { filter: { includeArchived: true } } : {}),
+        });
         rpc.disconnect();
 
         const tasks = filterListedTasks(board.tasks, opts.archived === true);
@@ -346,9 +388,7 @@ export function buildCli(): Command {
   // ----------------------------------------------------------
   // repos
   // ----------------------------------------------------------
-  const repos = program
-    .command('repos')
-    .description('Manage repositories');
+  const repos = program.command('repos').description('Manage repositories');
 
   repos
     .command('add <path>')
@@ -461,9 +501,7 @@ export function buildCli(): Command {
   // ----------------------------------------------------------
   // daemon
   // ----------------------------------------------------------
-  const daemon = program
-    .command('daemon')
-    .description('Manage the AgentBoard background daemon');
+  const daemon = program.command('daemon').description('Manage the AgentBoard background daemon');
 
   daemon
     .command('start')

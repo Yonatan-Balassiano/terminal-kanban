@@ -26,6 +26,11 @@ const (
 )
 
 const (
+	SessionBackendTmux SessionBackendType = "tmux"
+	SessionBackendPty  SessionBackendType = "pty"
+)
+
+const (
 	FocusBoard     AppFocus = "board"
 	FocusTerminal  AppFocus = "terminal"
 	FocusFilterBar AppFocus = "filterbar"
@@ -210,6 +215,7 @@ type UIStateRecord struct {
 	SelectedMissionTaskID string             `json:"selectedMissionTaskId"`
 	TerminalPaneVisible   *bool              `json:"terminalPaneVisible"`
 	TerminalLayoutMode    TerminalLayoutMode `json:"terminalLayoutMode"`
+	TerminalPaneWidth     *int               `json:"terminalPaneWidth"`
 	MissionsPaneExpanded  *bool              `json:"missionsPaneExpanded"`
 	ThemeMode             ThemeMode          `json:"themeMode"`
 }

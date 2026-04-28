@@ -242,6 +242,7 @@ npm run reset-deamon
 - `Enter`: open selected task shell
 - `t`: focus terminal pane
 - `z`: terminal fullscreen
+- `Shift+←` / `Shift+→`: resize the side-by-side terminal pane
 - `Ctrl+C`: interrupt current terminal command
 - `PgUp` / `PgDn`: scroll terminal output
 - `R`: recreate selected task shell
@@ -292,6 +293,7 @@ Press `g` to switch between:
 - `top / bottom`: board on top, terminal below
 
 Layout choice is persisted in UI state.
+In side-by-side layout, `Shift+←` grows the terminal and `Shift+→` gives space back to the board.
 
 ## Task Sessions
 

@@ -86,7 +86,7 @@ func renderContent(m *Model) string {
 	stacked := showSplitTerminal && m.terminalLayoutMode == TerminalLayoutMode("top-bottom")
 
 	if !showSplitTerminal {
-		return renderBoard(m, contentHeight)
+		return renderBoard(m, contentHeight, m.width)
 	}
 
 	if stacked {
@@ -97,7 +97,7 @@ func renderContent(m *Model) string {
 		boardHeight := max(1, (contentHeight-dividerHeight+1)/2)
 		terminalHeight := max(1, contentHeight-boardHeight-dividerHeight)
 		chunks := []string{
-			fitHeight(renderBoard(m, boardHeight), boardHeight),
+			fitHeight(renderBoard(m, boardHeight, m.width), boardHeight),
 		}
 		if dividerHeight > 0 {
 			chunks = append(chunks, fitHeight(lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render(strings.Repeat("─", max(1, m.width))), 1))
@@ -106,7 +106,8 @@ func renderContent(m *Model) string {
 		return lipgloss.JoinVertical(lipgloss.Left, chunks...)
 	}
 
-	boardView := fitHeight(renderBoard(m, contentHeight), contentHeight)
+	boardWidth := m.sideBySideBoardWidth()
+	boardView := fitSize(renderBoard(m, contentHeight, boardWidth), boardWidth, contentHeight)
 	terminalView := fitHeight(renderTerminalPane(m, contentHeight, false), contentHeight)
 	divider := renderVerticalDivider(contentHeight)
 	return lipgloss.JoinHorizontal(lipgloss.Top, boardView, divider, terminalView)
@@ -284,7 +285,7 @@ func renderFilterBar(m *Model) string {
 	)
 }
 
-func renderBoard(m *Model, height int) string {
+func renderBoard(m *Model, height int, width int) string {
 	rail := renderMissionRail(m, height)
 
 	if len(m.repos) == 0 {
@@ -295,7 +296,7 @@ func renderBoard(m *Model, height int) string {
 				Render("No repos registered. Run: agentboard repos add <path>"),
 			height,
 		)
-		return fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), height)
+		return fitSize(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), width, height)
 	}
 
 	repoLabels := map[string]string{}
@@ -306,20 +307,19 @@ func renderBoard(m *Model, height int) string {
 	columns := []string{}
 	tasksByTrack := m.tasksByTrack()
 	sortedTracks := m.sortedTracks()
+	collapsedTrackIDs := collapsedTrackIDsForBoardWidth(m, width)
 	for trackIndex, track := range sortedTracks {
 		tasks := tasksByTrack[track.ID]
-		columns = append(columns, renderTrack(
-			m,
-			track,
-			tasks,
-			trackIndex == m.selectedTrackIndex,
-			height,
-			repoLabels,
-		))
+		isSelected := trackIndex == m.selectedTrackIndex
+		if collapsedTrackIDs[track.ID] {
+			columns = append(columns, renderCollapsedTrack(m, track, tasks, isSelected, height))
+			continue
+		}
+		columns = append(columns, renderTrack(m, track, tasks, isSelected, height, repoLabels))
 	}
 
 	board := fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, columns...), height)
-	return fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), height)
+	return fitSize(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), width, height)
 }
 
 func renderMissionRail(m *Model, height int) string {
@@ -467,7 +467,46 @@ func renderMissionTaskRow(m *Model, missionIndex, taskIndex, width int) string {
 	return style.Render(joinSpaceBetween(left, right, width))
 }
 
+func collapsedTrackIDsForBoardWidth(m *Model, width int) map[string]bool {
+	collapsed := map[string]bool{}
+	if width <= 0 || width >= m.boardRenderWidth() {
+		return collapsed
+	}
+
+	tracks := m.sortedTracks()
+	for index := len(tracks) - 1; index >= 0; index-- {
+		track := tracks[index]
+		if !isCollapsibleTrack(track) {
+			continue
+		}
+		collapsed[track.ID] = true
+		if boardRenderWidthWithCollapsed(m, collapsed) <= width {
+			return collapsed
+		}
+	}
+
+	return collapsed
+}
+
+func boardRenderWidthWithCollapsed(m *Model, collapsed map[string]bool) int {
+	width := m.missionRailWidth()
+	for _, track := range m.sortedTracks() {
+		if collapsed[track.ID] {
+			width += collapsedTrackRenderWidth
+			continue
+		}
+		width += trackColumnRenderWidth
+	}
+	return width
+}
+
+func isCollapsibleTrack(track TrackRecord) bool {
+	value := strings.ToLower(track.ID + " " + track.Label)
+	return strings.Contains(value, "merged") || strings.Contains(value, "merge") || strings.Contains(value, "done")
+}
+
 func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected bool, height int, repoLabels map[string]string) string {
+	isBoardSelection := isSelected && (m.focus == FocusBoard || m.terminalBoardNavPending)
 	taskHeights := make([]int, 0, len(tasks))
 	for _, task := range tasks {
 		taskHeights = append(taskHeights, taskCardHeight(m, task))
@@ -477,8 +516,8 @@ func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected boo
 	visibleTasks := tasks[windowStart:windowEnd]
 
 	header := joinSpaceBetween(
-		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isSelected, uiChrome.Accent, uiChrome.Text))).Render(strings.ToUpper(track.Label)),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isSelected, uiChrome.Accent, uiChrome.Muted))).Render(fmt.Sprintf("%d", len(tasks))),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Text))).Render(strings.ToUpper(track.Label)),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Muted))).Render(fmt.Sprintf("%d", len(tasks))),
 		trackHeaderWidth,
 	)
 
@@ -491,7 +530,7 @@ func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected boo
 			bodyLines = append(bodyLines, renderTaskCard(
 				m,
 				task,
-				isSelected && actualIndex == m.selectedTaskIndex,
+				isBoardSelection && actualIndex == m.selectedTaskIndex,
 				m.activeTaskID == task.ID,
 				m.sessionActivityByTaskID[task.ID],
 				repoLabels[task.RepoID],
@@ -500,7 +539,7 @@ func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected boo
 	}
 
 	border := lipgloss.NormalBorder()
-	if isSelected {
+	if isBoardSelection {
 		border = lipgloss.RoundedBorder()
 	}
 
@@ -509,8 +548,38 @@ func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected boo
 			Width(trackColumnStyleWidth).
 			Height(height).
 			Border(border).
-			BorderForeground(lipgloss.Color(ternaryString(isSelected, uiChrome.Accent, uiChrome.Line))).
+			BorderForeground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Line))).
 			Render(header+"\n"+strings.Join(bodyLines, "\n")),
+		height,
+	)
+}
+
+func renderCollapsedTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected bool, height int) string {
+	isBoardSelection := isSelected && (m.focus == FocusBoard || m.terminalBoardNavPending)
+	contentWidth := collapsedTrackHeaderWidth
+	label := truncateText(strings.ToUpper(track.Label), contentWidth)
+	lines := []string{
+		lipgloss.NewStyle().
+			Foreground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Text))).
+			Render(label),
+		lipgloss.NewStyle().
+			Foreground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Muted))).
+			Render(fmt.Sprintf("%d", len(tasks))),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("hidden"),
+	}
+
+	border := lipgloss.NormalBorder()
+	if isBoardSelection {
+		border = lipgloss.RoundedBorder()
+	}
+
+	return fitHeight(
+		lipgloss.NewStyle().
+			Width(collapsedTrackStyleWidth).
+			Height(height).
+			Border(border).
+			BorderForeground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Line))).
+			Render(strings.Join(lines, "\n")),
 		height,
 	)
 }
@@ -598,14 +667,16 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 	width := m.width
 	if !fullWidth {
-		width = m.terminalContentWidth()
+		width = m.sideBySideTerminalOuterWidth()
 	}
 
-	contentWidth := max(1, width)
+	contentWidth := max(1, width-terminalPaneFrameWidth)
+	contentHeight := terminalPaneContentHeight(height)
+	body := ""
 
 	if m.activeTaskID == "" {
-		viewportHeight := terminalSlotViewportHeight(height)
-		footerVisible := height > 2
+		viewportHeight := terminalSlotViewportHeight(contentHeight)
+		footerVisible := contentHeight > 2
 		lines := []string{
 			joinSpaceBetween(badge("TERMINAL", "accent", "", false), badge("NO SESSION", "muted", "", false), contentWidth),
 		}
@@ -623,35 +694,51 @@ func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 				contentWidth,
 			))
 		}
-		return fitHeight(strings.Join(lines, "\n"), height)
-	}
-
-	activeTask := (*TaskRecord)(nil)
-	for _, task := range m.tasks {
-		if task.ID == m.activeTaskID {
-			activeTask = &task
-			break
+		body = strings.Join(lines, "\n")
+	} else {
+		activeTask := (*TaskRecord)(nil)
+		for _, task := range m.tasks {
+			if task.ID == m.activeTaskID {
+				activeTask = &task
+				break
+			}
+		}
+		if activeTask == nil {
+			body = ""
+		} else if !m.activeTaskUsesDualTerminal() {
+			body = fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotPrimary, contentHeight, contentWidth), contentHeight)
+		} else {
+			primaryHeight, secondaryHeight := splitTerminalSlotHeights(true, contentHeight)
+			parts := []string{
+				fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotPrimary, primaryHeight, contentWidth), primaryHeight),
+			}
+			if secondaryHeight > 0 {
+				if dividerHeight := dualTerminalDividerHeight(contentHeight); dividerHeight > 0 {
+					parts = append(parts, fitHeight(renderHorizontalDivider(contentWidth), dividerHeight))
+				}
+				parts = append(parts, fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotSecondary, secondaryHeight, contentWidth), secondaryHeight))
+			}
+			body = fitHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), contentHeight)
 		}
 	}
-	if activeTask == nil {
-		return fitHeight("", height)
+
+	border := lipgloss.NormalBorder()
+	borderColor := uiChrome.Line
+	if m.focus == FocusTerminal {
+		border = lipgloss.RoundedBorder()
+		borderColor = uiChrome.Accent
 	}
 
-	if !m.activeTaskUsesDualTerminal() {
-		return fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotPrimary, height, contentWidth), height)
-	}
-
-	primaryHeight, secondaryHeight := splitTerminalSlotHeights(true, height)
-	parts := []string{
-		fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotPrimary, primaryHeight, contentWidth), primaryHeight),
-	}
-	if secondaryHeight > 0 {
-		if dividerHeight := dualTerminalDividerHeight(height); dividerHeight > 0 {
-			parts = append(parts, fitHeight(renderHorizontalDivider(contentWidth), dividerHeight))
-		}
-		parts = append(parts, fitHeight(renderTerminalSlotPane(m, *activeTask, SessionSlotSecondary, secondaryHeight, contentWidth), secondaryHeight))
-	}
-	return fitHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), height)
+	return fitSize(
+		lipgloss.NewStyle().
+			Width(contentWidth).
+			Height(contentHeight).
+			Border(border).
+			BorderForeground(lipgloss.Color(borderColor)).
+			Render(fitHeight(body, contentHeight)),
+		width,
+		height,
+	)
 }
 
 func renderTerminalSlotPane(m *Model, activeTask TaskRecord, slot SessionSlot, height, contentWidth int) string {
@@ -724,9 +811,9 @@ func renderTerminalSlotPane(m *Model, activeTask TaskRecord, slot SessionSlot, h
 		if scrollOffset := m.terminalScrollOffsetForSlot(normalizedSlot); scrollOffset > 0 {
 			historyLabel = fmt.Sprintf("history -%d", scrollOffset)
 		}
-		footerHint := "branch " + truncateText(branchLabel, 18) + "  Tab nav  Esc board"
+		footerHint := "branch " + truncateText(branchLabel, 14) + "  Shift+←/→ resize  Esc board"
 		if activeTask.SecondarySessionID != "" {
-			footerHint = "branch " + truncateText(branchLabel, 16) + "  Shift+Tab focus  Tab nav"
+			footerHint = "branch " + truncateText(branchLabel, 12) + "  Shift+Tab pane  Shift+←/→ resize"
 		}
 		lines = append(lines, joinSpaceBetween(
 			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(historyLabel),
@@ -803,8 +890,8 @@ func renderHelpModal() string {
 		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers, d deletes the selected mission"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar, D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
-		{"Views", "f opens filters, g changes board / terminal layout", ", and . switch active repo, ? toggles this help"},
-		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Esc returns focus to the board"},
+		{"Views", "f opens filters, g changes board / terminal layout", "Shift+Left/Right resizes the side-by-side terminal split", ", and . switch active repo, ? toggles this help"},
+		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Shift+Left/Right resizes the split, Esc returns focus to the board"},
 		{"Setup", "If worktree setup fails because the repo uses master, run:", "agentboard repos set-default-base-branch <repo-id> master"},
 	}
 
@@ -1519,7 +1606,7 @@ func kbdHints(focus AppFocus) string {
 	case FocusMissions:
 		return "j/k move  a/A ai chat  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
 	case FocusTerminal:
-		return "Shift+Tab pane  Tab+h/j/k/l switch shell  Ctrl+C interrupt  PgUp/PgDn scroll  Esc board"
+		return "Shift+Tab pane  Shift+←/→ resize  Tab+h/j/k/l switch shell  PgUp/PgDn scroll  Esc board"
 	case FocusModal:
 		return "Enter confirm  Esc cancel"
 	case FocusFilterBar, FocusSearch:
@@ -1552,6 +1639,22 @@ func fitHeight(value string, height int) string {
 		}
 		return strings.Join(append(lines, padding...), "\n")
 	}
+}
+
+func fitSize(value string, width int, height int) string {
+	return fitWidth(fitHeight(value, height), width)
+}
+
+func fitWidth(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	lines := strings.Split(value, "\n")
+	for index, line := range lines {
+		line = truncateANSI(line, width)
+		lines[index] = line + strings.Repeat(" ", max(0, width-plainWidth(line)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func truncateText(value string, width int) string {

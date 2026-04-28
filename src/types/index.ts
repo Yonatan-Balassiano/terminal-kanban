@@ -205,6 +205,7 @@ export interface UIStateRecord {
   selectedMissionTaskId?: string;
   terminalPaneVisible?: boolean;
   terminalLayoutMode?: TerminalLayoutMode;
+  terminalPaneWidth?: number;
   missionsPaneExpanded?: boolean;
   themeMode?: ThemeMode;
 }
@@ -717,8 +718,14 @@ export interface AIChatConfig {
   systemPrompt?: string;
 }
 
+export interface TmuxConfig {
+  autoLayout: boolean;
+  layoutSessionName: string;
+}
+
 export interface AppConfig {
   sessionBackend: SessionBackendType;
+  tmux: TmuxConfig;
   sessionBootstrapScript: string;
   pollIntervalMs: number;
   githubTokenEnvVar?: string;

@@ -376,15 +376,23 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const doctor = new DoctorService(db, opts.socketPath);
   const buffers = new TerminalBufferService();
   const worktrees = new WorktreeService(db, board, git);
-  const session = new SessionManager(db, board, worktrees, buffers, (taskId, slot, buffer) => {
-    if (!shouldEmitSessionUpdate(taskId)) {
-      return;
-    }
-    serverEvents.emit('event', {
-      type: 'session_update',
-      payload: { taskId, slot, ...buffer },
-    });
-  }, cfg.sessionBootstrapScript);
+  const session = new SessionManager(
+    db,
+    board,
+    worktrees,
+    buffers,
+    (taskId, slot, buffer) => {
+      if (!shouldEmitSessionUpdate(taskId)) {
+        return;
+      }
+      serverEvents.emit('event', {
+        type: 'session_update',
+        payload: { taskId, slot, ...buffer },
+      });
+    },
+    cfg.sessionBootstrapScript,
+    cfg.sessionBackend,
+  );
   const taskLifecycle = new TaskLifecycleService(db, board, git, session);
   const sync = new SyncService(board, missions, github, git, db);
   const ollama = new ManagedOllamaService(cfg.aiChat);

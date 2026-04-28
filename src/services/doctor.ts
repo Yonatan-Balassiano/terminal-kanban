@@ -10,13 +10,14 @@ const require = createRequire(import.meta.url);
 export class DoctorService {
   constructor(
     private db: Db,
-    private socketPath: string,
+    private socketPath: string
   ) {}
 
   async run(): Promise<DoctorResult> {
     const checks = await Promise.all([
       this.checkNodeVersion(),
       this.checkGit(),
+      this.checkTmux(),
       this.checkNodePty(),
       this.checkGh(),
       this.checkGhAuth(),
@@ -48,10 +49,28 @@ export class DoctorService {
 
   private checkGit(): DoctorCheck {
     try {
-      const out = execSync('git --version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const out = execSync('git --version', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
       return { name: 'git', status: 'pass', message: out };
     } catch {
       return { name: 'git', status: 'fail', message: 'git not found' };
+    }
+  }
+
+  private checkTmux(): DoctorCheck {
+    try {
+      const out = execSync('tmux -V', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      return { name: 'tmux', status: 'pass', message: out };
+    } catch {
+      return {
+        name: 'tmux',
+        status: 'fail',
+        message: 'tmux not found',
+        remediation:
+          'Install tmux (macOS: brew install tmux) or set sessionBackend to "pty" in AgentBoard config',
+      };
     }
   }
 
@@ -65,14 +84,18 @@ export class DoctorService {
         name: 'node-pty',
         status: 'fail',
         message: `node-pty not available: ${message}`,
-        remediation: 'Reinstall dependencies (npm install) or use a supported Node/OS combo for native addons',
+        remediation:
+          'Reinstall dependencies (npm install) or use a supported Node/OS combo for native addons',
       };
     }
   }
 
   private checkGh(): DoctorCheck {
     try {
-      const out = execSync('gh --version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const out = execSync('gh --version', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
       return { name: 'gh', status: 'pass', message: out.split('\n')[0] };
     } catch {
       return {
@@ -100,7 +123,10 @@ export class DoctorService {
 
   private checkDelta(): DoctorCheck {
     try {
-      const out = execSync('delta --version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const out = execSync('delta --version', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
       return { name: 'delta', status: 'pass', message: out };
     } catch {
       return {
@@ -119,7 +145,8 @@ export class DoctorService {
       this.db.prepare('SELECT 1').get();
       // If we need to verify the file path, use pragma
       const result = this.db.prepare<[], { database_list: string }>('PRAGMA database_list').all();
-      const dbFile = (result[0] as unknown as Record<string, unknown>)?.['file'] as string ?? 'in-memory';
+      const dbFile =
+        ((result[0] as unknown as Record<string, unknown>)?.['file'] as string) ?? 'in-memory';
       void BetterSqlite3; // referenced to satisfy no-unused-vars
       return { name: 'db', status: 'pass', message: `Database OK: ${dbFile}` };
     } catch (err: unknown) {

@@ -15,15 +15,21 @@ import (
 
 const (
 	terminalDividerWidth      = 1
+	terminalPaneFrameWidth    = 2
 	terminalSlotDividerHeight = 1
 	missionRailCollapsedWidth = 18
 	missionRailExpandedWidth  = 36
 	minTerminalPaneWidth      = 40
+	terminalResizeStep        = 8
 	trackColumnStyleWidth     = 32
 	trackColumnRenderWidth    = trackColumnStyleWidth + 2
+	minBoardPaneWidth         = missionRailCollapsedWidth + trackColumnRenderWidth
 	trackHeaderWidth          = trackColumnStyleWidth - 2
 	taskCardStyleWidth        = trackColumnStyleWidth - 2
 	taskCardContentWidth      = taskCardStyleWidth - 2
+	collapsedTrackStyleWidth  = 10
+	collapsedTrackRenderWidth = collapsedTrackStyleWidth + 2
+	collapsedTrackHeaderWidth = collapsedTrackStyleWidth - 2
 	terminalHeaderHeight      = 1
 	terminalFooterHeight      = 1
 	terminalInputFlushMillis  = 6
@@ -47,13 +53,14 @@ type boardActionMsg struct {
 }
 
 type sessionOpenedMsg struct {
-	taskID   string
-	slot     SessionSlot
-	session  SessionRecord
-	board    *BoardSnapshot
-	buffer   *GetBufferResult
-	activity *SessionActivitySnapshot
-	err      error
+	taskID    string
+	slot      SessionSlot
+	session   SessionRecord
+	board     *BoardSnapshot
+	buffer    *GetBufferResult
+	activity  *SessionActivitySnapshot
+	layoutErr error
+	err       error
 }
 
 type bufferLoadedMsg struct {
@@ -75,6 +82,10 @@ type rpcEventMsg struct {
 }
 
 type asyncErrorMsg struct {
+	err error
+}
+
+type tmuxPaneAttachedMsg struct {
 	err error
 }
 
@@ -143,10 +154,13 @@ type Model struct {
 	activeTaskID                  string
 	activeSessionBranch           string
 	activeSessionBackendType      SessionBackendType
+	activeSessionAttachCommand    string
 	secondarySessionBranch        string
 	secondarySessionBackendType   SessionBackendType
+	secondarySessionAttachCommand string
 	sessionActivityByTaskID       map[string]*SessionActivitySnapshot
 	sessionActivityByKey          map[string]*SessionActivitySnapshot
+	terminalPaneWidth             int
 	terminalFullscreen            bool
 	terminalScrollOffset          int
 	secondaryTerminalScrollOffset int
@@ -340,22 +354,31 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.activeTaskID = msg.taskID
 		m.focusedTerminalSlot = normalizeSessionSlot(msg.slot)
-		m.setTerminalSessionMetadata(msg.slot, msg.session.Branch, msg.session.BackendType)
-		m.terminalPaneVisible = true
+		m.setTerminalSessionMetadata(msg.slot, msg.session.Branch, msg.session.BackendType, msg.session.AttachCommand)
+		m.terminalPaneVisible = msg.session.BackendType != SessionBackendTmux
 		m.terminalFullscreen = false
 		m.setTerminalScrollOffset(msg.slot, 0)
-		m.focus = FocusTerminal
+		if msg.session.BackendType == SessionBackendTmux {
+			m.focus = FocusBoard
+		} else {
+			m.focus = FocusTerminal
+		}
 		if msg.buffer != nil {
 			m.setTerminalBuffer(msg.slot, *msg.buffer)
 		}
 		if msg.activity != nil {
 			m.setSessionActivity(msg.taskID, msg.slot, msg.activity)
 		}
-		m.statusMessage = "Opened task shell."
-		cmds := []tea.Cmd{
-			m.syncSessionUpdateWatchCmd(),
-			m.resizeActiveSessionCmd(),
-			m.loadVisibleTerminalStateCmd(),
+		if msg.layoutErr != nil {
+			m.statusMessage = msg.layoutErr.Error()
+		} else if msg.session.BackendType == SessionBackendTmux {
+			m.statusMessage = "Attached task shell in tmux pane."
+		} else {
+			m.statusMessage = "Opened task shell."
+		}
+		cmds := []tea.Cmd{m.syncSessionUpdateWatchCmd()}
+		if msg.session.BackendType != SessionBackendTmux {
+			cmds = append(cmds, m.resizeActiveSessionCmd(), m.loadVisibleTerminalStateCmd())
 		}
 		if spin := m.startSpinnerChainCmd(); spin != nil {
 			cmds = append(cmds, spin)
@@ -386,6 +409,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.statusMessage = msg.err.Error()
 		}
+		return m, nil
+
+	case tmuxPaneAttachedMsg:
+		if msg.err != nil {
+			m.statusMessage = msg.err.Error()
+			return m, nil
+		}
+		m.statusMessage = "Attached task shell in tmux pane."
 		return m, nil
 
 	case chatTurnMsg:
@@ -504,6 +535,10 @@ func (m *Model) handleRPCEvent(event RPCEvent) tea.Cmd {
 }
 
 func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
+	if cmd, handled := m.handleTerminalResizeKey(key); handled {
+		return cmd
+	}
+
 	if m.focus == FocusTerminal {
 		return m.handleTerminalKey(key)
 	}
@@ -552,6 +587,10 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "u":
 		return m.toggleMissionsPaneCmd(true)
 	case "t":
+		task := m.selectedTask()
+		if task != nil && task.ID != m.activeTaskID && m.taskHasSessionSlot(task, SessionSlotPrimary) {
+			return m.openSessionCmd(task.ID, false, SessionSlotPrimary)
+		}
 		if m.activeTaskID == "" {
 			m.statusMessage = "No session open for the selected task."
 			return nil
@@ -645,6 +684,17 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	}
 
 	return nil
+}
+
+func (m *Model) handleTerminalResizeKey(key tea.KeyMsg) (tea.Cmd, bool) {
+	switch key.String() {
+	case "shift+left", "shift+←":
+		return m.resizeTerminalPaneCmd(terminalResizeStep), true
+	case "shift+right", "shift+→":
+		return m.resizeTerminalPaneCmd(-terminalResizeStep), true
+	default:
+		return nil, false
+	}
 }
 
 func (m *Model) handleMissionKey(key tea.KeyMsg) tea.Cmd {
@@ -863,8 +913,10 @@ func (m *Model) previewTaskShell(task *TaskRecord, preferredSlot SessionSlot) te
 	m.focusedTerminalSlot = slot
 	m.activeSessionBranch = task.BranchName
 	m.activeSessionBackendType = ""
+	m.activeSessionAttachCommand = ""
 	m.secondarySessionBranch = task.BranchName
 	m.secondarySessionBackendType = ""
+	m.secondarySessionAttachCommand = ""
 	m.terminalPaneVisible = true
 	m.terminalScrollOffset = 0
 	m.secondaryTerminalScrollOffset = 0
@@ -1044,7 +1096,6 @@ func waitForEventCmd(events <-chan RPCEvent) tea.Cmd {
 	}
 }
 
-
 func (m *Model) needsSpinnerTick() bool {
 	if m.syncInProgress {
 		return true
@@ -1107,6 +1158,16 @@ func (m *Model) openSessionCmd(taskID string, recreate bool, slot SessionSlot) t
 			return sessionOpenedMsg{err: err}
 		}
 
+		if session.BackendType == SessionBackendTmux {
+			return sessionOpenedMsg{
+				taskID:    taskID,
+				slot:      normalizedSlot,
+				session:   session,
+				board:     &board,
+				layoutErr: attachTaskSessionInTmux(session.AttachCommand),
+			}
+		}
+
 		var buffer GetBufferResult
 		if err := m.client.Call("getBuffer", map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &buffer); err != nil {
 			return sessionOpenedMsg{err: err}
@@ -1135,15 +1196,29 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 		return nil
 	}
 
+	m.normalizeFocusedTerminalSlot()
+	if m.terminalBackendTypeForSlot(m.focusedTerminalSlot) == SessionBackendTmux {
+		attachCommand := m.terminalAttachCommandForSlot(m.focusedTerminalSlot)
+		if attachCommand == "" {
+			return m.openSessionCmd(m.activeTaskID, false, m.focusedTerminalSlot)
+		}
+		return m.attachTmuxSessionCmd(attachCommand)
+	}
+
 	m.terminalPaneVisible = true
 	m.terminalFullscreen = fullscreen
-	m.normalizeFocusedTerminalSlot()
 	m.focus = FocusTerminal
 
 	return tea.Batch(
 		m.resizeActiveSessionCmd(),
 		m.acknowledgeSessionAttentionCmd(m.activeTaskID),
 	)
+}
+
+func (m *Model) attachTmuxSessionCmd(attachCommand string) tea.Cmd {
+	return func() tea.Msg {
+		return tmuxPaneAttachedMsg{err: attachTaskSessionInTmux(attachCommand)}
+	}
 }
 
 func (m *Model) loadBufferCmd(taskID string, slot SessionSlot) tea.Cmd {
@@ -1353,6 +1428,27 @@ func (m *Model) setUIStateCmd(patch map[string]interface{}) tea.Cmd {
 	}
 }
 
+func (m *Model) resizeTerminalPaneCmd(delta int) tea.Cmd {
+	if !m.terminalPaneShouldRender() {
+		m.statusMessage = "Open a task shell before resizing the terminal pane."
+		return nil
+	}
+	if m.terminalLayoutMode == TerminalLayoutMode("top-bottom") || m.terminalFullscreen {
+		m.statusMessage = "Terminal split resizing is available in side-by-side layout."
+		return nil
+	}
+
+	currentWidth := m.sideBySideTerminalContentWidth()
+	nextWidth := m.clampSideBySideTerminalContentWidth(currentWidth + delta)
+	m.terminalPaneWidth = nextWidth
+	m.statusMessage = fmt.Sprintf("Terminal width: %d columns.", nextWidth)
+
+	return tea.Batch(
+		m.setUIStateCmd(map[string]interface{}{"terminalPaneWidth": nextWidth}),
+		m.resizeActiveSessionCmd(),
+	)
+}
+
 func (m *Model) toggleMissionsPaneCmd(open bool) tea.Cmd {
 	m.missionsPaneExpanded = open
 	m.clampMissionSelection()
@@ -1535,6 +1631,9 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	}
 	if board.UIState.TerminalLayoutMode != "" {
 		m.terminalLayoutMode = board.UIState.TerminalLayoutMode
+	}
+	if board.UIState.TerminalPaneWidth != nil {
+		m.terminalPaneWidth = max(0, *board.UIState.TerminalPaneWidth)
 	}
 	if board.UIState.MissionsPaneExpanded != nil {
 		m.missionsPaneExpanded = *board.UIState.MissionsPaneExpanded
@@ -1989,18 +2088,27 @@ func (m *Model) terminalBackendTypeForSlot(slot SessionSlot) SessionBackendType 
 	return m.activeSessionBackendType
 }
 
-func (m *Model) setTerminalSessionMetadata(slot SessionSlot, branch string, backendType SessionBackendType) {
+func (m *Model) terminalAttachCommandForSlot(slot SessionSlot) string {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return m.secondarySessionAttachCommand
+	}
+	return m.activeSessionAttachCommand
+}
+
+func (m *Model) setTerminalSessionMetadata(slot SessionSlot, branch string, backendType SessionBackendType, attachCommand string) {
 	if normalizeSessionSlot(slot) == SessionSlotSecondary {
 		m.secondarySessionBranch = branch
 		m.secondarySessionBackendType = backendType
+		m.secondarySessionAttachCommand = attachCommand
 		return
 	}
 	m.activeSessionBranch = branch
 	m.activeSessionBackendType = backendType
+	m.activeSessionAttachCommand = attachCommand
 }
 
 func (m *Model) clearTerminalSlotState(slot SessionSlot) {
-	m.setTerminalSessionMetadata(slot, "", "")
+	m.setTerminalSessionMetadata(slot, "", "", "")
 	m.setTerminalBuffer(slot, GetBufferResult{})
 	m.setTerminalScrollOffset(slot, 0)
 	m.setTerminalCommand(slot, "")
@@ -2088,7 +2196,7 @@ func (m *Model) loadVisibleTerminalStateCmd() tea.Cmd {
 }
 
 func (m *Model) terminalPaneShouldRender() bool {
-	return m.terminalPaneVisible && m.activeTaskID != ""
+	return m.terminalPaneVisible && m.activeTaskID != "" && m.terminalBackendTypeForSlot(m.focusedTerminalSlot) != SessionBackendTmux
 }
 
 func (m *Model) boardRenderWidth() int {
@@ -2096,7 +2204,7 @@ func (m *Model) boardRenderWidth() int {
 }
 
 func (m *Model) canShowTerminalPane() bool {
-	return m.width-m.boardRenderWidth()-terminalDividerWidth >= minTerminalPaneWidth
+	return m.width-terminalDividerWidth-terminalPaneFrameWidth-minBoardPaneWidth >= minTerminalPaneWidth
 }
 
 func (m *Model) terminalTakesOver() bool {
@@ -2110,9 +2218,9 @@ func (m *Model) terminalUsesFullWidth() bool {
 
 func (m *Model) terminalContentWidth() int {
 	if m.terminalUsesFullWidth() {
-		return max(1, m.width)
+		return max(1, m.width-terminalPaneFrameWidth)
 	}
-	return max(1, m.width-m.boardRenderWidth()-terminalDividerWidth)
+	return m.sideBySideTerminalContentWidth()
 }
 
 func (m *Model) terminalPaneHeight() int {
@@ -2126,7 +2234,7 @@ func (m *Model) terminalPaneHeight() int {
 		boardHeight := max(1, (contentHeight-divider+1)/2)
 		height = max(1, contentHeight-boardHeight-divider)
 	}
-	return max(1, height)
+	return terminalPaneContentHeight(height)
 }
 
 func (m *Model) terminalViewportHeight() int {
@@ -2143,6 +2251,42 @@ func (m *Model) contentHeight() int {
 		height--
 	}
 	return max(1, height)
+}
+
+func (m *Model) sideBySideTerminalContentWidth() int {
+	if m.width <= terminalDividerWidth+terminalPaneFrameWidth {
+		return 1
+	}
+
+	defaultWidth := m.width - m.boardRenderWidth() - terminalDividerWidth - terminalPaneFrameWidth
+	if defaultWidth < minTerminalPaneWidth {
+		defaultWidth = minTerminalPaneWidth
+	}
+	if m.terminalPaneWidth > 0 {
+		defaultWidth = m.terminalPaneWidth
+	}
+
+	return m.clampSideBySideTerminalContentWidth(defaultWidth)
+}
+
+func (m *Model) clampSideBySideTerminalContentWidth(width int) int {
+	maxWidth := max(1, m.width-terminalDividerWidth-terminalPaneFrameWidth-minBoardPaneWidth)
+	if maxWidth < minTerminalPaneWidth {
+		return clamp(width, 1, maxWidth)
+	}
+	return clamp(width, minTerminalPaneWidth, maxWidth)
+}
+
+func (m *Model) sideBySideTerminalOuterWidth() int {
+	return min(max(1, m.width-terminalDividerWidth-1), m.sideBySideTerminalContentWidth()+terminalPaneFrameWidth)
+}
+
+func (m *Model) sideBySideBoardWidth() int {
+	return max(1, m.width-terminalDividerWidth-m.sideBySideTerminalOuterWidth())
+}
+
+func terminalPaneContentHeight(outerHeight int) int {
+	return max(1, outerHeight-terminalPaneFrameWidth)
 }
 
 func encodeTerminalKey(key tea.KeyMsg) string {

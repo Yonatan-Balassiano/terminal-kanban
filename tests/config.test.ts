@@ -20,6 +20,14 @@ describe('defaultConfig', () => {
     expect(defaultConfig().sessionBootstrapScript).toMatch(/scripts\/session-bootstrap\.sh$/);
   });
 
+  it('uses tmux sessions with managed layout by default', () => {
+    expect(defaultConfig().sessionBackend).toBe('tmux');
+    expect(defaultConfig().tmux).toEqual({
+      autoLayout: true,
+      layoutSessionName: 'agentboard',
+    });
+  });
+
   it('includes the default Ollama chat config and system prompt', () => {
     expect(defaultConfig().aiChat).toEqual({
       enabled: true,

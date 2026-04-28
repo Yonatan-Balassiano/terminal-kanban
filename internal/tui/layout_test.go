@@ -25,7 +25,7 @@ func TestBoardRenderWidthMatchesRenderedTrackColumns(t *testing.T) {
 	}
 }
 
-func TestTerminalContentWidthUsesRenderedBoardWidth(t *testing.T) {
+func TestTerminalContentWidthUsesMinimumWhenBoardCanCollapse(t *testing.T) {
 	model := &Model{
 		width:               180,
 		terminalPaneVisible: true,
@@ -39,9 +39,55 @@ func TestTerminalContentWidthUsesRenderedBoardWidth(t *testing.T) {
 	}
 
 	got := model.terminalContentWidth()
-	want := 180 - missionRailCollapsedWidth - (4 * trackColumnRenderWidth) - terminalDividerWidth
+	want := minTerminalPaneWidth
 	if got != want {
 		t.Fatalf("terminalContentWidth() = %d, want %d", got, want)
+	}
+}
+
+func TestTerminalContentWidthUsesPersistedPaneWidth(t *testing.T) {
+	model := &Model{
+		width:               220,
+		terminalPaneVisible: true,
+		activeTaskID:        "task-1",
+		terminalPaneWidth:   72,
+		tracks: []TrackRecord{
+			{ID: "backlog", SortOrder: 1},
+			{ID: "in-progress", SortOrder: 2},
+			{ID: "pr", SortOrder: 3},
+			{ID: "done", SortOrder: 4},
+		},
+	}
+
+	if got := model.terminalContentWidth(); got != 72 {
+		t.Fatalf("terminalContentWidth() = %d, want 72", got)
+	}
+}
+
+func TestRenderBoardCollapsesDoneTrackWhenPaneIsNarrow(t *testing.T) {
+	model := &Model{
+		width: 180,
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo"},
+		},
+		tracks: []TrackRecord{
+			{ID: "backlog", Label: "Backlog", SortOrder: 1},
+			{ID: "in-progress", Label: "In Progress", SortOrder: 2},
+			{ID: "pr", Label: "Review", SortOrder: 3},
+			{ID: "done", Label: "Done", SortOrder: 4},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", Title: "Merged item", RepoID: "repo-1", TrackID: "done"},
+		},
+	}
+
+	boardWidth := missionRailCollapsedWidth + (3 * trackColumnRenderWidth) + collapsedTrackRenderWidth
+	plain := ansiPattern.ReplaceAllString(renderBoard(model, 12, boardWidth), "")
+	if !strings.Contains(plain, "hidden") {
+		t.Fatalf("renderBoard() = %q, want collapsed marker", plain)
+	}
+	if strings.Contains(plain, "Merged item") {
+		t.Fatalf("renderBoard() = %q, want merged task hidden in collapsed track", plain)
 	}
 }
 

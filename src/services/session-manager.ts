@@ -8,8 +8,8 @@ import type {
 } from '../types/index.js';
 import type { Db } from '../db/index.js';
 import type { BoardService } from './board.js';
-import { execFileSync } from 'child_process';
 import { PtyBackend } from './session-backends/pty.js';
+import { TmuxBackend } from './session-backends/tmux.js';
 import type { TerminalBufferService } from './terminal-buffer.js';
 import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
@@ -89,18 +89,10 @@ function rowToRecord(row: SessionRow): SessionRecord {
   };
 }
 
-function killLegacyTmuxSession(backendSessionId: string): void {
-  try {
-    execFileSync('tmux', ['kill-session', '-t', backendSessionId], { stdio: 'ignore' });
-  } catch {
-    // Session may already be gone.
-  }
-}
-
 // --------------- SessionManager ------------------------------
 
 export class SessionManager {
-  private ptyBackend?: PtyBackend;
+  private backends = new Map<SessionBackendType, SessionBackend>();
   private lastOutputAtBySessionKey = new Map<string, number>();
   private lastBusyBySessionKey = new Map<string, boolean>();
   private processTableCache?: { rows: ProcessRow[]; loadedAt: number };
@@ -109,11 +101,7 @@ export class SessionManager {
   constructor(
     private db: Db,
     private board: BoardService & {
-      linkSession?: (
-        taskId: string,
-        sessionId: string,
-        slot?: SessionSlot,
-      ) => Promise<void> | void;
+      linkSession?: (taskId: string, sessionId: string, slot?: SessionSlot) => Promise<void> | void;
       clearTaskSession?: (taskId: string, slot?: SessionSlot) => Promise<void> | void;
       setTaskBranch?: (taskId: string, branchName: string) => Promise<void> | void;
       setTaskLastSessionCwd?: (taskId: string, cwd: string | null) => Promise<void> | void;
@@ -124,27 +112,38 @@ export class SessionManager {
     private buffers: TerminalBufferService,
     private onBufferUpdate?: (taskId: string, slot: SessionSlot, buffer: GetBufferResult) => void,
     private sessionBootstrapScript = '',
+    private sessionBackend: SessionBackendType = 'tmux'
   ) {
     this.buffers.subscribeAll((taskId, slot, buffer) => {
       this.onBufferUpdate?.(taskId, slot, buffer);
     });
   }
 
-  /** PTY backend; tests may override. */
-  protected getBackend(): SessionBackend {
-    if (!this.ptyBackend) {
-      this.ptyBackend = new PtyBackend((taskId, slot, data) => {
-        if (hasMeaningfulTerminalOutput(data)) {
-          this.noteSessionOutput(taskId, slot);
-        }
-        this.buffers.write(taskId, slot, data);
-        const cwd = extractLastOsc7Cwd(data);
-        if (cwd) {
-          this.board.setTaskLastSessionCwd?.(taskId, cwd);
-        }
-      });
+  protected createBackend(backendType: SessionBackendType): SessionBackend {
+    if (backendType === 'tmux') {
+      return new TmuxBackend();
     }
-    return this.ptyBackend;
+
+    return new PtyBackend((taskId, slot, data) => {
+      if (hasMeaningfulTerminalOutput(data)) {
+        this.noteSessionOutput(taskId, slot);
+      }
+      this.buffers.write(taskId, slot, data);
+      const cwd = extractLastOsc7Cwd(data);
+      if (cwd) {
+        this.board.setTaskLastSessionCwd?.(taskId, cwd);
+      }
+    });
+  }
+
+  /** Session backend selected by config; tests may override. */
+  protected getBackend(backendType: SessionBackendType = this.sessionBackend): SessionBackend {
+    let backend = this.backends.get(backendType);
+    if (!backend) {
+      backend = this.createBackend(backendType);
+      this.backends.set(backendType, backend);
+    }
+    return backend;
   }
 
   private sessionKey(taskId: string, slot: SessionSlot): string {
@@ -202,13 +201,13 @@ export class SessionManager {
     session: SessionRecord,
     cwd: string,
     branch: string,
-    previousBranch?: string,
+    previousBranch?: string
   ): Promise<void> {
     if (!session.backendSessionId) {
       return;
     }
 
-    const backend = this.getBackend();
+    const backend = this.getBackend(session.backendType);
     const commands: string[] = [];
 
     if (previousBranch && previousBranch !== branch) {
@@ -217,7 +216,7 @@ export class SessionManager {
 
     commands.push(
       `git -C ${JSON.stringify(cwd)} checkout ${branch} 2>/dev/null || ` +
-        `git -C ${JSON.stringify(cwd)} checkout -b ${branch}`,
+        `git -C ${JSON.stringify(cwd)} checkout -b ${branch}`
     );
     const checkoutCmd = commands.join('; ');
 
@@ -228,15 +227,16 @@ export class SessionManager {
 
   private persistSessionBranch(sessionId: string, branch: string): void {
     this.db
-      .prepare<[string, number, string], void>(
-        'UPDATE sessions SET branch = ?, updated_at = ? WHERE id = ?',
-      )
+      .prepare<
+        [string, number, string],
+        void
+      >('UPDATE sessions SET branch = ?, updated_at = ? WHERE id = ?')
       .run(branch, Date.now(), sessionId);
   }
 
   private async prepareWorkspaceForSession(
     taskId: string,
-    repoPath: string,
+    repoPath: string
   ): Promise<PreparedSessionWorkspace> {
     try {
       return this.worktrees.prepareTaskWorkspace(taskId);
@@ -255,26 +255,6 @@ export class SessionManager {
     }
   }
 
-  private async retireLegacyTmuxSession(taskId: string, slot: SessionSlot, sessionId: string): Promise<void> {
-    const row = this.db
-      .prepare<[string], SessionRow>('SELECT * FROM sessions WHERE id = ?')
-      .get(sessionId);
-    if (!row) {
-      return;
-    }
-    const session = rowToRecord(row);
-    if (session.backendSessionId) {
-      killLegacyTmuxSession(session.backendSessionId);
-    }
-    this.buffers.destroy(taskId, slot);
-    this.db
-      .prepare<[string, number, string], void>(
-        'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
-      )
-      .run('terminated', Date.now(), sessionId);
-    await this.board.clearTaskSession?.(taskId, slot);
-  }
-
   // ---- openSession -----------------------------------------
 
   async openSession(taskId: string, slot: SessionSlot = 'primary'): Promise<SessionRecord> {
@@ -288,7 +268,7 @@ export class SessionManager {
         `SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path,
                 session_id, secondary_session_id
            FROM tasks
-          WHERE id = ?`,
+          WHERE id = ?`
       )
       .get(taskId);
 
@@ -305,24 +285,34 @@ export class SessionManager {
     const linkedSessionId = this.linkedSessionId(taskRow, slot);
     if (linkedSessionId) {
       const existingRow = this.db
-        .prepare<[string], SessionRow>(
-          `SELECT * FROM sessions WHERE id = ? AND status IN ('active','idle')`,
-        )
+        .prepare<
+          [string],
+          SessionRow
+        >(`SELECT * FROM sessions WHERE id = ? AND status IN ('active','idle')`)
         .get(linkedSessionId);
 
       if (existingRow) {
         const existing = rowToRecord(existingRow);
-        if (existing.backendType === 'tmux') {
-          await this.retireLegacyTmuxSession(taskId, slot, existing.id);
-        } else if (existing.backendSessionId) {
-          const backend = this.getBackend();
+        if (existing.backendSessionId) {
+          const backend = this.getBackend(existing.backendType);
           const info = await backend.inspect(existing.backendSessionId);
           if (info) {
             // Still alive — reattach
+            let attachCommand = existing.attachCommand;
+            if (!attachCommand) {
+              const metadata = await backend.attachMetadata(existing.backendSessionId);
+              attachCommand = metadata.command;
+              this.db
+                .prepare<
+                  [string, number, string],
+                  void
+                >('UPDATE sessions SET attach_command = ?, updated_at = ? WHERE id = ?')
+                .run(attachCommand, Date.now(), existing.id);
+            }
             const currentBranch = resolveTaskBranchName(
               taskRow.title,
               taskRow.id,
-              taskRow.branch_name ?? existing.branch,
+              taskRow.branch_name ?? existing.branch
             );
             const previousBranch =
               taskRow.branch_name && taskRow.branch_name !== currentBranch
@@ -339,25 +329,31 @@ export class SessionManager {
                 existing,
                 taskRow.worktree_path ?? repoRow.path,
                 currentBranch,
-                previousBranch,
+                previousBranch
               );
               this.persistSessionBranch(existing.id, currentBranch);
             }
             this.clearTaskAttention(taskId);
-            return { ...existing, branch: currentBranch, slot };
+            return { ...existing, attachCommand, branch: currentBranch, slot };
           }
         }
       }
     }
 
     // 4. Determine branch
-    const branch = resolveTaskBranchName(taskRow.title, taskRow.id, taskRow.branch_name ?? undefined);
+    const branch = resolveTaskBranchName(
+      taskRow.title,
+      taskRow.id,
+      taskRow.branch_name ?? undefined
+    );
 
-    // 5. PTY only
-    const backend = this.getBackend();
-    const ptyHealth = await backend.healthCheck();
-    if (!ptyHealth.available) {
-      throw new Error(`PTY session backend unavailable: ${ptyHealth.error ?? 'node-pty not available'}`);
+    // 5. Create or reuse a backend session
+    const backend = this.getBackend(this.sessionBackend);
+    const backendHealth = await backend.healthCheck();
+    if (!backendHealth.available) {
+      throw new Error(
+        `${this.sessionBackend} session backend unavailable: ${backendHealth.error ?? 'backend not available'}`
+      );
     }
 
     const workspace = await this.prepareWorkspaceForSession(taskId, repoRow.path);
@@ -387,13 +383,26 @@ export class SessionManager {
     const now = Date.now();
     this.db
       .prepare<
-        [string, string, SessionSlot, string, string | null, string | null, string, string | null, string | null, number, number, number],
+        [
+          string,
+          string,
+          SessionSlot,
+          string,
+          string | null,
+          string | null,
+          string,
+          string | null,
+          string | null,
+          number,
+          number,
+          number,
+        ],
         void
       >(
         `INSERT INTO sessions
            (id, task_id, slot, backend_type, backend_session_id, attach_command,
             status, cwd, branch, last_heartbeat, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         sessionRecord.id,
@@ -407,7 +416,7 @@ export class SessionManager {
         sessionRecord.branch ?? null,
         now,
         now,
-        now,
+        now
       );
 
     // 7. Link session to task
@@ -428,7 +437,7 @@ export class SessionManager {
         `SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path,
                 session_id, secondary_session_id
            FROM tasks
-          WHERE id = ?`,
+          WHERE id = ?`
       )
       .get(taskId);
 
@@ -455,10 +464,10 @@ export class SessionManager {
     if (!session) throw new Error(`No active session for task: ${taskId}`);
     if (!session.backendSessionId) throw new Error(`Session has no backend ID: ${session.id}`);
     if (session.backendType === 'tmux') {
-      throw new Error('Legacy tmux session row; close the shell and open a new session.');
+      throw new Error('tmux sessions receive input directly in the tmux pane.');
     }
 
-    const backend = this.getBackend();
+    const backend = this.getBackend(session.backendType);
     await backend.sendInput(session.backendSessionId, data);
     return this.clearTaskAttention(taskId);
   }
@@ -471,7 +480,7 @@ export class SessionManager {
     taskId: string,
     cols: number,
     rows: number,
-    slot: SessionSlot = 'primary',
+    slot: SessionSlot = 'primary'
   ): Promise<void> {
     const session = this.getSession(taskId, slot);
     if (!session?.backendSessionId || session.backendType === 'tmux') {
@@ -480,7 +489,7 @@ export class SessionManager {
 
     this.buffers.resize(taskId, slot, cols, rows);
 
-    const backend = this.getBackend();
+    const backend = this.getBackend(session.backendType);
     await backend.resize(session.backendSessionId, cols, rows);
   }
 
@@ -497,7 +506,7 @@ export class SessionManager {
 
   async inspectSessionState(
     taskId: string,
-    slot: SessionSlot = 'primary',
+    slot: SessionSlot = 'primary'
   ): Promise<InspectSessionStateResult> {
     const sessionKey = this.sessionKey(taskId, slot);
     const session = this.getSession(taskId, slot);
@@ -506,23 +515,11 @@ export class SessionManager {
       return { activity: null, attentionChanged: false };
     }
 
-    if (session.backendType === 'tmux') {
-      const activity: import('../types/index.js').SessionActivitySnapshot = {
-        taskId,
-        sessionId: session.id,
-        slot,
-        sessionStatus: 'orphaned',
-        isBusy: false,
-        updatedAt: Date.now(),
-      };
-      return { activity, attentionChanged: false };
-    }
-
     let activity: import('../types/index.js').SessionActivitySnapshot | null;
     if (!session.backendSessionId) {
       activity = deriveFallbackSessionActivity(taskId, session.id, session.status);
     } else {
-      const backend = this.getBackend();
+      const backend = this.getBackend(session.backendType);
       const info = await backend.inspect(session.backendSessionId);
       if (!info) {
         activity = {
@@ -541,7 +538,7 @@ export class SessionManager {
             session.id,
             info.status,
             lastOutputAt,
-            info.currentCommand,
+            info.currentCommand
           );
         } else {
           const processRows = await this.getProcessTableRows();
@@ -553,14 +550,14 @@ export class SessionManager {
                 processRows,
                 info.shellPid,
                 lastOutputAt,
-                info.currentCommand,
+                info.currentCommand
               )
             : deriveFallbackSessionActivity(
                 taskId,
                 session.id,
                 info.status,
                 lastOutputAt,
-                info.currentCommand,
+                info.currentCommand
               );
         }
       }
@@ -588,7 +585,7 @@ export class SessionManager {
 
   async inspectSession(
     taskId: string,
-    slot: SessionSlot = 'primary',
+    slot: SessionSlot = 'primary'
   ): Promise<import('../types/index.js').SessionActivitySnapshot | null> {
     const result = await this.inspectSessionState(taskId, slot);
     return result.activity;
@@ -605,12 +602,8 @@ export class SessionManager {
 
     const session = rowToRecord(row);
     if (session.backendSessionId) {
-      if (session.backendType === 'tmux') {
-        killLegacyTmuxSession(session.backendSessionId);
-      } else {
-        const backend = this.getBackend();
-        await backend.terminate(session.backendSessionId);
-      }
+      const backend = this.getBackend(session.backendType);
+      await backend.terminate(session.backendSessionId);
     }
 
     this.buffers.destroy(session.taskId, session.slot);
@@ -619,9 +612,10 @@ export class SessionManager {
     this.lastBusyBySessionKey.delete(key);
 
     this.db
-      .prepare<[string, number, string], void>(
-        'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
-      )
+      .prepare<
+        [string, number, string],
+        void
+      >('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
       .run('terminated', Date.now(), sessionId);
     await this.board.clearTaskSession?.(session.taskId, session.slot);
   }
@@ -665,40 +659,31 @@ export class SessionManager {
 
   async reconcile(): Promise<void> {
     const rows = this.db
-      .prepare<[], SessionRow>(
-        `SELECT * FROM sessions WHERE status IN ('active','idle')`,
-      )
+      .prepare<[], SessionRow>(`SELECT * FROM sessions WHERE status IN ('active','idle')`)
       .all();
 
     for (const row of rows) {
       const session = rowToRecord(row);
       if (!session.backendSessionId) continue;
 
-      if (session.backendType === 'tmux') {
-        this.db
-          .prepare<[string, number, string], void>(
-            'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
-          )
-          .run('orphaned', Date.now(), session.id);
-        continue;
-      }
-
       try {
-        const backend = this.getBackend();
+        const backend = this.getBackend(session.backendType);
         const info = await backend.inspect(session.backendSessionId);
         if (!info) {
           this.db
-            .prepare<[string, number, string], void>(
-              'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
-            )
+            .prepare<
+              [string, number, string],
+              void
+            >('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
             .run('orphaned', Date.now(), session.id);
         }
       } catch {
         // On error, mark orphaned conservatively
         this.db
-          .prepare<[string, number, string], void>(
-            'UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?',
-          )
+          .prepare<
+            [string, number, string],
+            void
+          >('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
           .run('orphaned', Date.now(), session.id);
       }
     }
@@ -709,9 +694,10 @@ export class SessionManager {
   heartbeat(sessionId: string): void {
     const now = Date.now();
     this.db
-      .prepare<[number, number, string], void>(
-        'UPDATE sessions SET last_heartbeat = ?, updated_at = ? WHERE id = ?',
-      )
+      .prepare<
+        [number, number, string],
+        void
+      >('UPDATE sessions SET last_heartbeat = ?, updated_at = ? WHERE id = ?')
       .run(now, now, sessionId);
   }
 }
