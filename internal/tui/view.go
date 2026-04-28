@@ -286,7 +286,12 @@ func renderFilterBar(m *Model) string {
 }
 
 func renderBoard(m *Model, height int, width int) string {
-	rail := renderMissionRail(m, height)
+	tracks := m.sortedTracks()
+	plan := planBoardRender(m, width, tracks)
+	parts := []string{}
+	if plan.showMissionRail {
+		parts = append(parts, renderMissionRail(m, height))
+	}
 
 	if len(m.repos) == 0 {
 		board := fitHeight(
@@ -296,7 +301,8 @@ func renderBoard(m *Model, height int, width int) string {
 				Render("No repos registered. Run: agentboard repos add <path>"),
 			height,
 		)
-		return fitSize(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), width, height)
+		parts = append(parts, board)
+		return fitSize(lipgloss.JoinHorizontal(lipgloss.Top, parts...), width, height)
 	}
 
 	repoLabels := map[string]string{}
@@ -306,20 +312,88 @@ func renderBoard(m *Model, height int, width int) string {
 
 	columns := []string{}
 	tasksByTrack := m.tasksByTrack()
-	sortedTracks := m.sortedTracks()
-	collapsedTrackIDs := collapsedTrackIDsForBoardWidth(m, width)
-	for trackIndex, track := range sortedTracks {
+	for trackIndex := plan.trackStart; trackIndex < plan.trackEnd; trackIndex++ {
+		track := tracks[trackIndex]
 		tasks := tasksByTrack[track.ID]
 		isSelected := trackIndex == m.selectedTrackIndex
-		if collapsedTrackIDs[track.ID] {
+		if plan.collapsedTrackIDs[track.ID] {
 			columns = append(columns, renderCollapsedTrack(m, track, tasks, isSelected, height))
+			continue
+		}
+		if plan.compactTracks {
+			columns = append(columns, renderTrackWithWidth(m, track, tasks, isSelected, height, repoLabels, plan.trackRenderWidth, true))
 			continue
 		}
 		columns = append(columns, renderTrack(m, track, tasks, isSelected, height, repoLabels))
 	}
 
 	board := fitHeight(lipgloss.JoinHorizontal(lipgloss.Top, columns...), height)
-	return fitSize(lipgloss.JoinHorizontal(lipgloss.Top, rail, board), width, height)
+	parts = append(parts, board)
+	return fitSize(lipgloss.JoinHorizontal(lipgloss.Top, parts...), width, height)
+}
+
+type boardRenderPlan struct {
+	showMissionRail   bool
+	compactTracks     bool
+	trackStart        int
+	trackEnd          int
+	trackRenderWidth  int
+	collapsedTrackIDs map[string]bool
+}
+
+func planBoardRender(m *Model, width int, tracks []TrackRecord) boardRenderPlan {
+	trackCount := len(tracks)
+	if trackCount == 0 {
+		return boardRenderPlan{
+			showMissionRail:   width >= missionRailCollapsedWidth,
+			trackRenderWidth:  trackColumnRenderWidth,
+			collapsedTrackIDs: map[string]bool{},
+		}
+	}
+
+	selectedTrackIndex := clamp(m.selectedTrackIndex, 0, trackCount-1)
+	collapsedTrackIDs := collapsedTrackIDsForBoardWidth(m, width)
+	delete(collapsedTrackIDs, tracks[selectedTrackIndex].ID)
+	if width >= boardRenderWidthWithCollapsed(m, collapsedTrackIDs) {
+		return boardRenderPlan{
+			showMissionRail:   true,
+			trackStart:        0,
+			trackEnd:          trackCount,
+			trackRenderWidth:  trackColumnRenderWidth,
+			collapsedTrackIDs: collapsedTrackIDs,
+		}
+	}
+
+	missionRailWidth := m.missionRailWidth()
+	showMissionRail := width >= missionRailWidth+trackColumnRenderWidth
+	trackBudget := width
+	if showMissionRail {
+		trackBudget -= missionRailWidth
+	}
+	if trackBudget < 1 {
+		showMissionRail = false
+		trackBudget = width
+	}
+
+	compactTracks := trackBudget < trackColumnRenderWidth
+	trackRenderWidth := trackColumnRenderWidth
+	visibleTrackCount := 1
+	if compactTracks {
+		trackRenderWidth = max(1, trackBudget)
+	} else {
+		visibleTrackCount = clamp(trackBudget/trackColumnRenderWidth, 1, trackCount)
+	}
+
+	trackStart := selectedTrackIndex - visibleTrackCount/2
+	trackStart = clamp(trackStart, 0, max(0, trackCount-visibleTrackCount))
+	return boardRenderPlan{
+		showMissionRail:   showMissionRail,
+		compactTracks:     compactTracks,
+		trackStart:        trackStart,
+		trackEnd:          min(trackCount, trackStart+visibleTrackCount),
+		trackRenderWidth:  trackRenderWidth,
+		collapsedTrackIDs: map[string]bool{},
+	}
 }
 
 func renderMissionRail(m *Model, height int) string {
@@ -506,10 +580,18 @@ func isCollapsibleTrack(track TrackRecord) bool {
 }
 
 func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected bool, height int, repoLabels map[string]string) string {
+	return renderTrackWithWidth(m, track, tasks, isSelected, height, repoLabels, trackColumnRenderWidth, false)
+}
+
+func renderTrackWithWidth(m *Model, track TrackRecord, tasks []TaskRecord, isSelected bool, height int, repoLabels map[string]string, renderWidth int, compact bool) string {
 	isBoardSelection := isSelected && (m.focus == FocusBoard || m.terminalBoardNavPending)
+	trackStyleWidth := max(1, renderWidth-2)
+	headerWidth := max(1, trackStyleWidth-2)
+	taskCardStyleWidth := max(1, trackStyleWidth-2)
+	taskCardContentWidth := max(1, taskCardStyleWidth-2)
 	taskHeights := make([]int, 0, len(tasks))
 	for _, task := range tasks {
-		taskHeights = append(taskHeights, taskCardHeight(m, task))
+		taskHeights = append(taskHeights, taskCardHeightForWidth(m, task, taskCardContentWidth, compact))
 	}
 	listHeight := max(1, height-3)
 	windowStart, windowEnd := visibleWindow(taskHeights, ternaryInt(isSelected, m.selectedTaskIndex, 0), listHeight)
@@ -518,22 +600,25 @@ func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected boo
 	header := joinSpaceBetween(
 		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Text))).Render(strings.ToUpper(track.Label)),
 		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Muted))).Render(fmt.Sprintf("%d", len(tasks))),
-		trackHeaderWidth,
+		headerWidth,
 	)
 
 	bodyLines := []string{}
 	if len(tasks) == 0 {
-		bodyLines = append(bodyLines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No tasks"))
+		bodyLines = append(bodyLines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText("No tasks", headerWidth)))
 	} else {
 		for offset, task := range visibleTasks {
 			actualIndex := windowStart + offset
-			bodyLines = append(bodyLines, renderTaskCard(
+			bodyLines = append(bodyLines, renderTaskCardWithWidth(
 				m,
 				task,
 				isBoardSelection && actualIndex == m.selectedTaskIndex,
 				m.activeTaskID == task.ID,
 				m.sessionActivityByTaskID[task.ID],
 				repoLabels[task.RepoID],
+				taskCardStyleWidth,
+				taskCardContentWidth,
+				compact,
 			))
 		}
 	}
@@ -545,7 +630,7 @@ func renderTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSelected boo
 
 	return fitHeight(
 		lipgloss.NewStyle().
-			Width(trackColumnStyleWidth).
+			Width(trackStyleWidth).
 			Height(height).
 			Border(border).
 			BorderForeground(lipgloss.Color(ternaryString(isBoardSelection, uiChrome.Accent, uiChrome.Line))).
@@ -585,24 +670,55 @@ func renderCollapsedTrack(m *Model, track TrackRecord, tasks []TaskRecord, isSel
 }
 
 func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool, activity *SessionActivitySnapshot, repoLabel string) string {
+	return renderTaskCardWithWidth(m, task, isSelected, isActiveSession, activity, repoLabel, taskCardStyleWidth, taskCardContentWidth, false)
+}
+
+func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSession bool, activity *SessionActivitySnapshot, repoLabel string, cardStyleWidth int, contentWidth int, compact bool) string {
 	borderColor := taskCardBorderColor(task, isSelected)
 	headerStatus := headerStatusModel(m, task, activity, isActiveSession)
 	activeSessionIcon := headerStatus.Icon
 	descriptionPreview := descriptionLine(task.Description)
 	missionPreview := taskMissionLine(m, task.ID)
-	titleLines := taskTitleLines(task.Title)
-	branchLabel := truncateText(compactBranchLabel(task.BranchName), 16)
+	titleLines := taskTitleLinesForWidth(task.Title, contentWidth)
+	branchLabel := truncateText(compactBranchLabel(task.BranchName), min(16, max(1, contentWidth/2)))
 	workspaceLabel := "root"
 	if task.WorktreePath != "" {
 		workspaceLabel = "worktree"
 	}
-	headerLabel := truncateText(fmt.Sprintf("%s > %s", repoLabel, workspaceLabel), taskCardContentWidth)
+	headerLabel := truncateText(fmt.Sprintf("%s > %s", repoLabel, workspaceLabel), contentWidth)
 
 	lines := []string{
 		lipgloss.NewStyle().Foreground(lipgloss.Color(headerStatus.Color)).Render(activeSessionIcon) + " " +
 			lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isSelected, uiChrome.Accent, uiChrome.Blue))).Render(headerLabel),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(strings.Repeat("─", taskCardContentWidth)),
 	}
+	if compact {
+		for index, line := range titleLines {
+			style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
+			if isActiveSession && index == 0 {
+				style = style.Bold(true)
+			}
+			lines = append(lines, style.Render(line))
+		}
+		lines = append(lines, joinSpaceBetween(
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("#"+truncateText(task.ID, min(8, contentWidth))),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(branchLabel),
+			contentWidth,
+		))
+
+		border := lipgloss.RoundedBorder()
+		if isSelected || isActiveSession {
+			border = lipgloss.DoubleBorder()
+		}
+
+		return lipgloss.NewStyle().
+			Width(cardStyleWidth).
+			Border(border).
+			BorderForeground(lipgloss.Color(borderColor)).
+			Padding(0, 1).
+			Render(strings.Join(lines, "\n"))
+	}
+
+	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(strings.Repeat("─", contentWidth)))
 	for index, line := range titleLines {
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
 		if isActiveSession && index == 0 {
@@ -611,12 +727,12 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 		lines = append(lines, style.Render(line))
 	}
 	if descriptionPreview != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(descriptionPreview, taskCardContentWidth)))
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(descriptionPreview, contentWidth)))
 	}
 	if missionPreview != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Render(truncateText(missionPreview, taskCardContentWidth)))
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Render(truncateText(missionPreview, contentWidth)))
 	}
-	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(strings.Repeat("─", taskCardContentWidth)))
+	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(strings.Repeat("─", contentWidth)))
 
 	metaParts := []string{}
 	if pillar := pillarLabel(m.pillars, task.PillarID); pillar != "" {
@@ -636,13 +752,13 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 	lines = append(lines, joinSpaceBetween(
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("#"+truncateText(task.ID, 8)),
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(rightMeta),
-		taskCardContentWidth,
+		contentWidth,
 	))
 
 	githubStatus := githubStatusBadgeModel(task)
 	if githubStatus != nil {
 		lines = append(lines, badge(
-			truncateText(githubStatus.Label, taskCardContentWidth-2),
+			truncateText(githubStatus.Label, contentWidth-2),
 			githubStatus.Tone,
 			"",
 			true,
@@ -657,7 +773,7 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 	}
 
 	return lipgloss.NewStyle().
-		Width(taskCardStyleWidth).
+		Width(cardStyleWidth).
 		Border(border).
 		BorderForeground(lipgloss.Color(borderColor)).
 		Padding(0, 1).
@@ -1069,7 +1185,15 @@ func taskCardBorderColor(task TaskRecord, isSelected bool) string {
 }
 
 func taskCardHeight(m *Model, task TaskRecord) int {
-	height := 8 + len(taskTitleLines(task.Title))
+	return taskCardHeightForWidth(m, task, taskCardContentWidth, false)
+}
+
+func taskCardHeightForWidth(m *Model, task TaskRecord, contentWidth int, compact bool) int {
+	titleLines := taskTitleLinesForWidth(task.Title, contentWidth)
+	if compact {
+		return 4 + len(titleLines)
+	}
+	height := 8 + len(titleLines)
 	if descriptionLine(task.Description) != "" {
 		height++
 	}
@@ -1100,34 +1224,39 @@ func taskMissionLine(m *Model, taskID string) string {
 }
 
 func taskTitleLines(title string) []string {
+	return taskTitleLinesForWidth(title, taskCardContentWidth)
+}
+
+func taskTitleLinesForWidth(title string, width int) []string {
 	normalized := normalizeSingleLine(title)
 	if normalized == "" {
 		normalized = "Untitled task"
 	}
+	width = max(1, width)
 	words := strings.Fields(normalized)
 	lines := []string{}
 	current := ""
 	for index, word := range words {
 		candidate := strings.TrimSpace(current + " " + word)
-		if plainWidth(candidate) <= taskCardContentWidth {
+		if plainWidth(candidate) <= width {
 			current = candidate
 			continue
 		}
 		if len(lines) == 1 {
 			remainder := strings.Join(words[index:], " ")
 			tail := strings.TrimSpace(current + " " + remainder)
-			lines = append(lines, truncateText(tail, taskCardContentWidth))
+			lines = append(lines, truncateText(tail, width))
 			return lines
 		}
 		if current == "" {
-			lines = append(lines, truncateText(word, taskCardContentWidth))
+			lines = append(lines, truncateText(word, width))
 			continue
 		}
 		lines = append(lines, current)
 		current = word
 	}
 	if current != "" {
-		lines = append(lines, truncateText(current, taskCardContentWidth))
+		lines = append(lines, truncateText(current, width))
 	}
 	if len(lines) > 2 {
 		return lines[:2]

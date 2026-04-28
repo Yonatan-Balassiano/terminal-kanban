@@ -22,6 +22,7 @@ import type {
 
 const SessionBackendTypeSchema = z.enum(['tmux', 'pty'] as const);
 const ThemeModeSchema = z.enum(['truecolor', '256color', 'monochrome'] as const);
+const themeModes = new Set(['truecolor', '256color', 'monochrome']);
 const WorktreeModeSchema = z.enum(['off', 'auto', 'always'] as const);
 const PreferredIDESchema = z.enum(['system', 'webstorm', 'idea', 'cursor', 'vscode'] as const);
 
@@ -277,7 +278,8 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
     );
   }
 
-  const result = PartialAppConfigSchema.safeParse(raw);
+  const normalizedRaw = normalizeLegacyConfig(raw);
+  const result = PartialAppConfigSchema.safeParse(normalizedRaw);
   if (!result.success) {
     const issues = result.error.issues;
     const summary = issues
@@ -290,8 +292,8 @@ export function loadConfig(override?: Partial<AppConfig>): AppConfig {
     // Collect the field paths that are invalid so we can strip them
     const invalidPaths = new Set(issues.map((i) => i.path[0]?.toString() ?? ''));
     const cleaned: Record<string, unknown> = {};
-    if (typeof raw === 'object' && raw !== null) {
-      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof normalizedRaw === 'object' && normalizedRaw !== null) {
+      for (const [k, v] of Object.entries(normalizedRaw as Record<string, unknown>)) {
         if (!invalidPaths.has(k)) {
           cleaned[k] = v;
         }
@@ -388,6 +390,68 @@ export function mergeOverlay(config: AppConfig, overlay: RepoOverlayConfig): App
 }
 
 // ============================================================
+// Legacy config normalization
+// ============================================================
+
+export function normalizeLegacyConfig(raw: unknown): unknown {
+  if (!isPlainRecord(raw)) {
+    return raw;
+  }
+
+  const normalized: Record<string, unknown> = { ...raw };
+
+  if (Array.isArray(raw['tracks'])) {
+    normalized['tracks'] = raw['tracks'].map(normalizeLegacyTrackConfig);
+  }
+
+  if ('theme' in raw) {
+    normalized['theme'] = normalizeLegacyThemeConfig(raw['theme']);
+  }
+
+  return normalized;
+}
+
+function normalizeLegacyTrackConfig(track: unknown, index: number): unknown {
+  if (!isPlainRecord(track)) {
+    return track;
+  }
+
+  const normalized: Record<string, unknown> = { ...track };
+  if (normalized['sortOrder'] === undefined) {
+    if (typeof normalized['sort_order'] === 'number') {
+      normalized['sortOrder'] = normalized['sort_order'];
+    } else {
+      normalized['sortOrder'] = index;
+    }
+  }
+  return normalized;
+}
+
+function normalizeLegacyThemeConfig(theme: unknown): unknown {
+  if (typeof theme === 'string') {
+    return theme;
+  }
+
+  if (!isPlainRecord(theme)) {
+    return theme;
+  }
+
+  if (typeof theme['name'] === 'string' && themeModes.has(theme['name'])) {
+    return theme['name'];
+  }
+
+  if (theme['monochrome'] === true) {
+    return 'monochrome';
+  }
+
+  if (theme['trueColor'] === true) {
+    return 'truecolor';
+  }
+
+  return undefined;
+}
+
+// ============================================================
 // writeDefaultConfig
 // ============================================================
 
@@ -461,4 +525,8 @@ function removeUndefined<T extends object>(obj: T): Partial<T> {
     }
   }
   return out;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -91,6 +91,67 @@ func TestRenderBoardCollapsesDoneTrackWhenPaneIsNarrow(t *testing.T) {
 	}
 }
 
+func TestRenderBoardKeepsSelectedColumnVisibleAcrossWidths(t *testing.T) {
+	model := &Model{
+		focus:              FocusBoard,
+		selectedTrackIndex: 3,
+		selectedTaskIndex:  0,
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo"},
+		},
+		tracks: []TrackRecord{
+			{ID: "backlog", Label: "Backlog", SortOrder: 1},
+			{ID: "in-progress", Label: "In Progress", SortOrder: 2},
+			{ID: "review", Label: "Review", SortOrder: 3},
+			{ID: "verify", Label: "Verify", SortOrder: 4},
+			{ID: "done", Label: "Done", SortOrder: 5},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-backlog", Title: "Backlog task", RepoID: "repo-1", TrackID: "backlog"},
+			{ID: "task-progress", Title: "Progress task", RepoID: "repo-1", TrackID: "in-progress"},
+			{ID: "task-review", Title: "Review task", RepoID: "repo-1", TrackID: "review"},
+			{ID: "task-verify", Title: "Verify selected", RepoID: "repo-1", TrackID: "verify"},
+			{ID: "task-done", Title: "Done task", RepoID: "repo-1", TrackID: "done"},
+		},
+	}
+
+	wideWidth := missionRailCollapsedWidth + len(model.tracks)*trackColumnRenderWidth
+	wide := renderBoard(model, 14, wideWidth)
+	assertRenderedLinesWithinWidth(t, wide, wideWidth)
+	for _, want := range []string{"Backlog task", "Progress task", "Review task", "Verify selected", "Done task"} {
+		if !strings.Contains(stripANSI(wide), want) {
+			t.Fatalf("wide render missing %q: %q", want, stripANSI(wide))
+		}
+	}
+
+	mediumWidth := missionRailCollapsedWidth + 2*trackColumnRenderWidth
+	medium := renderBoard(model, 14, mediumWidth)
+	assertRenderedLinesWithinWidth(t, medium, mediumWidth)
+	if !strings.Contains(stripANSI(medium), "Verify selected") {
+		t.Fatalf("medium render = %q, want selected column visible", stripANSI(medium))
+	}
+
+	narrowWidth := 30
+	narrow := renderBoard(model, 14, narrowWidth)
+	assertRenderedLinesWithinWidth(t, narrow, narrowWidth)
+	plainNarrow := stripANSI(narrow)
+	if !strings.Contains(plainNarrow, "Verify selected") {
+		t.Fatalf("narrow render = %q, want selected task visible", plainNarrow)
+	}
+	if strings.Contains(plainNarrow, "MISS") {
+		t.Fatalf("narrow render = %q, want mission rail hidden", plainNarrow)
+	}
+}
+
+func assertRenderedLinesWithinWidth(t *testing.T, value string, width int) {
+	t.Helper()
+	for _, line := range strings.Split(value, "\n") {
+		if got := plainWidth(line); got > width {
+			t.Fatalf("rendered line width = %d, want <= %d: %q", got, width, stripANSI(line))
+		}
+	}
+}
+
 func TestRenderMissionRailExpandedShowsTaskStates(t *testing.T) {
 	model := &Model{
 		height:                   20,
@@ -181,6 +242,30 @@ func TestHandleKeyUTogglesMissionRail(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("handleKey(u) returned nil cmd")
+	}
+}
+
+func TestHandleKeyEnterOnActiveTmuxTaskAttachesWithoutOpeningSession(t *testing.T) {
+	model := &Model{
+		focus:                      FocusBoard,
+		activeTaskID:               "task-1",
+		activeSessionBackendType:   SessionBackendTmux,
+		activeSessionAttachCommand: "env -u TMUX tmux attach-session -t ab_task_1_p",
+		tracks: []TrackRecord{
+			{ID: "backlog", Label: "Backlog", SortOrder: 1},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", Title: "Selected", TrackID: "backlog", SessionID: "session-1"},
+		},
+	}
+
+	cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("handleKey(enter) returned nil cmd")
+	}
+	msg := cmd()
+	if _, ok := msg.(tmuxPaneAttachedMsg); !ok {
+		t.Fatalf("handleKey(enter) msg = %T, want tmuxPaneAttachedMsg", msg)
 	}
 }
 

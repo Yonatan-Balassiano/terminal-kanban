@@ -575,6 +575,12 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "enter":
 		task := m.selectedTask()
 		if task != nil {
+			if task.ID == m.activeTaskID && m.terminalBackendTypeForSlot(SessionSlotPrimary) == SessionBackendTmux {
+				m.focusedTerminalSlot = SessionSlotPrimary
+				if attachCommand := m.terminalAttachCommandForSlot(SessionSlotPrimary); attachCommand != "" {
+					return m.attachTmuxSessionCmd(attachCommand)
+				}
+			}
 			return m.openSessionCmd(task.ID, false, SessionSlotPrimary)
 		}
 	case "R":

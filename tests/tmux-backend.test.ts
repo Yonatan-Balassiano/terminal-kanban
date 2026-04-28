@@ -61,6 +61,13 @@ describe('TmuxBackend', () => {
       'ab_friday_thing_2e30_p',
       '-c',
       '/tmp/repo',
+      ';',
+      'set-option',
+      '-q',
+      '-t',
+      'ab_friday_thing_2e30_p',
+      'destroy-unattached',
+      'off',
     ]);
     expect(calls.some((args) => args[0] === 'send-keys' && args.includes('-l'))).toBe(true);
   });
@@ -88,7 +95,30 @@ describe('TmuxBackend', () => {
       sessionBootstrapScript: '/tmp/bootstrap.sh',
     });
 
-    expect(calls).toEqual([['has-session', '-t', 'ab_friday_thing_2e30_s']]);
+    expect(calls).toEqual([
+      ['has-session', '-t', 'ab_friday_thing_2e30_s'],
+      ['set-option', '-q', '-t', 'ab_friday_thing_2e30_s', 'destroy-unattached', 'off'],
+    ]);
+  });
+
+  it('marks inspected tmux sessions to survive detach', async () => {
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({ runner });
+
+    await expect(backend.inspect('ab_friday_thing_2e30_p')).resolves.toEqual({
+      backendSessionId: 'ab_friday_thing_2e30_p',
+      status: 'active',
+    });
+
+    expect(calls).toEqual([
+      ['has-session', '-t', 'ab_friday_thing_2e30_p'],
+      ['set-option', '-q', '-t', 'ab_friday_thing_2e30_p', 'destroy-unattached', 'off'],
+    ]);
   });
 
   it('forwards text literally and sends newlines as Enter keys', () => {

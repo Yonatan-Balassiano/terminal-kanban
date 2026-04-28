@@ -188,32 +188,51 @@ function launchManagedTmux(binary: string, socketPath: string, config: AppConfig
   const command =
     `AGENTBOARD_SOCKET_PATH=${shellQuote(socketPath)} ` +
     `AGENTBOARD_TMUX_MANAGED=1 ${shellQuote(binary)}`;
+  const env = {
+    ...process.env,
+    AGENTBOARD_SOCKET_PATH: socketPath,
+    AGENTBOARD_TMUX_MANAGED: '1',
+  };
+  const layoutSessionName = config.tmux.layoutSessionName;
 
-  const result = spawnSync(
-    'tmux',
-    ['new-session', '-A', '-s', config.tmux.layoutSessionName, command],
-    {
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        AGENTBOARD_SOCKET_PATH: socketPath,
-        AGENTBOARD_TMUX_MANAGED: '1',
-      },
+  const existing = spawnSync('tmux', ['has-session', '-t', layoutSessionName], {
+    stdio: 'ignore',
+    env,
+  });
+  handleTmuxSpawnError(existing);
+  if (existing.status === 0) {
+    const killed = spawnSync('tmux', ['kill-session', '-t', layoutSessionName], {
+      stdio: 'ignore',
+      env,
+    });
+    handleTmuxSpawnError(killed);
+    if (typeof killed.status === 'number' && killed.status !== 0) {
+      throw new Error(`Failed to replace existing tmux layout session: ${layoutSessionName}`);
     }
-  );
-
-  if (result.error) {
-    if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(
-        'tmux not found. Install tmux or set "sessionBackend": "pty" in AgentBoard config.'
-      );
-    }
-    throw result.error;
   }
+
+  const result = spawnSync('tmux', ['new-session', '-s', layoutSessionName, command], {
+    stdio: 'inherit',
+    env,
+  });
+
+  handleTmuxSpawnError(result);
 
   if (typeof result.status === 'number' && result.status !== 0) {
     process.exit(result.status);
   }
+}
+
+function handleTmuxSpawnError(result: ReturnType<typeof spawnSync>): void {
+  if (!result.error) {
+    return;
+  }
+  if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
+    throw new Error(
+      'tmux not found. Install tmux or set "sessionBackend": "pty" in AgentBoard config.'
+    );
+  }
+  throw result.error;
 }
 
 function launchGoTUI(socketPath: string, config: AppConfig): void {

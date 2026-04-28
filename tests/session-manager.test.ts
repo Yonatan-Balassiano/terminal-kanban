@@ -392,6 +392,97 @@ describe('SessionManager branch fallback', () => {
     expect(board.getTask(task.id)?.sessionId).toBe('session-tmux');
   });
 
+  it('keeps existing tmux task sessions alive when opening a different task', async () => {
+    const first = board.createTask({ title: 'First tmux', repoId: 'repo-1' });
+    const second = board.createTask({ title: 'Second tmux', repoId: 'repo-1' });
+    board.linkSession(first.id, 'session-old');
+
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'session-old',
+      first.id,
+      'tmux',
+      'ab_first_tmux_1111_p',
+      'env -u TMUX tmux attach-session -t ab_first_tmux_1111_p',
+      'active',
+      '/tmp/repo-1',
+      first.branchName,
+      1,
+      1,
+      1
+    );
+
+    const terminate = vi.fn<[string], Promise<void>>(async () => {});
+    const tmuxBackend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+        id: 'session-new',
+        taskId: opts.taskId,
+        slot: opts.slot,
+        backendType: 'tmux',
+        backendSessionId: 'ab_second_tmux_2222_p',
+        attachCommand: 'env -u TMUX tmux attach-session -t ab_second_tmux_2222_p',
+        status: 'active',
+        cwd: opts.cwd ?? opts.repoPath,
+        branch: opts.branch,
+        createdAt: 2,
+        updatedAt: 2,
+      })),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async (id) => ({
+        command: `env -u TMUX tmux attach-session -t ${id}`,
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate,
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new BackendSelectingSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+        resize() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      {
+        tmux: tmuxBackend,
+        pty: tmuxBackend,
+      },
+      'tmux'
+    );
+
+    const session = await manager.openSession(second.id);
+    const oldSession = db
+      .prepare<[string], { status: string }>('SELECT status FROM sessions WHERE id = ?')
+      .get('session-old');
+
+    expect(session.id).toBe('session-new');
+    expect(terminate).not.toHaveBeenCalled();
+    expect(oldSession?.status).toBe('active');
+    expect(board.getTask(first.id)?.sessionId).toBe('session-old');
+    expect(board.getTask(second.id)?.sessionId).toBe('session-new');
+  });
+
   it('reattaches live tmux session rows instead of treating them as legacy orphaned rows', async () => {
     const task = board.createTask({ title: 'Resume tmux', repoId: 'repo-1' });
     board.linkSession(task.id, 'session-1');
@@ -424,6 +515,7 @@ describe('SessionManager branch fallback', () => {
     const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async () => {
       throw new Error('should reattach existing tmux session');
     });
+    const terminate = vi.fn<[string], Promise<void>>(async () => {});
 
     const tmuxBackend: SessionBackend = {
       create,
@@ -434,7 +526,7 @@ describe('SessionManager branch fallback', () => {
       resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
       list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
       inspect,
-      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      terminate,
       healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
     };
 
@@ -473,6 +565,7 @@ describe('SessionManager branch fallback', () => {
     expect(session.id).toBe('session-1');
     expect(session.backendType).toBe('tmux');
     expect(create).not.toHaveBeenCalled();
+    expect(terminate).not.toHaveBeenCalled();
     expect(inspect).toHaveBeenCalledWith('ab_resume_tmux_1234_p');
     expect(activity?.sessionStatus).toBe('active');
   });
@@ -1253,6 +1346,72 @@ describe('SessionManager branch fallback', () => {
       2,
       expect.objectContaining({ taskId: task.id, slot: 'secondary' })
     );
+    expect(board.getTask(task.id)?.sessionId).toBe('session-1');
+    expect(board.getTask(task.id)?.secondarySessionId).toBe('session-2');
+  });
+
+  it('opens primary and secondary tmux sessions without terminating either slot', async () => {
+    const task = board.createTask({ title: 'Dual tmux', repoId: 'repo-1' });
+
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: opts.slot === 'secondary' ? 'session-2' : 'session-1',
+      taskId: opts.taskId,
+      slot: opts.slot,
+      backendType: 'tmux',
+      backendSessionId: opts.slot === 'secondary' ? 'ab_dual_tmux_2e30_s' : 'ab_dual_tmux_2e30_p',
+      attachCommand:
+        opts.slot === 'secondary'
+          ? 'env -u TMUX tmux attach-session -t ab_dual_tmux_2e30_s'
+          : 'env -u TMUX tmux attach-session -t ab_dual_tmux_2e30_p',
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+    const terminate = vi.fn<[string], Promise<void>>(async () => {});
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async (id) => ({
+        command: `env -u TMUX tmux attach-session -t ${id}`,
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate,
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    await manager.setDualSessionMode(task.id, true);
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(terminate).not.toHaveBeenCalled();
     expect(board.getTask(task.id)?.sessionId).toBe('session-1');
     expect(board.getTask(task.id)?.secondarySessionId).toBe('session-2');
   });

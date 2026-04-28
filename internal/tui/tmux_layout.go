@@ -7,7 +7,11 @@ import (
 	"strings"
 )
 
-const tmuxSessionPaneOption = "@agentboard_session_pane"
+const (
+	tmuxBoardPaneOption            = "@agentboard_board_pane"
+	tmuxSessionPaneOption          = "@agentboard_session_pane"
+	tmuxSessionAttachCommandOption = "@agentboard_session_attach_command"
+)
 
 type tmuxRunner interface {
 	Run(args ...string) (string, error)
@@ -44,16 +48,20 @@ func attachTaskSessionInTmuxWithRunner(tmuxEnv string, runner tmuxRunner, attach
 		return err
 	}
 
-	paneID := ""
-	if storedPane, err := runner.Run("show-window-options", "-qv", tmuxSessionPaneOption); err == nil {
-		storedPane = strings.TrimSpace(storedPane)
-		if storedPane != "" && storedPane != currentPane && tmuxPaneExistsInCurrentWindow(runner, storedPane) {
-			paneID = storedPane
+	boardPane := tmuxWindowOption(runner, tmuxBoardPaneOption)
+	if boardPane == "" || !tmuxPaneExistsInCurrentWindow(runner, boardPane) {
+		boardPane = currentPane
+		if _, err := runner.Run("set-window-option", "-q", tmuxBoardPaneOption, boardPane); err != nil {
+			return err
 		}
 	}
 
+	paneID := tmuxWindowOption(runner, tmuxSessionPaneOption)
+	if paneID != "" && (paneID == boardPane || !tmuxPaneExistsInCurrentWindow(runner, paneID)) {
+		paneID = ""
+	}
 	if paneID == "" {
-		paneID, err = tmuxSplitRightPane(runner)
+		paneID, err = tmuxSplitRightPane(runner, boardPane)
 		if err != nil {
 			return err
 		}
@@ -62,11 +70,24 @@ func attachTaskSessionInTmuxWithRunner(tmuxEnv string, runner tmuxRunner, attach
 		}
 	}
 
-	if _, err := runner.Run("respawn-pane", "-k", "-t", paneID, attachCommand); err != nil {
-		return err
+	if tmuxWindowOption(runner, tmuxSessionAttachCommandOption) != attachCommand {
+		if _, err := runner.Run("respawn-pane", "-k", "-t", paneID, attachCommand); err != nil {
+			return err
+		}
+		if _, err := runner.Run("set-window-option", "-q", tmuxSessionAttachCommandOption, attachCommand); err != nil {
+			return err
+		}
 	}
 	_, err = runner.Run("select-pane", "-t", paneID)
 	return err
+}
+
+func tmuxWindowOption(runner tmuxRunner, option string) string {
+	output, err := runner.Run("show-window-options", "-qv", option)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(output)
 }
 
 func tmuxCurrentPane(runner tmuxRunner) (string, error) {
@@ -81,8 +102,13 @@ func tmuxCurrentPane(runner tmuxRunner) (string, error) {
 	return paneID, nil
 }
 
-func tmuxSplitRightPane(runner tmuxRunner) (string, error) {
-	output, err := runner.Run("split-window", "-h", "-P", "-F", "#{pane_id}")
+func tmuxSplitRightPane(runner tmuxRunner, targetPane string) (string, error) {
+	args := []string{"split-window", "-h"}
+	if strings.TrimSpace(targetPane) != "" {
+		args = append(args, "-t", targetPane)
+	}
+	args = append(args, "-P", "-F", "#{pane_id}")
+	output, err := runner.Run(args...)
 	if err != nil {
 		return "", err
 	}

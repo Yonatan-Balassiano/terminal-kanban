@@ -99,6 +99,14 @@ export class TmuxBackend implements SessionBackend {
     this.now = options.now ?? Date.now;
   }
 
+  private async ensureSessionSurvivesDetach(backendSessionId: string): Promise<void> {
+    try {
+      await this.runner(['set-option', '-q', '-t', backendSessionId, 'destroy-unattached', 'off']);
+    } catch {
+      // Best effort: older/missing sessions should not make attach/inspect fail.
+    }
+  }
+
   async healthCheck(): Promise<BackendHealth> {
     try {
       const result = await this.runner(['-V']);
@@ -114,7 +122,21 @@ export class TmuxBackend implements SessionBackend {
     const existing = await this.inspect(backendSessionId);
 
     if (!existing) {
-      await this.runner(['new-session', '-d', '-s', backendSessionId, '-c', cwd]);
+      await this.runner([
+        'new-session',
+        '-d',
+        '-s',
+        backendSessionId,
+        '-c',
+        cwd,
+        ';',
+        'set-option',
+        '-q',
+        '-t',
+        backendSessionId,
+        'destroy-unattached',
+        'off',
+      ]);
       const bootstrapCommand = buildNewSessionBootstrapCommand({
         repoPath: opts.repoPath,
         branch: opts.branch,
@@ -146,6 +168,7 @@ export class TmuxBackend implements SessionBackend {
   }
 
   async attachMetadata(backendSessionId: string): Promise<AttachMetadata> {
+    await this.ensureSessionSurvivesDetach(backendSessionId);
     return { command: buildTmuxAttachCommand(backendSessionId) };
   }
 
@@ -186,6 +209,7 @@ export class TmuxBackend implements SessionBackend {
   async inspect(backendSessionId: string): Promise<BackendSessionInfo | null> {
     try {
       await this.runner(['has-session', '-t', backendSessionId]);
+      await this.ensureSessionSurvivesDetach(backendSessionId);
       return {
         backendSessionId,
         status: 'active',
