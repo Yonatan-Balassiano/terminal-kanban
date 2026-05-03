@@ -10,7 +10,10 @@ import (
 const (
 	tmuxBoardPaneOption            = "@agentboard_board_pane"
 	tmuxSessionPaneOption          = "@agentboard_session_pane"
-	tmuxSessionAttachCommandOption = "@agentboard_session_attach_command"
+	tmuxSessionBackendIDOption     = "@agentboard_session_backend_id"
+	tmuxBackendSessionIDPaneOption = "@agentboard_backend_session_id"
+	tmuxHoldingSessionName         = "agentboard-task-panes"
+	tmuxLayoutLockName             = "agentboard_attach_layout"
 )
 
 type tmuxRunner interface {
@@ -18,6 +21,11 @@ type tmuxRunner interface {
 }
 
 type execTmuxRunner struct{}
+
+type tmuxPaneRecord struct {
+	ID               string
+	BackendSessionID string
+}
 
 func (execTmuxRunner) Run(args ...string) (string, error) {
 	output, err := exec.Command("tmux", args...).CombinedOutput()
@@ -31,59 +39,177 @@ func (execTmuxRunner) Run(args ...string) (string, error) {
 	return string(output), nil
 }
 
-func attachTaskSessionInTmux(attachCommand string) error {
-	return attachTaskSessionInTmuxWithRunner(os.Getenv("TMUX"), execTmuxRunner{}, attachCommand)
+func attachTaskSessionInTmux(backendSessionID string) error {
+	return attachTaskSessionInTmuxWithEnvironment(
+		os.Getenv("TMUX"),
+		os.Getenv("TMUX_PANE"),
+		execTmuxRunner{},
+		backendSessionID,
+	)
 }
 
-func attachTaskSessionInTmuxWithRunner(tmuxEnv string, runner tmuxRunner, attachCommand string) error {
+func attachTaskSessionInTmuxWithRunner(tmuxEnv string, runner tmuxRunner, backendSessionID string) error {
+	return attachTaskSessionInTmuxWithEnvironment(tmuxEnv, "", runner, backendSessionID)
+}
+
+func attachTaskSessionInTmuxWithEnvironment(tmuxEnv string, tmuxPane string, runner tmuxRunner, backendSessionID string) error {
 	if strings.TrimSpace(tmuxEnv) == "" {
 		return fmt.Errorf("not inside tmux; run agentboard from its managed tmux layout")
 	}
-	if strings.TrimSpace(attachCommand) == "" {
-		return fmt.Errorf("tmux session has no attach command")
+	backendSessionID = strings.TrimSpace(backendSessionID)
+	if backendSessionID == "" {
+		return fmt.Errorf("tmux session has no backend session id")
 	}
 
-	currentPane, err := tmuxCurrentPane(runner)
+	if _, err := runner.Run("wait-for", "-L", tmuxLayoutLockName); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = runner.Run("wait-for", "-U", tmuxLayoutLockName)
+	}()
+
+	boardPane, err := tmuxResolveBoardPane(runner, tmuxPane)
 	if err != nil {
 		return err
 	}
 
-	boardPane := tmuxWindowOption(runner, tmuxBoardPaneOption)
-	if boardPane == "" || !tmuxPaneExistsInCurrentWindow(runner, boardPane) {
-		boardPane = currentPane
-		if _, err := runner.Run("set-window-option", "-q", tmuxBoardPaneOption, boardPane); err != nil {
+	if err := tmuxSetWindowOption(runner, boardPane, tmuxBoardPaneOption, boardPane); err != nil {
+		return err
+	}
+
+	paneID := tmuxWindowOption(runner, boardPane, tmuxSessionPaneOption)
+	visibleBackendSessionID := tmuxWindowOption(runner, boardPane, tmuxSessionBackendIDOption)
+
+	visiblePanes, err := tmuxPanesInWindow(runner, boardPane)
+	if err != nil {
+		return err
+	}
+	visibleTaskPanes := tmuxTaskPanes(visiblePanes, boardPane)
+
+	if visibleBackendSessionID == backendSessionID && len(visibleTaskPanes) > 0 {
+		if err := tmuxTagPaneGroup(runner, visibleTaskPanes, backendSessionID); err != nil {
+			return err
+		}
+		selectedPane := tmuxPreferredPane(paneID, visibleTaskPanes)
+		if err := tmuxSetWindowOption(runner, boardPane, tmuxSessionPaneOption, selectedPane); err != nil {
+			return err
+		}
+		if err := tmuxSetWindowOption(runner, boardPane, tmuxSessionBackendIDOption, backendSessionID); err != nil {
+			return err
+		}
+		_, err = runner.Run("select-pane", "-t", selectedPane)
+		return err
+	}
+
+	if len(visibleTaskPanes) > 0 {
+		if err := tmuxDetachVisibleSessionPanes(runner, visibleTaskPanes, visibleBackendSessionID); err != nil {
 			return err
 		}
 	}
 
-	paneID := tmuxWindowOption(runner, tmuxSessionPaneOption)
-	if paneID != "" && (paneID == boardPane || !tmuxPaneExistsInCurrentWindow(runner, paneID)) {
-		paneID = ""
+	sourcePanes, err := tmuxFindBackendPanes(runner, backendSessionID)
+	if err != nil {
+		return err
 	}
-	if paneID == "" {
-		paneID, err = tmuxSplitRightPane(runner, boardPane)
-		if err != nil {
-			return err
-		}
-		if _, err := runner.Run("set-window-option", "-q", tmuxSessionPaneOption, paneID); err != nil {
-			return err
-		}
+	if len(sourcePanes) == 0 {
+		return fmt.Errorf("tmux task pane not found: %s", backendSessionID)
 	}
 
-	if tmuxWindowOption(runner, tmuxSessionAttachCommandOption) != attachCommand {
-		if _, err := runner.Run("respawn-pane", "-k", "-t", paneID, attachCommand); err != nil {
+	joinedPanes := []string{}
+	for _, sourcePane := range sourcePanes {
+		if strings.TrimSpace(sourcePane) == "" || sourcePane == boardPane {
+			continue
+		}
+		if err := tmuxSetPaneOption(runner, sourcePane, tmuxBackendSessionIDPaneOption, backendSessionID); err != nil {
 			return err
 		}
-		if _, err := runner.Run("set-window-option", "-q", tmuxSessionAttachCommandOption, attachCommand); err != nil {
+		joinDirection := "-h"
+		joinTarget := boardPane
+		if len(joinedPanes) > 0 {
+			joinDirection = "-v"
+			joinTarget = joinedPanes[len(joinedPanes)-1]
+		}
+		if _, err := runner.Run("join-pane", joinDirection, "-s", sourcePane, "-t", joinTarget); err != nil {
 			return err
 		}
+		joinedPanes = append(joinedPanes, sourcePane)
 	}
-	_, err = runner.Run("select-pane", "-t", paneID)
+	if len(joinedPanes) == 0 {
+		return fmt.Errorf("tmux task pane not found: %s", backendSessionID)
+	}
+
+	if err := tmuxSetWindowOption(runner, boardPane, tmuxSessionPaneOption, joinedPanes[0]); err != nil {
+		return err
+	}
+	if err := tmuxSetWindowOption(runner, boardPane, tmuxSessionBackendIDOption, backendSessionID); err != nil {
+		return err
+	}
+	_, err = runner.Run("select-pane", "-t", joinedPanes[0])
 	return err
 }
 
-func tmuxWindowOption(runner tmuxRunner, option string) string {
-	output, err := runner.Run("show-window-options", "-qv", option)
+func tmuxResolveBoardPane(runner tmuxRunner, tmuxPane string) (string, error) {
+	tmuxPane = strings.TrimSpace(tmuxPane)
+	if tmuxPane != "" && tmuxPaneExists(runner, tmuxPane) {
+		return tmuxPane, nil
+	}
+
+	currentPane, err := tmuxCurrentPane(runner)
+	if err != nil {
+		return "", err
+	}
+
+	boardPane := tmuxWindowOption(runner, currentPane, tmuxBoardPaneOption)
+	if boardPane == currentPane {
+		return currentPane, nil
+	}
+	if boardPane != "" && tmuxPaneExists(runner, boardPane) {
+		return boardPane, nil
+	}
+
+	return currentPane, nil
+}
+
+func tmuxWindowOption(runner tmuxRunner, targetPane string, option string) string {
+	args := []string{"show-options", "-w", "-q", "-v"}
+	if strings.TrimSpace(targetPane) != "" {
+		args = append(args, "-t", targetPane)
+	}
+	args = append(args, option)
+	output, err := runner.Run(args...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(output)
+}
+
+func tmuxSetWindowOption(runner tmuxRunner, targetPane string, option string, value string) error {
+	args := []string{"set-window-option", "-q"}
+	if strings.TrimSpace(targetPane) != "" {
+		args = append(args, "-t", targetPane)
+	}
+	args = append(args, option, value)
+	_, err := runner.Run(args...)
+	return err
+}
+
+func tmuxSetPaneOption(runner tmuxRunner, targetPane string, option string, value string) error {
+	args := []string{"set-option", "-p", "-q"}
+	if strings.TrimSpace(targetPane) != "" {
+		args = append(args, "-t", targetPane)
+	}
+	args = append(args, option, value)
+	_, err := runner.Run(args...)
+	return err
+}
+
+func tmuxPaneOption(runner tmuxRunner, targetPane string, option string) string {
+	args := []string{"show-options", "-p", "-q", "-v"}
+	if strings.TrimSpace(targetPane) != "" {
+		args = append(args, "-t", targetPane)
+	}
+	args = append(args, option)
+	output, err := runner.Run(args...)
 	if err != nil {
 		return ""
 	}
@@ -119,8 +245,169 @@ func tmuxSplitRightPane(runner tmuxRunner, targetPane string) (string, error) {
 	return paneID, nil
 }
 
-func tmuxPaneExistsInCurrentWindow(runner tmuxRunner, paneID string) bool {
-	output, err := runner.Run("list-panes", "-F", "#{pane_id}")
+func tmuxPanesInWindow(runner tmuxRunner, targetPane string) ([]tmuxPaneRecord, error) {
+	output, err := runner.Run("list-panes", "-t", targetPane, "-F", "#{pane_id}\t#{@agentboard_backend_session_id}")
+	if err != nil {
+		return nil, err
+	}
+	return tmuxParsePaneRecords(output), nil
+}
+
+func tmuxParsePaneRecords(output string) []tmuxPaneRecord {
+	panes := []tmuxPaneRecord{}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		paneID := strings.TrimSpace(parts[0])
+		if paneID == "" {
+			continue
+		}
+		record := tmuxPaneRecord{ID: paneID}
+		if len(parts) == 2 {
+			record.BackendSessionID = strings.TrimSpace(parts[1])
+		}
+		panes = append(panes, record)
+	}
+	return panes
+}
+
+func tmuxTaskPanes(panes []tmuxPaneRecord, boardPane string) []tmuxPaneRecord {
+	taskPanes := []tmuxPaneRecord{}
+	for _, pane := range panes {
+		if strings.TrimSpace(pane.ID) == "" || pane.ID == boardPane {
+			continue
+		}
+		taskPanes = append(taskPanes, pane)
+	}
+	return taskPanes
+}
+
+func tmuxPreferredPane(preferredPane string, panes []tmuxPaneRecord) string {
+	preferredPane = strings.TrimSpace(preferredPane)
+	for _, pane := range panes {
+		if pane.ID == preferredPane {
+			return preferredPane
+		}
+	}
+	if len(panes) == 0 {
+		return ""
+	}
+	return panes[0].ID
+}
+
+func tmuxTagPaneGroup(runner tmuxRunner, panes []tmuxPaneRecord, backendSessionID string) error {
+	for _, pane := range panes {
+		if err := tmuxSetPaneOption(runner, pane.ID, tmuxBackendSessionIDPaneOption, backendSessionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tmuxFindBackendPanes(runner tmuxRunner, backendSessionID string) ([]string, error) {
+	output, err := runner.Run("list-panes", "-a", "-F", "#{pane_id}\t#{@agentboard_backend_session_id}")
+	if err == nil {
+		panes := []string{}
+		for _, line := range strings.Split(output, "\n") {
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) == 2 && strings.TrimSpace(parts[1]) == backendSessionID {
+				paneID := strings.TrimSpace(parts[0])
+				if paneID != "" {
+					panes = append(panes, paneID)
+				}
+			}
+		}
+		if len(panes) > 0 {
+			return panes, nil
+		}
+	}
+
+	output, err = runner.Run("display-message", "-p", "-t", backendSessionID, "#{pane_id}")
+	if err != nil {
+		return nil, nil
+	}
+	paneID := strings.TrimSpace(output)
+	if paneID == "" {
+		return nil, nil
+	}
+	return []string{paneID}, nil
+}
+
+func tmuxMovePaneToHoldingSession(runner tmuxRunner, paneID string) error {
+	return tmuxMovePanesToHoldingSession(runner, []string{paneID})
+}
+
+func tmuxMovePanesToHoldingSession(runner tmuxRunner, paneIDs []string) error {
+	if len(paneIDs) == 0 {
+		return nil
+	}
+	if err := tmuxEnsureHoldingSession(runner); err != nil {
+		return err
+	}
+	for _, paneID := range paneIDs {
+		if _, err := runner.Run("break-pane", "-d", "-s", paneID, "-t", tmuxHoldingSessionName+":"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tmuxDetachVisibleSessionPanes(runner tmuxRunner, panes []tmuxPaneRecord, backendSessionID string) error {
+	backendSessionID = strings.TrimSpace(backendSessionID)
+	panesToMove := []string{}
+	for _, pane := range panes {
+		if backendSessionID != "" {
+			if err := tmuxSetPaneOption(runner, pane.ID, tmuxBackendSessionIDPaneOption, backendSessionID); err != nil {
+				return err
+			}
+			panesToMove = append(panesToMove, pane.ID)
+			continue
+		}
+
+		if pane.BackendSessionID != "" || tmuxPaneOption(runner, pane.ID, tmuxBackendSessionIDPaneOption) != "" {
+			panesToMove = append(panesToMove, pane.ID)
+			continue
+		}
+
+		if _, err := runner.Run("kill-pane", "-t", pane.ID); err != nil {
+			return err
+		}
+	}
+	return tmuxMovePanesToHoldingSession(runner, panesToMove)
+}
+
+func tmuxEnsureHoldingSession(runner tmuxRunner) error {
+	if _, err := runner.Run("has-session", "-t", tmuxHoldingSessionName); err == nil {
+		return nil
+	}
+	if _, err := runner.Run("new-session", "-d", "-s", tmuxHoldingSessionName, "sh -lc 'while :; do sleep 3600; done'"); err != nil {
+		return err
+	}
+	_, err := runner.Run("set-option", "-q", "-t", tmuxHoldingSessionName, "destroy-unattached", "off")
+	return err
+}
+
+func tmuxPaneExists(runner tmuxRunner, paneID string) bool {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		return false
+	}
+	output, err := runner.Run("display-message", "-p", "-t", paneID, "#{pane_id}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(output) == paneID
+}
+
+func tmuxPaneExistsInWindow(runner tmuxRunner, targetPane string, paneID string) bool {
+	paneID = strings.TrimSpace(paneID)
+	targetPane = strings.TrimSpace(targetPane)
+	if paneID == "" || targetPane == "" {
+		return false
+	}
+	output, err := runner.Run("list-panes", "-t", targetPane, "-F", "#{pane_id}")
 	if err != nil {
 		return false
 	}

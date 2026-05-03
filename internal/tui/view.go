@@ -86,6 +86,9 @@ func renderContent(m *Model) string {
 	stacked := showSplitTerminal && m.terminalLayoutMode == TerminalLayoutMode("top-bottom")
 
 	if !showSplitTerminal {
+		if m.boardOverviewMode {
+			return renderOverviewBoard(m, contentHeight, m.width)
+		}
 		return renderBoard(m, contentHeight, m.width)
 	}
 
@@ -96,8 +99,12 @@ func renderContent(m *Model) string {
 		}
 		boardHeight := max(1, (contentHeight-dividerHeight+1)/2)
 		terminalHeight := max(1, contentHeight-boardHeight-dividerHeight)
+		boardFn := renderBoard
+		if m.boardOverviewMode {
+			boardFn = renderOverviewBoard
+		}
 		chunks := []string{
-			fitHeight(renderBoard(m, boardHeight, m.width), boardHeight),
+			fitHeight(boardFn(m, boardHeight, m.width), boardHeight),
 		}
 		if dividerHeight > 0 {
 			chunks = append(chunks, fitHeight(lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render(strings.Repeat("─", max(1, m.width))), 1))
@@ -107,7 +114,11 @@ func renderContent(m *Model) string {
 	}
 
 	boardWidth := m.sideBySideBoardWidth()
-	boardView := fitSize(renderBoard(m, contentHeight, boardWidth), boardWidth, contentHeight)
+	boardRenderFn := renderBoard
+	if m.boardOverviewMode {
+		boardRenderFn = renderOverviewBoard
+	}
+	boardView := fitSize(boardRenderFn(m, contentHeight, boardWidth), boardWidth, contentHeight)
 	terminalView := fitHeight(renderTerminalPane(m, contentHeight, false), contentHeight)
 	divider := renderVerticalDivider(contentHeight)
 	return lipgloss.JoinHorizontal(lipgloss.Top, boardView, divider, terminalView)
@@ -164,7 +175,7 @@ func renderHeader(m *Model) string {
 
 	row1Left := []string{
 		badge("agentboard", "accent", "", false),
-		badge(truncateText(valueOrAllRepos(activeRepo), 18), "muted", "◈", false),
+		badge(repoPositionLabel(m, activeRepo), "muted", "◈", false),
 	}
 	if activeView != nil {
 		row1Left = append(row1Left, badge(truncateText(activeView.Label, 16), "purple", "⌘", false))
@@ -589,9 +600,14 @@ func renderTrackWithWidth(m *Model, track TrackRecord, tasks []TaskRecord, isSel
 	headerWidth := max(1, trackStyleWidth-2)
 	taskCardStyleWidth := max(1, trackStyleWidth-2)
 	taskCardContentWidth := max(1, taskCardStyleWidth-2)
+	listDensity := m.boardDensityMode == "list"
 	taskHeights := make([]int, 0, len(tasks))
 	for _, task := range tasks {
-		taskHeights = append(taskHeights, taskCardHeightForWidth(m, task, taskCardContentWidth, compact))
+		if listDensity {
+			taskHeights = append(taskHeights, 1)
+		} else {
+			taskHeights = append(taskHeights, taskCardHeightForWidth(m, task, taskCardContentWidth, compact))
+		}
 	}
 	listHeight := max(1, height-3)
 	windowStart, windowEnd := visibleWindow(taskHeights, ternaryInt(isSelected, m.selectedTaskIndex, 0), listHeight)
@@ -609,17 +625,29 @@ func renderTrackWithWidth(m *Model, track TrackRecord, tasks []TaskRecord, isSel
 	} else {
 		for offset, task := range visibleTasks {
 			actualIndex := windowStart + offset
-			bodyLines = append(bodyLines, renderTaskCardWithWidth(
-				m,
-				task,
-				isBoardSelection && actualIndex == m.selectedTaskIndex,
-				m.activeTaskID == task.ID,
-				m.sessionActivityByTaskID[task.ID],
-				repoLabels[task.RepoID],
-				taskCardStyleWidth,
-				taskCardContentWidth,
-				compact,
-			))
+			if listDensity {
+				bodyLines = append(bodyLines, renderTaskRow(
+					m,
+					task,
+					isBoardSelection && actualIndex == m.selectedTaskIndex,
+					m.activeTaskID == task.ID,
+					m.sessionActivityByTaskID[task.ID],
+					repoLabels[task.RepoID],
+					taskCardContentWidth,
+				))
+			} else {
+				bodyLines = append(bodyLines, renderTaskCardWithWidth(
+					m,
+					task,
+					isBoardSelection && actualIndex == m.selectedTaskIndex,
+					m.activeTaskID == task.ID,
+					m.sessionActivityByTaskID[task.ID],
+					repoLabels[task.RepoID],
+					taskCardStyleWidth,
+					taskCardContentWidth,
+					compact,
+				))
+			}
 		}
 	}
 
@@ -675,11 +703,22 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 
 func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSession bool, activity *SessionActivitySnapshot, repoLabel string, cardStyleWidth int, contentWidth int, compact bool) string {
 	borderColor := taskCardBorderColor(task, isSelected)
+	if task.SessionAttentionNeeded {
+		if m.spinnerIndex%2 == 0 {
+			borderColor = uiChrome.Warning
+		} else {
+			borderColor = uiChrome.Danger
+		}
+	}
 	headerStatus := headerStatusModel(m, task, activity, isActiveSession)
 	activeSessionIcon := headerStatus.Icon
-	descriptionPreview := descriptionLine(task.Description)
+	descriptionLines := descriptionLinesForWidth(task.Description, contentWidth)
 	missionPreview := taskMissionLine(m, task.ID)
-	titleLines := taskTitleLinesForWidth(task.Title, contentWidth)
+	titleText := task.Title
+	if task.SessionAttentionNeeded {
+		titleText = "⚠ " + titleText
+	}
+	titleLines := taskTitleLinesForWidth(titleText, contentWidth)
 	branchLabel := truncateText(compactBranchLabel(task.BranchName), min(16, max(1, contentWidth/2)))
 	workspaceLabel := "root"
 	if task.WorktreePath != "" {
@@ -726,8 +765,17 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 		}
 		lines = append(lines, style.Render(line))
 	}
-	if descriptionPreview != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(descriptionPreview, contentWidth)))
+	githubStatus := githubStatusBadgeModel(task)
+	if githubStatus != nil {
+		lines = append(lines, badge(
+			truncateText(githubStatus.Label, contentWidth-2),
+			githubStatus.Tone,
+			"",
+			true,
+		))
+	}
+	for _, dl := range descriptionLines {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(dl))
 	}
 	if missionPreview != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Render(truncateText(missionPreview, contentWidth)))
@@ -755,18 +803,6 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 		contentWidth,
 	))
 
-	githubStatus := githubStatusBadgeModel(task)
-	if githubStatus != nil {
-		lines = append(lines, badge(
-			truncateText(githubStatus.Label, contentWidth-2),
-			githubStatus.Tone,
-			"",
-			true,
-		))
-	} else {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(" "))
-	}
-
 	border := lipgloss.RoundedBorder()
 	if isSelected || isActiveSession {
 		border = lipgloss.DoubleBorder()
@@ -778,6 +814,144 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 		BorderForeground(lipgloss.Color(borderColor)).
 		Padding(0, 1).
 		Render(strings.Join(lines, "\n"))
+}
+
+func renderOverviewBoard(m *Model, height int, width int) string {
+	if len(m.repos) == 0 {
+		return fitHeight(
+			lipgloss.NewStyle().Padding(1, 2).Foreground(lipgloss.Color(uiChrome.Muted)).
+				Render("No repos registered. Run: agentboard repos add <path>"),
+			height,
+		)
+	}
+
+	tasksByRepo := map[string][]TaskRecord{}
+	for _, task := range m.visibleTasks() {
+		tasksByRepo[task.RepoID] = append(tasksByRepo[task.RepoID], task)
+	}
+
+	contentWidth := max(1, width-2)
+	rows := []string{}
+	for i, repo := range m.repos {
+		tasks := tasksByRepo[repo.ID]
+
+		var activeSessions, prCount, doneCount int
+		var attentionTitle string
+		var activeTitle string
+		for _, t := range tasks {
+			if t.SessionAttentionNeeded && attentionTitle == "" {
+				attentionTitle = t.Title
+			}
+			if t.SessionID != "" && activeTitle == "" {
+				activeTitle = t.Title
+			}
+			if t.SessionID != "" {
+				activeSessions++
+			}
+			if t.PRState == "open" || t.PRState == "draft" {
+				prCount++
+			}
+			if t.TrackID == "done" {
+				doneCount++
+			}
+		}
+
+		// Status column: attention > active > idle
+		statusText := ""
+		statusColor := uiChrome.Muted
+		if attentionTitle != "" {
+			statusText = "⚠ " + truncatePlain(attentionTitle, 22) + " needs input"
+			statusColor = uiChrome.Warning
+		} else if activeTitle != "" {
+			statusText = "▶ " + truncatePlain(activeTitle, 24)
+			statusColor = uiChrome.Accent
+		} else {
+			statusText = "idle"
+		}
+
+		// Count chips
+		activeStr := "──"
+		if activeSessions > 0 {
+			activeStr = fmt.Sprintf("▶%d", activeSessions)
+		}
+		prStr := fmt.Sprintf("PR %d", prCount)
+		doneStr := fmt.Sprintf("✓%d", doneCount)
+
+		repoLabel := repo.Label
+		if repoLabel == "" {
+			repoLabel = repo.ID
+		}
+
+		left := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Text)).Render(truncatePlain(repoLabel, 10)) +
+			"  " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(truncatePlain(statusText, 36))
+		right := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(activeStr) +
+			"  " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Blue)).Render(prStr) +
+			"  " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Success)).Render(doneStr)
+
+		isSelected := i == m.overviewSelectedIndex
+		isActive := m.activeRepoID == repo.ID
+		rowStyle := lipgloss.NewStyle().Width(contentWidth)
+		if isSelected {
+			rowStyle = rowStyle.Background(lipgloss.Color(uiChrome.PanelAlt))
+		}
+		if isActive && !isSelected {
+			rowStyle = rowStyle.Foreground(lipgloss.Color(uiChrome.AccentMuted))
+		}
+		_ = isActive
+		rows = append(rows, rowStyle.Render(joinSpaceBetween(left, right, contentWidth)))
+	}
+
+	body := strings.Join(rows, "\n")
+	hint := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑/↓ move  Enter → filter to repo  0 all repos  O/Esc exit")
+
+	return fitHeight(
+		lipgloss.NewStyle().
+			Width(contentWidth).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(uiChrome.Line)).
+			Render(body+"\n\n"+hint),
+		height,
+	)
+}
+
+func renderTaskRow(m *Model, task TaskRecord, isSelected, isActiveSession bool, activity *SessionActivitySnapshot, repoLabel string, contentWidth int) string {
+	headerStatus := headerStatusModel(m, task, activity, isActiveSession)
+
+	githubStatus := githubStatusBadgeModel(task)
+	rightParts := []string{}
+	if repoLabel != "" {
+		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncatePlain(repoLabel, 5)))
+	}
+	if githubStatus != nil {
+		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color(toneColor(githubStatus.Tone))).Render(truncatePlain(githubStatus.Label, 14)))
+	}
+	right := strings.Join(rightParts, " ")
+	rightW := plainWidth(right)
+
+	leftBudget := max(1, contentWidth-rightW-1)
+	iconStr := lipgloss.NewStyle().Foreground(lipgloss.Color(headerStatus.Color)).Render(headerStatus.Icon)
+	titleColor := uiChrome.Text
+	if isActiveSession {
+		titleColor = uiChrome.Accent
+	}
+	titleStr := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(titleColor)).
+		Bold(isActiveSession).
+		Render(truncatePlain(task.Title, max(1, leftBudget-2)))
+	left := iconStr + " " + titleStr
+
+	line := joinSpaceBetween(left, right, contentWidth)
+
+	if isSelected {
+		return lipgloss.NewStyle().
+			Width(contentWidth).
+			Background(lipgloss.Color(uiChrome.PanelAlt)).
+			Render(line)
+	}
+	return lipgloss.NewStyle().Width(contentWidth).Render(line)
 }
 
 func renderTerminalPane(m *Model, height int, fullWidth bool) string {
@@ -892,6 +1066,9 @@ func renderTerminalSlotPane(m *Model, activeTask TaskRecord, slot SessionSlot, h
 	rightBadges := []string{
 		badge("REPO "+truncateText(valueOrRepo(activeRepo, activeTask.RepoID), 12), "info", "", false),
 		badge(label, tone, icon, false),
+	}
+	if activeTask.SessionAttentionNeeded {
+		rightBadges = append([]string{badge("⚠ NEEDS INPUT", "warning", "", true)}, rightBadges...)
 	}
 
 	lines := []string{
@@ -1189,11 +1366,20 @@ func taskCardHeight(m *Model, task TaskRecord) int {
 }
 
 func taskCardHeightForWidth(m *Model, task TaskRecord, contentWidth int, compact bool) int {
-	titleLines := taskTitleLinesForWidth(task.Title, contentWidth)
+	titleText := task.Title
+	if task.SessionAttentionNeeded {
+		titleText = "⚠ " + titleText
+	}
+	titleLines := taskTitleLinesForWidth(titleText, contentWidth)
 	if compact {
 		return 4 + len(titleLines)
 	}
-	height := 8 + len(titleLines)
+	// fixed lines: header + sep + sep + pillar/branch + id/age = 5
+	// + 2 borders from lipgloss = 7 base
+	height := 7 + len(titleLines)
+	if githubStatusBadgeModel(task) != nil {
+		height++
+	}
 	if descriptionLine(task.Description) != "" {
 		height++
 	}
@@ -1279,6 +1465,43 @@ func normalizeSingleLine(value string) string {
 
 func descriptionLine(description string) string {
 	return normalizeSingleLine(description)
+}
+
+func descriptionLinesForWidth(description string, width int) []string {
+	normalized := normalizeSingleLine(description)
+	if normalized == "" {
+		return nil
+	}
+	width = max(1, width)
+	words := strings.Fields(normalized)
+	lines := []string{}
+	current := ""
+	for index, word := range words {
+		candidate := strings.TrimSpace(current + " " + word)
+		if plainWidth(candidate) <= width {
+			current = candidate
+			continue
+		}
+		if len(lines) == 1 {
+			remainder := strings.Join(words[index:], " ")
+			tail := strings.TrimSpace(current + " " + remainder)
+			lines = append(lines, truncateText(tail, width))
+			return lines
+		}
+		if current == "" {
+			lines = append(lines, truncateText(word, width))
+			continue
+		}
+		lines = append(lines, current)
+		current = word
+	}
+	if current != "" {
+		lines = append(lines, truncateText(current, width))
+	}
+	if len(lines) > 2 {
+		return lines[:2]
+	}
+	return lines
 }
 
 func compactBranchLabel(branchName string) string {
@@ -1702,6 +1925,22 @@ func workspaceColor(task *TaskRecord) string {
 	return uiChrome.Muted
 }
 
+func repoPositionLabel(m *Model, activeRepo *RepoRecord) string {
+	if activeRepo == nil {
+		return fmt.Sprintf("all repos [%d]", len(m.repos))
+	}
+	label := activeRepo.Label
+	if label == "" {
+		label = activeRepo.ID
+	}
+	for i, repo := range m.repos {
+		if repo.ID == activeRepo.ID {
+			return fmt.Sprintf("%s [%d/%d]", truncateText(label, 12), i+1, len(m.repos))
+		}
+	}
+	return truncateText(label, 18)
+}
+
 func valueOrAllRepos(repo *RepoRecord) string {
 	if repo == nil {
 		return "all repos"
@@ -1731,7 +1970,7 @@ func headerText(icon, value, color string) string {
 func kbdHints(focus AppFocus) string {
 	switch focus {
 	case FocusBoard:
-		return "move  a/A ai chat  B dual shell  u missions  : cmds  Enter shell  j comment  c PR  C retry PR  m merge  n new  f filters  s sync"
+		return "↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ! attention  1-9 repo  L list  ? help"
 	case FocusMissions:
 		return "j/k move  a/A ai chat  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
 	case FocusTerminal:

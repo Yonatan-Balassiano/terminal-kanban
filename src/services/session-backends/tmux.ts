@@ -13,6 +13,7 @@ import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { buildBackendSessionName } from '../session-name.js';
 
 const execFileAsync = promisify(execFile);
+const agentboardPaneSessionOption = '@agentboard_backend_session_id';
 
 export interface TmuxCommandResult {
   stdout: string;
@@ -107,6 +108,53 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
+  private async tagSessionPane(backendSessionId: string): Promise<void> {
+    try {
+      await this.runner([
+        'set-option',
+        '-p',
+        '-q',
+        '-t',
+        backendSessionId,
+        agentboardPaneSessionOption,
+        backendSessionId,
+      ]);
+    } catch {
+      // Best effort: pane tags are only needed after the pane is moved into the board layout.
+    }
+  }
+
+  private async findTaggedPanes(backendSessionId: string): Promise<string[]> {
+    try {
+      const result = await this.runner([
+        'list-panes',
+        '-a',
+        '-F',
+        `#{pane_id}\t#{${agentboardPaneSessionOption}}`,
+      ]);
+      const paneIds: string[] = [];
+      for (const line of result.stdout.split('\n')) {
+        const [paneId, taggedSessionId] = line.split('\t');
+        if (paneId && taggedSessionId === backendSessionId) {
+          paneIds.push(paneId);
+        }
+      }
+      return paneIds;
+    } catch {
+      return [];
+    }
+  }
+
+  private async findTaggedPane(backendSessionId: string): Promise<string | null> {
+    const paneIds = await this.findTaggedPanes(backendSessionId);
+    return paneIds[0] ?? null;
+  }
+
+  private async resolveInputTarget(backendSessionId: string): Promise<string> {
+    const taggedPane = await this.findTaggedPane(backendSessionId);
+    return taggedPane ?? backendSessionId;
+  }
+
   async healthCheck(): Promise<BackendHealth> {
     try {
       const result = await this.runner(['-V']);
@@ -137,6 +185,7 @@ export class TmuxBackend implements SessionBackend {
         'destroy-unattached',
         'off',
       ]);
+      await this.tagSessionPane(backendSessionId);
       const bootstrapCommand = buildNewSessionBootstrapCommand({
         repoPath: opts.repoPath,
         branch: opts.branch,
@@ -169,11 +218,13 @@ export class TmuxBackend implements SessionBackend {
 
   async attachMetadata(backendSessionId: string): Promise<AttachMetadata> {
     await this.ensureSessionSurvivesDetach(backendSessionId);
+    await this.tagSessionPane(backendSessionId);
     return { command: buildTmuxAttachCommand(backendSessionId) };
   }
 
   async sendInput(backendSessionId: string, data: string): Promise<void> {
-    for (const invocation of buildTmuxSendInputCommands(backendSessionId, data)) {
+    const target = await this.resolveInputTarget(backendSessionId);
+    for (const invocation of buildTmuxSendInputCommands(target, data)) {
       await this.runner(invocation.args);
     }
   }
@@ -183,39 +234,75 @@ export class TmuxBackend implements SessionBackend {
   }
 
   async terminate(backendSessionId: string): Promise<void> {
+    const taggedPanes = await this.findTaggedPanes(backendSessionId);
     try {
       await this.runner(['kill-session', '-t', backendSessionId]);
     } catch {
-      // Session may already be gone.
+      // Session may already be gone because its pane was moved into the board layout.
+    }
+
+    for (const taggedPane of taggedPanes) {
+      try {
+        await this.runner(['kill-pane', '-t', taggedPane]);
+      } catch {
+        // Pane may already be gone.
+      }
     }
   }
 
   async list(): Promise<BackendSessionInfo[]> {
+    const sessions = new Set<string>();
     try {
       const result = await this.runner(['list-sessions', '-F', '#S']);
-      return result.stdout
+      result.stdout
         .split('\n')
         .map((line) => line.trim())
         .filter((backendSessionId) => backendSessionId.startsWith('ab_'))
-        .map((backendSessionId) => ({
-          backendSessionId,
-          status: 'active' as const,
-        }));
+        .forEach((backendSessionId) => sessions.add(backendSessionId));
     } catch {
-      return [];
+      // The tagged-pane scan below can still find panes moved into the board layout.
     }
+
+    try {
+      const result = await this.runner([
+        'list-panes',
+        '-a',
+        '-F',
+        `#{${agentboardPaneSessionOption}}`,
+      ]);
+      result.stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((backendSessionId) => backendSessionId.startsWith('ab_'))
+        .forEach((backendSessionId) => sessions.add(backendSessionId));
+    } catch {
+      // Ignore pane scan failures.
+    }
+
+    return Array.from(sessions).map((backendSessionId) => ({
+      backendSessionId,
+      status: 'active' as const,
+    }));
   }
 
   async inspect(backendSessionId: string): Promise<BackendSessionInfo | null> {
     try {
       await this.runner(['has-session', '-t', backendSessionId]);
       await this.ensureSessionSurvivesDetach(backendSessionId);
+      await this.tagSessionPane(backendSessionId);
       return {
         backendSessionId,
         status: 'active',
       };
     } catch {
-      return null;
+      const taggedPane = await this.findTaggedPane(backendSessionId);
+      if (!taggedPane) {
+        return null;
+      }
+      return {
+        backendSessionId,
+        status: 'active',
+      };
     }
   }
 }

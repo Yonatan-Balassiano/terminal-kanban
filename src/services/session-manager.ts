@@ -95,6 +95,7 @@ export class SessionManager {
   private backends = new Map<SessionBackendType, SessionBackend>();
   private lastOutputAtBySessionKey = new Map<string, number>();
   private lastBusyBySessionKey = new Map<string, boolean>();
+  private openSessionInFlight = new Map<string, Promise<SessionRecord>>();
   private processTableCache?: { rows: ProcessRow[]; loadedAt: number };
   private processTableLoadInFlight?: Promise<ProcessRow[] | null>;
 
@@ -258,7 +259,19 @@ export class SessionManager {
   // ---- openSession -----------------------------------------
 
   async openSession(taskId: string, slot: SessionSlot = 'primary'): Promise<SessionRecord> {
-    return this.openSessionInner(taskId, slot);
+    const key = this.sessionKey(taskId, slot);
+    const pending = this.openSessionInFlight.get(key);
+    if (pending) {
+      return pending;
+    }
+
+    const request = this.openSessionInner(taskId, slot).finally(() => {
+      if (this.openSessionInFlight.get(key) === request) {
+        this.openSessionInFlight.delete(key);
+      }
+    });
+    this.openSessionInFlight.set(key, request);
+    return request;
   }
 
   private async openSessionInner(taskId: string, slot: SessionSlot): Promise<SessionRecord> {

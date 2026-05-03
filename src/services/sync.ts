@@ -84,6 +84,7 @@ export class SyncService {
   private db: Db;
   private wait: typeof sleep;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private activeTimer: ReturnType<typeof setInterval> | null = null;
   private readonly queuedJobs = new Map<string, QueuedTaskJob>();
   private readonly delayedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly delayedRetryBudgetByTaskId = new Map<string, number>();
@@ -119,7 +120,7 @@ export class SyncService {
     return typeof (value as MissionService).reconcileTaskCompletion === 'function';
   }
 
-  start(intervalMs: number): void {
+  start(intervalMs: number, activeIntervalMs = 15_000): void {
     if (this.timer !== null) {
       return;
     }
@@ -131,6 +132,14 @@ export class SyncService {
       this.timer.unref();
     }
 
+    const effectiveActiveMs = Math.min(activeIntervalMs, intervalMs);
+    this.activeTimer = setInterval(() => {
+      void this.enqueueActiveTasks({ cause: 'periodic' });
+    }, effectiveActiveMs);
+    if (this.activeTimer.unref) {
+      this.activeTimer.unref();
+    }
+
     void this.enqueueAll({ cause: 'startup' });
   }
 
@@ -138,6 +147,10 @@ export class SyncService {
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.activeTimer !== null) {
+      clearInterval(this.activeTimer);
+      this.activeTimer = null;
     }
 
     for (const timer of this.delayedRetryTimers.values()) {
@@ -299,6 +312,20 @@ export class SyncService {
   private async enqueueAll(opts: ReconcileOptions): Promise<SyncResult> {
     const taskIds = this.board
       .getTasks({ includeArchived: false })
+      .map((task) => task.id);
+
+    if (taskIds.length === 0) {
+      return emptySyncResult();
+    }
+
+    const results = await Promise.all(taskIds.map((taskId) => this.enqueueTask(taskId, opts)));
+    return mergeSyncResults(results);
+  }
+
+  private async enqueueActiveTasks(opts: ReconcileOptions): Promise<SyncResult> {
+    const taskIds = this.board
+      .getTasks({ includeArchived: false })
+      .filter((task) => task.sessionId != null || task.secondarySessionId != null)
       .map((task) => task.id);
 
     if (taskIds.length === 0) {

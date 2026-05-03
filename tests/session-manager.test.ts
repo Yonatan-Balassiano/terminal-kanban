@@ -392,6 +392,77 @@ describe('SessionManager branch fallback', () => {
     expect(board.getTask(task.id)?.sessionId).toBe('session-tmux');
   });
 
+  it('deduplicates concurrent opens for the same tmux task slot', async () => {
+    const task = board.createTask({ title: 'Fast click tmux', repoId: 'repo-1' });
+
+    let createCalls = 0;
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => {
+      createCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return {
+        id: 'session-tmux',
+        taskId: opts.taskId,
+        slot: opts.slot,
+        backendType: 'tmux',
+        backendSessionId: 'ab_fast_click_tmux_1234_p',
+        attachCommand: 'env -u TMUX tmux attach-session -t ab_fast_click_tmux_1234_p',
+        status: 'active',
+        cwd: opts.cwd ?? opts.repoPath,
+        branch: opts.branch,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+    });
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async (id) => ({
+        command: `env -u TMUX tmux attach-session -t ${id}`,
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    const [first, second] = await Promise.all([
+      manager.openSession(task.id),
+      manager.openSession(task.id),
+    ]);
+
+    expect(first).toEqual(second);
+    expect(createCalls).toBe(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(board.getTask(task.id)?.sessionId).toBe('session-tmux');
+    expect(db.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 1 });
+  });
+
   it('keeps existing tmux task sessions alive when opening a different task', async () => {
     const first = board.createTask({ title: 'First tmux', repoId: 'repo-1' });
     const second = board.createTask({ title: 'Second tmux', repoId: 'repo-1' });

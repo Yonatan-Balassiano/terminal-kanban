@@ -247,10 +247,11 @@ func TestHandleKeyUTogglesMissionRail(t *testing.T) {
 
 func TestHandleKeyEnterOnActiveTmuxTaskAttachesWithoutOpeningSession(t *testing.T) {
 	model := &Model{
-		focus:                      FocusBoard,
-		activeTaskID:               "task-1",
-		activeSessionBackendType:   SessionBackendTmux,
-		activeSessionAttachCommand: "env -u TMUX tmux attach-session -t ab_task_1_p",
+		focus:                         FocusBoard,
+		activeTaskID:                  "task-1",
+		activeSessionBackendType:      SessionBackendTmux,
+		activeSessionBackendSessionID: "ab_task_1_p",
+		activeSessionAttachCommand:    "env -u TMUX tmux attach-session -t ab_task_1_p",
 		tracks: []TrackRecord{
 			{ID: "backlog", Label: "Backlog", SortOrder: 1},
 		},
@@ -989,6 +990,42 @@ func TestHandleTerminalKeyTabDownArrowSwitchesToNeighborTaskShell(t *testing.T) 
 	}
 	if cmd == nil {
 		t.Fatal("handleTerminalKey(tab+down) returned nil cmd")
+	}
+}
+
+func TestHandleBoardKeyTabDownArrowSwitchesToNeighborTaskShell(t *testing.T) {
+	model := &Model{
+		focus:               FocusBoard,
+		activeTaskID:        "task-1",
+		focusedTerminalSlot: SessionSlotPrimary,
+		selectedTrackIndex:  0,
+		selectedTaskIndex:   0,
+		tracks: []TrackRecord{
+			{ID: "in-progress", SortOrder: 1},
+		},
+		tasks: []TaskRecord{
+			{ID: "task-1", TrackID: "in-progress", SortKey: 1, Title: "First", SessionID: "session-1"},
+			{ID: "task-2", TrackID: "in-progress", SortKey: 2, Title: "Second", SessionID: "session-2"},
+		},
+	}
+
+	armCmd := model.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	switchCmd := model.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	if !model.terminalBoardNavPending {
+		t.Fatal("terminal board navigation should stay armed after switching")
+	}
+	if !model.terminalBoardNavConsumed {
+		t.Fatal("terminal board navigation should be marked consumed after switching")
+	}
+	if model.activeTaskID != "task-2" {
+		t.Fatalf("activeTaskID = %q, want task-2", model.activeTaskID)
+	}
+	if model.selectedTaskIndex != 1 {
+		t.Fatalf("selectedTaskIndex = %d, want 1", model.selectedTaskIndex)
+	}
+	if armCmd == nil || switchCmd == nil {
+		t.Fatal("handleKey(tab+down) should return cmds for both keys")
 	}
 }
 

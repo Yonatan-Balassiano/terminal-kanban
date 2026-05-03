@@ -150,13 +150,18 @@ type Model struct {
 	selectedMissionTaskIndex      int
 	terminalPaneVisible           bool
 	terminalLayoutMode            TerminalLayoutMode
+	boardDensityMode              string
+	boardOverviewMode             bool
+	overviewSelectedIndex         int
 	missionsPaneExpanded          bool
 	activeTaskID                  string
 	activeSessionBranch           string
 	activeSessionBackendType      SessionBackendType
+	activeSessionBackendSessionID string
 	activeSessionAttachCommand    string
 	secondarySessionBranch        string
 	secondarySessionBackendType   SessionBackendType
+	secondarySessionBackendID     string
 	secondarySessionAttachCommand string
 	sessionActivityByTaskID       map[string]*SessionActivitySnapshot
 	sessionActivityByKey          map[string]*SessionActivitySnapshot
@@ -354,7 +359,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.activeTaskID = msg.taskID
 		m.focusedTerminalSlot = normalizeSessionSlot(msg.slot)
-		m.setTerminalSessionMetadata(msg.slot, msg.session.Branch, msg.session.BackendType, msg.session.AttachCommand)
+		m.setTerminalSessionMetadata(msg.slot, msg.session.Branch, msg.session.BackendType, msg.session.BackendSessionID, msg.session.AttachCommand)
 		m.terminalPaneVisible = msg.session.BackendType != SessionBackendTmux
 		m.terminalFullscreen = false
 		m.setTerminalScrollOffset(msg.slot, 0)
@@ -539,6 +544,10 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return cmd
 	}
 
+	if m.terminalBoardNavPending {
+		return m.handlePendingTerminalBoardNavKey(key)
+	}
+
 	if m.focus == FocusTerminal {
 		return m.handleTerminalKey(key)
 	}
@@ -560,9 +569,18 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	if m.boardOverviewMode {
+		return m.handleOverviewKey(key)
+	}
+
 	switch key.String() {
 	case "left", "h", "right", "l", "up", "k", "down":
 		m.applyBoardNavigation(boardNavigationActionForKey(key))
+	case "tab":
+		if m.activeTaskID == "" {
+			return nil
+		}
+		return m.armTerminalBoardNav(m.activeTaskID, m.focusedTerminalSlot, false)
 	case ",":
 		m.switchRepo(-1)
 		return m.persistActiveRepoCmd()
@@ -577,8 +595,8 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		if task != nil {
 			if task.ID == m.activeTaskID && m.terminalBackendTypeForSlot(SessionSlotPrimary) == SessionBackendTmux {
 				m.focusedTerminalSlot = SessionSlotPrimary
-				if attachCommand := m.terminalAttachCommandForSlot(SessionSlotPrimary); attachCommand != "" {
-					return m.attachTmuxSessionCmd(attachCommand)
+				if backendSessionID := m.terminalBackendSessionIDForSlot(SessionSlotPrimary); backendSessionID != "" {
+					return m.attachTmuxSessionCmd(backendSessionID)
 				}
 			}
 			return m.openSessionCmd(task.ID, false, SessionSlotPrimary)
@@ -626,6 +644,48 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		m.openFilterModal()
 	case "g":
 		m.openViewModal()
+	case "L":
+		if m.boardDensityMode == "list" {
+			m.boardDensityMode = ""
+		} else {
+			m.boardDensityMode = "list"
+		}
+		return nil
+	case "O":
+		m.boardOverviewMode = true
+		if len(m.repos) > 0 {
+			m.overviewSelectedIndex = 0
+			for i, repo := range m.repos {
+				if repo.ID == m.activeRepoID {
+					m.overviewSelectedIndex = i
+					break
+				}
+			}
+		}
+		return nil
+	case "!":
+		for _, task := range m.tasks {
+			if task.SessionAttentionNeeded {
+				m.selectTaskByID(task.ID)
+				break
+			}
+		}
+		return nil
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		idx := int(key.String()[0]-'1')
+		if idx < len(m.repos) {
+			if m.activeRepoID == m.repos[idx].ID {
+				m.activeRepoID = ""
+				m.selectedTrackIndex = 0
+				m.selectedTaskIndex = 0
+				return m.setUIStateCmd(map[string]interface{}{"activeRepoId": ""})
+			}
+			m.activeRepoID = m.repos[idx].ID
+			m.selectedTrackIndex = 0
+			m.selectedTaskIndex = 0
+			return m.persistActiveRepoCmd()
+		}
+		return nil
 	case "n":
 		m.openCreateTaskModal()
 	case "r":
@@ -689,6 +749,36 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		}
 	}
 
+	return nil
+}
+
+func (m *Model) handleOverviewKey(key tea.KeyMsg) tea.Cmd {
+	switch key.String() {
+	case "up", "k":
+		m.overviewSelectedIndex = max(0, m.overviewSelectedIndex-1)
+	case "down", "j":
+		m.overviewSelectedIndex = min(len(m.repos)-1, m.overviewSelectedIndex+1)
+	case "enter":
+		if m.overviewSelectedIndex < len(m.repos) {
+			m.activeRepoID = m.repos[m.overviewSelectedIndex].ID
+			m.selectedTrackIndex = 0
+			m.selectedTaskIndex = 0
+			m.boardOverviewMode = false
+			return m.persistActiveRepoCmd()
+		}
+	case "0":
+		m.activeRepoID = ""
+		m.boardOverviewMode = false
+		m.selectedTrackIndex = 0
+		m.selectedTaskIndex = 0
+		return m.setUIStateCmd(map[string]interface{}{"activeRepoId": ""})
+	case "O", "esc", "q":
+		m.boardOverviewMode = false
+	case "s":
+		return m.syncCmd()
+	case "?":
+		m.openHelpModal()
+	}
 	return nil
 }
 
@@ -919,9 +1009,11 @@ func (m *Model) previewTaskShell(task *TaskRecord, preferredSlot SessionSlot) te
 	m.focusedTerminalSlot = slot
 	m.activeSessionBranch = task.BranchName
 	m.activeSessionBackendType = ""
+	m.activeSessionBackendSessionID = ""
 	m.activeSessionAttachCommand = ""
 	m.secondarySessionBranch = task.BranchName
 	m.secondarySessionBackendType = ""
+	m.secondarySessionBackendID = ""
 	m.secondarySessionAttachCommand = ""
 	m.terminalPaneVisible = true
 	m.terminalScrollOffset = 0
@@ -1170,7 +1262,7 @@ func (m *Model) openSessionCmd(taskID string, recreate bool, slot SessionSlot) t
 				slot:      normalizedSlot,
 				session:   session,
 				board:     &board,
-				layoutErr: attachTaskSessionInTmux(session.AttachCommand),
+				layoutErr: attachTaskSessionInTmux(session.BackendSessionID),
 			}
 		}
 
@@ -1204,11 +1296,11 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 
 	m.normalizeFocusedTerminalSlot()
 	if m.terminalBackendTypeForSlot(m.focusedTerminalSlot) == SessionBackendTmux {
-		attachCommand := m.terminalAttachCommandForSlot(m.focusedTerminalSlot)
-		if attachCommand == "" {
+		backendSessionID := m.terminalBackendSessionIDForSlot(m.focusedTerminalSlot)
+		if backendSessionID == "" {
 			return m.openSessionCmd(m.activeTaskID, false, m.focusedTerminalSlot)
 		}
-		return m.attachTmuxSessionCmd(attachCommand)
+		return m.attachTmuxSessionCmd(backendSessionID)
 	}
 
 	m.terminalPaneVisible = true
@@ -1221,9 +1313,9 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 	)
 }
 
-func (m *Model) attachTmuxSessionCmd(attachCommand string) tea.Cmd {
+func (m *Model) attachTmuxSessionCmd(backendSessionID string) tea.Cmd {
 	return func() tea.Msg {
-		return tmuxPaneAttachedMsg{err: attachTaskSessionInTmux(attachCommand)}
+		return tmuxPaneAttachedMsg{err: attachTaskSessionInTmux(backendSessionID)}
 	}
 }
 
@@ -1593,7 +1685,17 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	m.pillars = board.Pillars
 	m.labels = board.Labels
 	m.tracks = board.Tracks
+	oldAttention := map[string]bool{}
+	for _, task := range m.tasks {
+		oldAttention[task.ID] = task.SessionAttentionNeeded
+	}
 	m.tasks = board.Tasks
+	for _, task := range m.tasks {
+		if task.SessionAttentionNeeded && !oldAttention[task.ID] {
+			fmt.Print("\a")
+			break
+		}
+	}
 	m.missions = board.Missions
 	m.savedViews = board.SavedViews
 	m.daemonConnected = true
@@ -2094,6 +2196,13 @@ func (m *Model) terminalBackendTypeForSlot(slot SessionSlot) SessionBackendType 
 	return m.activeSessionBackendType
 }
 
+func (m *Model) terminalBackendSessionIDForSlot(slot SessionSlot) string {
+	if normalizeSessionSlot(slot) == SessionSlotSecondary {
+		return m.secondarySessionBackendID
+	}
+	return m.activeSessionBackendSessionID
+}
+
 func (m *Model) terminalAttachCommandForSlot(slot SessionSlot) string {
 	if normalizeSessionSlot(slot) == SessionSlotSecondary {
 		return m.secondarySessionAttachCommand
@@ -2101,20 +2210,22 @@ func (m *Model) terminalAttachCommandForSlot(slot SessionSlot) string {
 	return m.activeSessionAttachCommand
 }
 
-func (m *Model) setTerminalSessionMetadata(slot SessionSlot, branch string, backendType SessionBackendType, attachCommand string) {
+func (m *Model) setTerminalSessionMetadata(slot SessionSlot, branch string, backendType SessionBackendType, backendSessionID string, attachCommand string) {
 	if normalizeSessionSlot(slot) == SessionSlotSecondary {
 		m.secondarySessionBranch = branch
 		m.secondarySessionBackendType = backendType
+		m.secondarySessionBackendID = backendSessionID
 		m.secondarySessionAttachCommand = attachCommand
 		return
 	}
 	m.activeSessionBranch = branch
 	m.activeSessionBackendType = backendType
+	m.activeSessionBackendSessionID = backendSessionID
 	m.activeSessionAttachCommand = attachCommand
 }
 
 func (m *Model) clearTerminalSlotState(slot SessionSlot) {
-	m.setTerminalSessionMetadata(slot, "", "", "")
+	m.setTerminalSessionMetadata(slot, "", "", "", "")
 	m.setTerminalBuffer(slot, GetBufferResult{})
 	m.setTerminalScrollOffset(slot, 0)
 	m.setTerminalCommand(slot, "")

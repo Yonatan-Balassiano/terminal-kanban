@@ -7,7 +7,7 @@ import {
 } from '../src/services/session-backends/tmux.js';
 
 describe('TmuxBackend', () => {
-  it('builds attach commands that can be run inside another tmux pane', () => {
+  it('builds fallback attach commands', () => {
     expect(buildTmuxAttachCommand('ab_friday_thing_2e30_p')).toBe(
       'env -u TMUX tmux attach-session -t ab_friday_thing_2e30_p'
     );
@@ -55,6 +55,12 @@ describe('TmuxBackend', () => {
     );
     expect(calls[0]).toEqual(['has-session', '-t', 'ab_friday_thing_2e30_p']);
     expect(calls[1]).toEqual([
+      'list-panes',
+      '-a',
+      '-F',
+      '#{pane_id}\t#{@agentboard_backend_session_id}',
+    ]);
+    expect(calls[2]).toEqual([
       'new-session',
       '-d',
       '-s',
@@ -68,6 +74,15 @@ describe('TmuxBackend', () => {
       'ab_friday_thing_2e30_p',
       'destroy-unattached',
       'off',
+    ]);
+    expect(calls[3]).toEqual([
+      'set-option',
+      '-p',
+      '-q',
+      '-t',
+      'ab_friday_thing_2e30_p',
+      '@agentboard_backend_session_id',
+      'ab_friday_thing_2e30_p',
     ]);
     expect(calls.some((args) => args[0] === 'send-keys' && args.includes('-l'))).toBe(true);
   });
@@ -98,6 +113,15 @@ describe('TmuxBackend', () => {
     expect(calls).toEqual([
       ['has-session', '-t', 'ab_friday_thing_2e30_s'],
       ['set-option', '-q', '-t', 'ab_friday_thing_2e30_s', 'destroy-unattached', 'off'],
+      [
+        'set-option',
+        '-p',
+        '-q',
+        '-t',
+        'ab_friday_thing_2e30_s',
+        '@agentboard_backend_session_id',
+        'ab_friday_thing_2e30_s',
+      ],
     ]);
   });
 
@@ -118,6 +142,72 @@ describe('TmuxBackend', () => {
     expect(calls).toEqual([
       ['has-session', '-t', 'ab_friday_thing_2e30_p'],
       ['set-option', '-q', '-t', 'ab_friday_thing_2e30_p', 'destroy-unattached', 'off'],
+      [
+        'set-option',
+        '-p',
+        '-q',
+        '-t',
+        'ab_friday_thing_2e30_p',
+        '@agentboard_backend_session_id',
+        'ab_friday_thing_2e30_p',
+      ],
+    ]);
+  });
+
+  it('finds inspected sessions after their panes move into the board layout', async () => {
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'has-session') {
+        throw new Error('session moved');
+      }
+      if (args[0] === 'list-panes') {
+        return {
+          stdout: '%42\tab_friday_thing_2e30_p\n',
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({ runner });
+
+    await expect(backend.inspect('ab_friday_thing_2e30_p')).resolves.toEqual({
+      backendSessionId: 'ab_friday_thing_2e30_p',
+      status: 'active',
+    });
+
+    expect(calls).toEqual([
+      ['has-session', '-t', 'ab_friday_thing_2e30_p'],
+      ['list-panes', '-a', '-F', '#{pane_id}\t#{@agentboard_backend_session_id}'],
+    ]);
+  });
+
+  it('terminates every pane for a moved task pane group', async () => {
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') {
+        return {
+          stdout: '%42\tab_friday_thing_2e30_p\n%43\tab_friday_thing_2e30_p\n',
+          stderr: '',
+        };
+      }
+      if (args[0] === 'kill-session') {
+        throw new Error('session moved');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({ runner });
+
+    await backend.terminate('ab_friday_thing_2e30_p');
+
+    expect(calls).toEqual([
+      ['list-panes', '-a', '-F', '#{pane_id}\t#{@agentboard_backend_session_id}'],
+      ['kill-session', '-t', 'ab_friday_thing_2e30_p'],
+      ['kill-pane', '-t', '%42'],
+      ['kill-pane', '-t', '%43'],
     ]);
   });
 
