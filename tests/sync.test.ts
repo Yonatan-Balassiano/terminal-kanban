@@ -539,7 +539,7 @@ describe('SyncService', () => {
     });
   });
 
-  it('surfaces a closed unmerged PR instead of auto-creating a replacement', async () => {
+  it('moves a closed unmerged PR task to done', async () => {
     const { board, getTask } = makeBoard({ trackId: 'in-progress' });
     const github = {
       findBranchPR: vi.fn().mockResolvedValue({
@@ -579,10 +579,11 @@ describe('SyncService', () => {
     const result = await sync.trigger();
 
     expect(github.createPR).not.toHaveBeenCalled();
-    expect(result.errors).toEqual([
-      'Task task-1: Branch ab/task-1 already has a closed pull request; reopen it or push a new branch',
-    ]);
-    expect(getTask().githubSyncStatus).toBe('error');
+    expect(result.errors).toEqual([]);
     expect(getTask().prState).toBe('closed');
+    expect(board.moveTask).toHaveBeenCalledWith({
+      id: 'task-1',
+      trackId: 'done',
+    });
   });
 });

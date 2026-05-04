@@ -606,32 +606,21 @@ export class SyncService {
         result.tasksUpdated += 1;
       }
 
-      if (prInfo && task.trackId !== 'done' && prInfo.prState === 'merged') {
+      if (
+        prInfo &&
+        task.trackId !== 'done' &&
+        (prInfo.prState === 'merged' || prInfo.prState === 'closed')
+      ) {
         this.board.moveTask({ id: task.id, trackId: 'done' });
         task.trackId = 'done';
         result.tasksUpdated += 1;
       }
 
-      if (prInfo?.prState === 'merged') {
+      if (prInfo?.prState === 'merged' || prInfo?.prState === 'closed') {
         const releasedTaskIds = this.missions?.reconcileTaskCompletion(task.id) ?? [];
         if (releasedTaskIds.length > 0) {
           result.tasksUpdated += releasedTaskIds.length;
         }
-      }
-
-      if (prInfo?.prState === 'closed') {
-        const errorMessage = `Branch ${task.branchName} already has a closed pull request; reopen it or push a new branch`;
-        if (
-          this.applyTaskSyncPatch(task, {
-            githubSyncStatus: 'error',
-            githubSyncError: errorMessage,
-            githubLastSyncedAt: Date.now(),
-          })
-        ) {
-          result.tasksUpdated += 1;
-        }
-        result.errors.push(`Task ${task.id}: ${errorMessage}`);
-        this.clearDelayedRetry(taskId);
       }
 
       result.prInfo = prInfo;
