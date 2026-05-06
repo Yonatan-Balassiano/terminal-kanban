@@ -205,6 +205,10 @@ export class GitService {
     this.exec(`git -C "${repoPath}" worktree remove --force "${worktreePath}"`, repoPath);
   }
 
+  pruneWorktrees(repoPath: string): void {
+    this.exec(`git -C "${repoPath}" worktree prune --expire now`, repoPath);
+  }
+
   listWorktrees(repoPath: string): string[] {
     const output = this.exec(`git -C "${repoPath}" worktree list --porcelain`, repoPath);
     const worktrees: string[] = [];

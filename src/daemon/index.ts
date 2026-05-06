@@ -395,6 +395,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   );
   const taskLifecycle = new TaskLifecycleService(db, board, git, session);
   const sync = new SyncService(board, missions, github, git, db);
+  sync.onTaskMergedOrClosed = (taskId) => taskLifecycle.cleanupTaskResources(taskId);
   const ollama = new ManagedOllamaService(cfg.aiChat);
   const aiChat = new AIChatService({
     board,

@@ -79,6 +79,7 @@ function normalizeBaseBranch(value: string | null | undefined): string | undefin
 export class SyncService {
   private board: BoardService;
   private missions?: Pick<MissionService, 'reconcileTaskCompletion'>;
+  onTaskMergedOrClosed?: (taskId: string) => Promise<void>;
   private github: GitHubService;
   private git: GitService;
   private db: Db;
@@ -621,6 +622,7 @@ export class SyncService {
         if (releasedTaskIds.length > 0) {
           result.tasksUpdated += releasedTaskIds.length;
         }
+        void this.onTaskMergedOrClosed?.(task.id);
       }
 
       result.prInfo = prInfo;

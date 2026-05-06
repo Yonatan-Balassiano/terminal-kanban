@@ -76,7 +76,7 @@ export class TaskLifecycleService {
     }
   }
 
-  async deleteTask(taskId: string): Promise<void> {
+  async cleanupTaskResources(taskId: string): Promise<void> {
     const task = this.loadTaskCleanupContext(taskId);
 
     if (this.session.terminateTaskSessions) {
@@ -91,9 +91,17 @@ export class TaskLifecycleService {
     }
 
     if (task.worktreePath && existsSync(task.worktreePath)) {
-      this.git.removeWorktree(task.repoPath, task.worktreePath);
+      try {
+        this.git.removeWorktree(task.repoPath, task.worktreePath);
+        this.board.setTaskWorktree?.(taskId, null);
+      } catch {
+        // Keep the worktree path so it can be cleaned up later.
+      }
     }
+  }
 
+  async deleteTask(taskId: string): Promise<void> {
+    await this.cleanupTaskResources(taskId);
     this.board.deleteTask(taskId);
   }
 }

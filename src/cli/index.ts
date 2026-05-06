@@ -14,7 +14,7 @@ import {
   writeDefaultConfig,
   type ConfigPaths,
 } from '../config/index.js';
-import { ensureRunning, stopDaemon } from '../daemon/index.js';
+import { ensureRunning, isDaemonRunning, stopDaemon } from '../daemon/index.js';
 import { createRPCClient } from './rpc.js';
 import type {
   AppConfig,
@@ -85,6 +85,65 @@ async function updateRepoWithFallback(
     const workspace = new WorkspaceService(db);
     const { id, ...patch } = params;
     return workspace.updateRepo(id, patch);
+  } finally {
+    db.close();
+  }
+}
+
+interface WorktreeCleanupResult {
+  daemonStopped: boolean;
+  removedWorktrees: string[];
+  clearedTaskCount: number;
+}
+
+async function cleanupAllRepoWorktrees(paths: ConfigPaths): Promise<WorktreeCleanupResult> {
+  let daemonStopped = false;
+
+  if (await isDaemonRunning(paths.socketPath)) {
+    daemonStopped = await stopDaemon({
+      stateDir: paths.stateDir,
+      socketPath: paths.socketPath,
+      logFile: paths.logFile,
+    });
+  }
+
+  const { openDb } = await import('../db/index.js');
+  const { WorkspaceService } = await import('../services/workspace.js');
+  const { GitService } = await import('../services/git.js');
+  const db = openDb(paths.dbFile);
+
+  try {
+    const workspace = new WorkspaceService(db);
+    const git = new GitService(db);
+    const repos = workspace.listRepos();
+    const removedWorktrees: string[] = [];
+    let clearedTaskCount = 0;
+
+    for (const repo of repos) {
+      git.pruneWorktrees(repo.path);
+      const repoRoot = path.resolve(repo.path);
+      const worktrees = git
+        .listWorktrees(repo.path)
+        .map((worktreePath) => path.resolve(worktreePath))
+        .filter((worktreePath) => worktreePath !== repoRoot);
+
+      for (const worktreePath of worktrees) {
+        git.removeWorktree(repo.path, worktreePath);
+        removedWorktrees.push(worktreePath);
+        const result = db
+          .prepare<[string | null, number, string, string], { changes: number }>(
+            'UPDATE tasks SET worktree_path = ?, updated_at = ? WHERE repo_id = ? AND worktree_path = ?',
+          )
+          .run(null, Date.now(), repo.id, worktreePath);
+        clearedTaskCount += result.changes;
+      }
+    }
+
+    return {
+      daemonStopped,
+      removedWorktrees,
+      clearedTaskCount,
+    };
   } finally {
     db.close();
   }
@@ -481,6 +540,32 @@ export function buildCli(): Command {
         await rpc.call('removeRepo', { id });
         rpc.disconnect();
         console.log(`Repo ${id} removed.`);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  repos
+    .command('delete-worktrees')
+    .description('Delete every registered git worktree and clear stored task worktree paths')
+    .action(async () => {
+      try {
+        const paths = configPaths();
+        const result = await cleanupAllRepoWorktrees(paths);
+
+        if (result.daemonStopped) {
+          console.log('Daemon stopped for worktree cleanup.');
+        }
+
+        if (result.removedWorktrees.length === 0) {
+          console.log('No worktrees found.');
+          return;
+        }
+
+        console.log(
+          `Deleted ${result.removedWorktrees.length} worktree(s); cleared ${result.clearedTaskCount} task worktree reference(s).`,
+        );
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);
         process.exit(1);
