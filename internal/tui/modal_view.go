@@ -29,6 +29,8 @@ func renderModal(m *Model) string {
 		return renderAddMissionTaskModal(m)
 	case ModalRenameTask:
 		return renderRenameTaskModal(m)
+	case ModalSetBranch:
+		return renderSetBranchModal(m)
 	case ModalTaskDescription:
 		return renderTaskDescriptionModal(m)
 	case ModalPRComment:
@@ -217,6 +219,21 @@ func renderAddMissionTaskBlockerModal(m *Model) string {
 		}
 	}
 	lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑↓ move  [space] toggle blocker  [Enter] create  [Esc] back"))
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func renderSetBranchModal(m *Model) string {
+	state := m.setBranchModal
+	if state == nil {
+		return ""
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Change Tracked Branch"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Branch: ") + state.Value + "|",
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] confirm  [Esc] cancel"),
+	}
 	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
 }
 

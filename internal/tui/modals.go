@@ -56,6 +56,11 @@ type renameTaskModalState struct {
 	Value  string
 }
 
+type setBranchModalState struct {
+	TaskID string
+	Value  string
+}
+
 type taskDescriptionModalState struct {
 	TaskID string
 	Value  string
@@ -156,6 +161,7 @@ func (m *Model) closeModal() {
 	m.createMissionModal = nil
 	m.addMissionTaskModal = nil
 	m.renameTaskModal = nil
+	m.setBranchModal = nil
 	m.taskDescriptionModal = nil
 	m.prCommentModal = nil
 	m.deleteMissionConfirmModal = nil
@@ -302,6 +308,20 @@ func (m *Model) openRenameTaskModal(task *TaskRecord) {
 	m.renameTaskModal = &renameTaskModalState{
 		TaskID: task.ID,
 		Value:  task.Title,
+	}
+}
+
+func (m *Model) openSetBranchModal(task *TaskRecord) {
+	if task == nil {
+		m.statusMessage = "Select a task to change its branch."
+		return
+	}
+	m.closeModal()
+	m.modal = ModalSetBranch
+	m.focus = FocusModal
+	m.setBranchModal = &setBranchModalState{
+		TaskID: task.ID,
+		Value:  task.BranchName,
 	}
 }
 
@@ -496,6 +516,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleAddMissionTaskModalKey(key)
 	case ModalRenameTask:
 		return m.handleRenameTaskModalKey(key)
+	case ModalSetBranch:
+		return m.handleSetBranchModalKey(key)
 	case ModalTaskDescription:
 		return m.handleTaskDescriptionModalKey(key)
 	case ModalPRComment:
@@ -1419,6 +1441,9 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 	case "rename-task":
 		m.openRenameTaskModal(contextTask)
 		return nil
+	case "set-branch":
+		m.openSetBranchModal(contextTask)
+		return nil
 	case "edit-description":
 		m.openTaskDescriptionModal(contextTask)
 		return nil
@@ -1576,6 +1601,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "release-mission-task", Title: "Release mission task to backlog", Section: "Mission", Detail: "Add the selected mission task to the regular board backlog.", Shortcut: "u", Keywords: []string{"mission", "release", "backlog"}, Disabled: selectedMissionTask == nil || selectedMissionTask.ReleasedToBoard, DisabledReason: "Select an unreleased mission task before releasing it."},
 		{ID: "create-task", Title: "Create task", Section: "Task", Detail: "Add a new task into the backlog track.", Shortcut: "n", Keywords: []string{"new", "backlog", "add"}},
 		{ID: "rename-task", Title: "Rename current task", Section: "Task", Detail: detailOrFallback(contextTask, "Rename %s", "Rename the current task."), Shortcut: "r", Keywords: []string{"title", "edit"}, Disabled: contextTask == nil, DisabledReason: "Select a task to rename it."},
+		{ID: "set-branch", Title: "Change tracked branch", Section: "Task", Detail: detailOrFallback(contextTask, "Change branch for %s", "Change the tracked branch for the current task."), Shortcut: "w", Keywords: []string{"branch", "pr", "switch"}, Disabled: contextTask == nil, DisabledReason: "Select a task to change its branch."},
 		{ID: "edit-description", Title: "Edit task description", Section: "Task", Detail: "Open the long-form task description editor.", Shortcut: "Ctrl+D", Keywords: []string{"notes", "description"}, Disabled: contextTask == nil, DisabledReason: "Select a task to edit its description."},
 		{ID: "delete-task", Title: "Delete current task", Section: "Task", Detail: "Delete the selected task after confirmation.", Shortcut: "d", Keywords: []string{"remove"}, Disabled: contextTask == nil, DisabledReason: "Select a task to delete it."},
 		{ID: "assign-pillar", Title: "Assign pillar", Section: "Task", Detail: "Attach or change the pillar for the current task.", Shortcut: "p", Keywords: []string{"label", "pillar"}, Disabled: contextTask == nil, DisabledReason: "Select a task to assign a pillar."},
@@ -1760,6 +1786,38 @@ func (m *Model) releaseMissionTaskCmd(taskID string) tea.Cmd {
 	return m.boardActionCmd("releaseMissionTaskToBoard", map[string]string{
 		"taskId": taskID,
 	}, "Released mission task to backlog.")
+}
+
+func (m *Model) handleSetBranchModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.setBranchModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyEnter:
+		branch := strings.TrimSpace(state.Value)
+		if branch == "" {
+			return nil
+		}
+		taskID := state.TaskID
+		m.closeModal()
+		return m.setTaskBranchCmd(taskID, branch)
+	case tea.KeyBackspace, tea.KeyDelete:
+		state.Value = trimLastRune(state.Value)
+		return nil
+	}
+	if next, changed := appendPrintableInput(state.Value, key); changed {
+		state.Value = next
+	}
+	return nil
+}
+
+func (m *Model) setTaskBranchCmd(taskID, branch string) tea.Cmd {
+	return m.boardActionCmd("setTaskBranch", map[string]string{"id": taskID, "branchName": branch}, "Branch updated. Syncing...")
 }
 
 func (m *Model) renameTaskCmd(taskID, title string) tea.Cmd {

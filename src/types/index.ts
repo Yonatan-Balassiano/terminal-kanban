@@ -362,6 +362,7 @@ export type RPCMethod =
   | 'commentTaskPR'
   | 'schedulePostPushSync'
   | 'mergeTaskPR'
+  | 'setTaskBranch'
   | 'triggerSync'
   | 'chatTurn'
   | 'shutdownManagedOllama'
@@ -420,6 +421,11 @@ export interface CreateTaskParams {
   pillarId?: string;
 }
 export type CreateTaskResult = TaskRecord;
+
+export interface SetTaskBranchParams {
+  id: string;
+  branchName: string;
+}
 
 export interface RenameTaskParams {
   id: string;

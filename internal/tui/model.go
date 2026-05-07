@@ -197,6 +197,7 @@ type Model struct {
 	createMissionModal        *createMissionModalState
 	addMissionTaskModal       *addMissionTaskModalState
 	renameTaskModal           *renameTaskModalState
+	setBranchModal            *setBranchModalState
 	taskDescriptionModal      *taskDescriptionModalState
 	prCommentModal            *prCommentModalState
 	deleteMissionConfirmModal *deleteMissionConfirmModalState
@@ -690,6 +691,8 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		m.openCreateTaskModal()
 	case "r":
 		m.openRenameTaskModal(m.selectedTask())
+	case "w":
+		m.openSetBranchModal(m.selectedTask())
 	case "p":
 		m.openPillarPickerModal(m.selectedTask())
 	case "P":

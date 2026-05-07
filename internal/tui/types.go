@@ -56,6 +56,7 @@ const (
 	ModalPillarPicker    ModalType = "pillar-picker"
 	ModalViewPicker      ModalType = "view-picker"
 	ModalAIChat          ModalType = "ai-chat"
+	ModalSetBranch       ModalType = "set-branch"
 	ModalHelp            ModalType = "help"
 	ModalNone            ModalType = ""
 )

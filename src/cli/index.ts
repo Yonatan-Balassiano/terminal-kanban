@@ -464,6 +464,26 @@ export function buildCli(): Command {
     });
 
   // ----------------------------------------------------------
+  // set-branch
+  // ----------------------------------------------------------
+  program
+    .command('set-branch <task> <branch>')
+    .description('Change the tracked branch for a task, clearing stale PR/CI state and re-syncing')
+    .action(async (task: string, branch: string) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        await rpc.call('setTaskBranch', { id: task, branchName: branch });
+        rpc.disconnect();
+        console.log(`Branch updated to "${branch}" for task ${task}. Sync triggered.`);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
   // repos
   // ----------------------------------------------------------
   const repos = program.command('repos').description('Manage repositories');

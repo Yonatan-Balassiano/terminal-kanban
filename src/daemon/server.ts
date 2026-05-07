@@ -46,6 +46,7 @@ import type {
   SchedulePostPushSyncParams,
   ChatTurnParams,
   SetDualSessionModeParams,
+  SetTaskBranchParams,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
 import { trackWatchedSessionTask } from './session-update-watch.js';
@@ -241,6 +242,30 @@ export async function dispatch(
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
         });
+        return { id: req.id, result: null };
+      }
+
+      case 'setTaskBranch': {
+        const sbp = p as unknown as SetTaskBranchParams;
+        services.board.setTaskBranch(sbp.id, sbp.branchName);
+        services.board.updateTaskSync(sbp.id, {
+          prNumber: null,
+          prUrl: null,
+          prState: 'none',
+          prDraft: false,
+          ciState: 'none',
+          ciSummary: null,
+          reviewState: 'none',
+          reviewSummary: null,
+          unresolvedThreadCount: 0,
+          githubSyncStatus: 'idle',
+          githubSyncError: null,
+        });
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        void services.sync.trigger().catch(() => {});
         return { id: req.id, result: null };
       }
 
