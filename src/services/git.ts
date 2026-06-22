@@ -1,7 +1,8 @@
 import { execFileSync } from 'child_process';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import type { GitState } from '../types/index.js';
 import type { Db } from '../db/index.js';
 import { LocalTransport } from './transport/local.js';
@@ -16,6 +17,19 @@ const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
  * misdiagnosed as a dead host.
  */
 const LONG_RUNNING_TIMEOUT_MS = 300_000;
+
+export interface SyncWorktreeIntoMainResult {
+  /** Branch the main checkout is on (e.g. "master") that now points at the task branch tip. */
+  mainBranch: string;
+  /** Short SHA the main checkout was reset to (the task branch tip). */
+  resetTo: string;
+  /** Full SHA the main checkout pointed at before the sync (for recovery via `git reset --hard <sha>`). */
+  previousMainHead: string;
+  /** Whether uncommitted (staged + unstaged) tracked changes were applied on top. */
+  appliedPatch: boolean;
+  /** Number of untracked files copied from the worktree into the main checkout. */
+  copiedUntracked: number;
+}
 
 export interface GitWorkspaceStatus {
   branch: string;
@@ -460,5 +474,88 @@ export class GitService {
     } finally {
       await this.transport.removeDir(excludeFile).catch(() => undefined);
     }
+  }
+
+  /**
+   * Mirror a task worktree's full state into the main checkout:
+   *   1. Reset the main checkout hard to the task branch tip (brings every missing commit,
+   *      discarding whatever the main checkout currently has).
+   *   2. Layer the worktree's uncommitted tracked changes (staged + unstaged) on top.
+   *   3. Copy the worktree's untracked files over.
+   * The result is a main checkout whose working tree is identical to the worktree's right now.
+   * Destructive to the main checkout — its prior HEAD is returned for recovery.
+   */
+  async syncWorktreeIntoMain(opts: {
+    repoPath: string;
+    worktreePath: string;
+    branch: string;
+  }): Promise<SyncWorktreeIntoMainResult> {
+    const { repoPath, worktreePath, branch } = opts;
+
+    if (!existsSync(repoPath)) {
+      throw new Error(`Main checkout path does not exist: ${repoPath}`);
+    }
+    if (!existsSync(worktreePath)) {
+      throw new Error(`Worktree path does not exist: ${worktreePath}`);
+    }
+    if (worktreePath === repoPath) {
+      throw new Error('Task has no separate worktree — it already runs in the main checkout.');
+    }
+    if (!this.branchExists(repoPath, branch)) {
+      throw new Error(`Branch not found: ${branch}`);
+    }
+
+    const previousMainHead = await this.run(gitArgv(repoPath, 'rev-parse', 'HEAD'), repoPath);
+    const mainBranch = await this.run(
+      gitArgv(repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'),
+      repoPath,
+    );
+
+    // 1. Reset the main checkout to the branch tip (discards main's current changes).
+    await this.run(
+      gitArgv(repoPath, 'reset', '--hard', branch),
+      repoPath,
+      LONG_RUNNING_TIMEOUT_MS,
+    );
+
+    // 2. Apply the worktree's uncommitted tracked changes. After the reset, main HEAD equals
+    //    the worktree HEAD, so the diff context matches and applies cleanly.
+    const patch = await this.run(
+      gitArgv(worktreePath, 'diff', 'HEAD', '--binary'),
+      worktreePath,
+      LONG_RUNNING_TIMEOUT_MS,
+    );
+    let appliedPatch = false;
+    if (patch.trim().length > 0) {
+      const patchFile = join(tmpdir(), `agentboard-sync-${randomUUID()}.patch`);
+      try {
+        writeFileSync(patchFile, patch.endsWith('\n') ? patch : `${patch}\n`);
+        await this.run(
+          gitArgv(repoPath, 'apply', '--whitespace=nowarn', patchFile),
+          repoPath,
+          LONG_RUNNING_TIMEOUT_MS,
+        );
+        appliedPatch = true;
+      } finally {
+        rmSync(patchFile, { force: true });
+      }
+    }
+
+    // 3. Copy untracked files (excluding gitignored, e.g. node_modules) from worktree → main.
+    const untrackedOut = await this.run(
+      gitArgv(worktreePath, 'ls-files', '--others', '--exclude-standard', '-z'),
+      worktreePath,
+      LONG_RUNNING_TIMEOUT_MS,
+    );
+    const untracked = untrackedOut.split('\0').filter((rel) => rel.length > 0);
+    for (const rel of untracked) {
+      const dest = join(repoPath, rel);
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(join(worktreePath, rel), dest);
+    }
+
+    const resetTo = await this.run(gitArgv(repoPath, 'rev-parse', '--short', 'HEAD'), repoPath);
+
+    return { mainBranch, resetTo, previousMainHead, appliedPatch, copiedUntracked: untracked.length };
   }
 }

@@ -895,6 +895,11 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		if task != nil {
 			return m.revealTaskWorkspaceCmd(task)
 		}
+	case "M":
+		task := m.selectedTask()
+		if task != nil {
+			return m.syncTaskToMainCmd(task)
+		}
 	}
 
 	return nil
@@ -1501,6 +1506,45 @@ func (m *Model) boardActionCmd(method string, params interface{}, status string)
 		if err := m.client.Call("getBoard", nil, &board); err != nil {
 			return boardActionMsg{err: err}
 		}
+		return boardActionMsg{board: &board, status: status}
+	}
+}
+
+type syncToMainResult struct {
+	MainBranch       string `json:"mainBranch"`
+	ResetTo          string `json:"resetTo"`
+	PreviousMainHead string `json:"previousMainHead"`
+	AppliedPatch     bool   `json:"appliedPatch"`
+	CopiedUntracked  int    `json:"copiedUntracked"`
+}
+
+func (m *Model) syncTaskToMainCmd(task *TaskRecord) tea.Cmd {
+	if task == nil {
+		return nil
+	}
+	taskID := task.ID
+	m.statusMessage = "Syncing " + task.Title + " into main checkout..."
+	return func() tea.Msg {
+		var result syncToMainResult
+		if err := m.client.Call("syncTaskToMain", map[string]string{"id": taskID}, &result); err != nil {
+			return boardActionMsg{err: err}
+		}
+		var board BoardSnapshot
+		if err := m.client.Call("getBoard", nil, &board); err != nil {
+			return boardActionMsg{err: err}
+		}
+		status := fmt.Sprintf("Moved into %s — reset to %s", result.MainBranch, result.ResetTo)
+		extras := []string{}
+		if result.AppliedPatch {
+			extras = append(extras, "local changes applied")
+		}
+		if result.CopiedUntracked > 0 {
+			extras = append(extras, fmt.Sprintf("+%d untracked", result.CopiedUntracked))
+		}
+		if len(extras) > 0 {
+			status += " (" + strings.Join(extras, ", ") + ")"
+		}
+		status += fmt.Sprintf(". Undo: git reset --hard %.10s", result.PreviousMainHead)
 		return boardActionMsg{board: &board, status: status}
 	}
 }

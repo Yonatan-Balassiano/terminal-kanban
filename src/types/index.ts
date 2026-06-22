@@ -430,6 +430,7 @@ export type RPCMethod =
   | 'getBuffer'
   | 'inspectSession'
   | 'prepareTaskWorkspace'
+  | 'syncTaskToMain'
   | 'createTaskPR'
   | 'commentTaskPR'
   | 'schedulePostPushSync'

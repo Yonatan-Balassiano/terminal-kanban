@@ -3,7 +3,7 @@ import { basename, dirname, join } from 'path';
 import type { Db } from '../db/index.js';
 import type { TaskKind, TaskLocation } from '../types/index.js';
 import type { BoardService } from './board.js';
-import { GitService } from './git.js';
+import { GitService, type SyncWorktreeIntoMainResult } from './git.js';
 import { TransportRegistry, type ExecTransport } from './transport/index.js';
 import { resolveTaskBranchName } from './branch-name.js';
 
@@ -377,6 +377,54 @@ export class WorktreeService {
       usedWorktree: worktreePath !== null,
       workspaces: plan.branches,
     };
+  }
+
+  /**
+   * Reset the repo's main checkout to this task's branch tip and layer the worktree's
+   * uncommitted (staged + unstaged) changes plus untracked files on top — so the main
+   * checkout (which has node_modules, runs dev servers, etc.) mirrors the worktree.
+   * Destructive to the main checkout's current state.
+   */
+  async syncTaskToMain(taskId: string): Promise<SyncWorktreeIntoMainResult> {
+    const task = this.db
+      .prepare<[string], TaskWorkspaceRow>(
+        `SELECT id, title, kind, repo_id, branch_name, worktree_path, last_session_cwd,
+                location, active_branch_id
+         FROM tasks
+         WHERE id = ?`,
+      )
+      .get(taskId);
+    if (!task) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+
+    const repo = this.db
+      .prepare<[string], RepoWorkspaceRow>(
+        `SELECT id, label, path, remote_path, default_base_branch, worktree_mode, worktree_root
+         FROM repos
+         WHERE id = ?`,
+      )
+      .get(task.repo_id ?? '');
+    if (!repo) {
+      throw new Error(`Repo not found for task ${taskId}`);
+    }
+
+    const branch = resolveTaskBranchName(task.title, task.id, task.branch_name ?? undefined);
+
+    if (!task.worktree_path) {
+      throw new Error(
+        'Task has no worktree to sync from. Open a session so its worktree is created first.',
+      );
+    }
+    if (task.worktree_path === repo.path) {
+      throw new Error('Task runs in the main checkout already — nothing to sync.');
+    }
+
+    return this.git.syncWorktreeIntoMain({
+      repoPath: repo.path,
+      worktreePath: task.worktree_path,
+      branch,
+    });
   }
 
   /** Prepares the workspace on whichever host the task lives on. */
