@@ -103,6 +103,116 @@ function ensureCurrentSchema(db: Db): void {
   recreateSchema(db);
 }
 
+// --------------- additive migrations -------------------------
+
+/**
+ * Add a column if it is missing.
+ *
+ * Bumping CURRENT_SCHEMA_VERSION drops and recreates every table, destroying
+ * the user's board. Columns that are nullable or carry a default can be added
+ * in place instead, so purely additive changes cost no data.
+ */
+function ensureColumn(db: Db, table: string, column: string, ddl: string): void {
+  if (!tableExists(db, table)) {
+    return;
+  }
+
+  const columns = db
+    .prepare<[], { name: string }>(`PRAGMA table_info(${quoteIdentifier(table)})`)
+    .all();
+  if (columns.some((row) => row.name === column)) {
+    return;
+  }
+
+  db.exec(`ALTER TABLE ${quoteIdentifier(table)} ADD COLUMN ${column} ${ddl}`);
+}
+
+function columnIsNotNull(db: Db, table: string, column: string): boolean {
+  const columns = db
+    .prepare<[], { name: string; notnull: number }>(`PRAGMA table_info(${quoteIdentifier(table)})`)
+    .all();
+  return columns.some((row) => row.name === column && row.notnull === 1);
+}
+
+/** The canonical `CREATE TABLE` statement for one table, taken from schema.sql. */
+function schemaCreateStatement(table: string): string {
+  const schemaSql = readFileSync(schemaPath(), 'utf8');
+  const match = schemaSql.match(
+    new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n\\);`),
+  );
+  if (!match) {
+    throw new Error(`schema.sql has no CREATE TABLE for "${table}"`);
+  }
+  return match[0];
+}
+
+/**
+ * Rebuild a table from its schema.sql definition, carrying over every column the
+ * old and new definitions share.
+ *
+ * `ALTER TABLE` cannot drop a NOT NULL constraint, and bumping the schema
+ * version would drop the user's board. This runs the twelve-step rebuild from
+ * the SQLite docs instead, so a constraint change costs no data.
+ */
+function rebuildTableFromSchema(db: Db, table: string): void {
+  const tempTable = `${table}_migration_new`;
+  const createStatement = schemaCreateStatement(table).replace(
+    `CREATE TABLE IF NOT EXISTS ${table} (`,
+    `CREATE TABLE ${tempTable} (`,
+  );
+
+  const oldColumns = new Set(
+    db.prepare<[], { name: string }>(`PRAGMA table_info(${quoteIdentifier(table)})`).all().map((row) => row.name),
+  );
+
+  db.pragma('foreign_keys = OFF');
+  db.pragma('legacy_alter_table = ON');
+  try {
+    db.transaction(() => {
+      db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(tempTable)}`);
+      db.exec(createStatement);
+
+      const newColumns = db
+        .prepare<[], { name: string }>(`PRAGMA table_info(${quoteIdentifier(tempTable)})`)
+        .all()
+        .map((row) => row.name)
+        .filter((name) => oldColumns.has(name))
+        .map(quoteIdentifier)
+        .join(', ');
+
+      db.exec(
+        `INSERT INTO ${quoteIdentifier(tempTable)} (${newColumns})
+         SELECT ${newColumns} FROM ${quoteIdentifier(table)}`,
+      );
+      db.exec(`DROP TABLE ${quoteIdentifier(table)}`);
+      db.exec(`ALTER TABLE ${quoteIdentifier(tempTable)} RENAME TO ${quoteIdentifier(table)}`);
+      // Dropping the table dropped its indexes; schema.sql recreates only what
+      // is missing because every statement in it is IF NOT EXISTS.
+      db.exec(readFileSync(schemaPath(), 'utf8'));
+    })();
+  } finally {
+    db.pragma('legacy_alter_table = OFF');
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+/**
+ * Additive columns applied after the schema check.
+ *
+ * Keep every entry mirrored in schema.sql so a freshly created database and a
+ * migrated one end up identical.
+ */
+function applyAdditiveMigrations(db: Db): void {
+  ensureColumn(db, 'tasks', 'location', "TEXT NOT NULL DEFAULT 'local'");
+  ensureColumn(db, 'tasks', 'kind', "TEXT NOT NULL DEFAULT 'repo'");
+  ensureColumn(db, 'repos', 'remote_path', 'TEXT');
+
+  // General tasks belong to no repo, so tasks.repo_id had to become nullable.
+  if (tableExists(db, 'tasks') && columnIsNotNull(db, 'tasks', 'repo_id')) {
+    rebuildTableFromSchema(db, 'tasks');
+  }
+}
+
 // --------------- openDb --------------------------------------
 
 export function openDb(dbPath: string): Db {
@@ -114,6 +224,7 @@ export function openDb(dbPath: string): Db {
   db.pragma('cache_size = -32000');
 
   ensureCurrentSchema(db);
+  applyAdditiveMigrations(db);
 
   return db;
 }

@@ -67,6 +67,7 @@ export class PtyBackend implements SessionBackend {
 
     // Bootstrap on master, pull, then switch to the task branch.
     const checkoutCmd = `${buildNewSessionBootstrapCommand({
+      taskKind: opts.taskKind,
       repoPath: opts.repoPath,
       branch: opts.branch,
       baseBranch: opts.baseBranch,
@@ -75,6 +76,8 @@ export class PtyBackend implements SessionBackend {
       cwd: opts.cwd,
       bootstrapNotice: opts.bootstrapNotice,
       sessionBootstrapScript: opts.sessionBootstrapScript,
+      agentPermissionMode: opts.agentPermissionMode,
+      agentArgs: opts.agentArgs,
     })}\n`;
     pty.write(checkoutCmd);
 

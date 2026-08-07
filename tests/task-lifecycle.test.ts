@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import { openDb, type Db } from '../src/db/index.js';
 import { BoardService } from '../src/services/board.js';
 import { TaskLifecycleService } from '../src/services/task-lifecycle.js';
+import { TransportUnreachableError } from '../src/services/transport/types.js';
 
 describe('TaskLifecycleService', () => {
   let db: Db;
@@ -36,7 +37,7 @@ describe('TaskLifecycleService', () => {
     board.setTaskWorktree(task.id, worktreePath);
 
     const git = {
-      removeWorktree: vi.fn(),
+      removeWorktreeAsync: vi.fn(),
     };
     const lifecycle = new TaskLifecycleService(db, board, git as never, {
       terminateSession: vi.fn(),
@@ -44,7 +45,7 @@ describe('TaskLifecycleService', () => {
 
     await lifecycle.archiveTask(task.id);
 
-    expect(git.removeWorktree).toHaveBeenCalledWith(repoPath, worktreePath);
+    expect(git.removeWorktreeAsync).toHaveBeenCalledWith(repoPath, worktreePath);
     expect(board.getTask(task.id)?.archivedAt).toBeDefined();
     expect(board.getTask(task.id)?.worktreePath).toBeUndefined();
   });
@@ -74,7 +75,7 @@ describe('TaskLifecycleService', () => {
     );
 
     const git = {
-      removeWorktree: vi.fn(),
+      removeWorktreeAsync: vi.fn(),
     };
     const lifecycle = new TaskLifecycleService(db, board, git as never, {
       terminateSession: vi.fn(),
@@ -82,7 +83,7 @@ describe('TaskLifecycleService', () => {
 
     await lifecycle.archiveTask(task.id);
 
-    expect(git.removeWorktree).not.toHaveBeenCalled();
+    expect(git.removeWorktreeAsync).not.toHaveBeenCalled();
     expect(board.getTask(task.id)?.archivedAt).toBeDefined();
     expect(board.getTask(task.id)?.worktreePath).toBe(worktreePath);
   });
@@ -113,7 +114,7 @@ describe('TaskLifecycleService', () => {
     );
 
     const git = {
-      removeWorktree: vi.fn(),
+      removeWorktreeAsync: vi.fn(),
     };
     const lifecycle = new TaskLifecycleService(db, board, git as never, {
       terminateSession: vi.fn(),
@@ -121,7 +122,7 @@ describe('TaskLifecycleService', () => {
 
     await lifecycle.archiveTask(task.id);
 
-    expect(git.removeWorktree).not.toHaveBeenCalled();
+    expect(git.removeWorktreeAsync).not.toHaveBeenCalled();
     expect(board.getTask(task.id)?.archivedAt).toBeDefined();
     expect(board.getTask(task.id)?.worktreePath).toBe(worktreePath);
   });
@@ -131,7 +132,7 @@ describe('TaskLifecycleService', () => {
     board.setTaskWorktree(task.id, worktreePath);
 
     const git = {
-      removeWorktree: vi.fn(() => {
+      removeWorktreeAsync: vi.fn(() => {
         throw new Error('remove failed');
       }),
     };
@@ -151,7 +152,7 @@ describe('TaskLifecycleService', () => {
     board.linkSession(task.id, 'session-1');
 
     const git = {
-      removeWorktree: vi.fn(),
+      removeWorktreeAsync: vi.fn(),
     };
     const terminateSession = vi.fn(async () => {});
     const lifecycle = new TaskLifecycleService(db, board, git as never, {
@@ -161,18 +162,21 @@ describe('TaskLifecycleService', () => {
     await lifecycle.deleteTask(task.id);
 
     expect(terminateSession).toHaveBeenCalledWith('session-1');
-    expect(git.removeWorktree).toHaveBeenCalledWith(repoPath, worktreePath);
+    expect(git.removeWorktreeAsync).toHaveBeenCalledWith(repoPath, worktreePath);
     expect(board.getTask(task.id)).toBeNull();
   });
 
-  it('aborts deletion when worktree cleanup fails', async () => {
+  it('aborts deletion when the host is unreachable, so nothing leaks unnoticed', async () => {
+    // Arrange — deleting the card anyway would strand a remote worktree and
+    // tmux session with nothing left pointing at them. Keeping the card lets
+    // the user retry once they are back online.
     const task = board.createTask({ title: 'Delete me carefully', repoId: 'repo-1' });
     board.setTaskWorktree(task.id, worktreePath);
     board.linkSession(task.id, 'session-1');
 
     const git = {
-      removeWorktree: vi.fn(() => {
-        throw new Error('remove failed');
+      removeWorktreeAsync: vi.fn(() => {
+        throw new TransportUnreachableError('vpn down');
       }),
     };
     const terminateSession = vi.fn(async () => {});
@@ -180,8 +184,32 @@ describe('TaskLifecycleService', () => {
       terminateSession,
     } as never);
 
-    await expect(lifecycle.deleteTask(task.id)).rejects.toThrow('remove failed');
+    // Act + Assert
+    await expect(lifecycle.deleteTask(task.id)).rejects.toBeInstanceOf(TransportUnreachableError);
     expect(terminateSession).toHaveBeenCalledWith('session-1');
     expect(board.getTask(task.id)?.id).toBe(task.id);
+  });
+
+  it('still deletes the card when the worktree itself is broken', async () => {
+    // Arrange — a corrupt or already-removed worktree must never make a card
+    // impossible to delete; the recorded path is kept for a later retry.
+    const task = board.createTask({ title: 'Delete me anyway', repoId: 'repo-1' });
+    board.setTaskWorktree(task.id, worktreePath);
+    board.linkSession(task.id, 'session-1');
+
+    const git = {
+      removeWorktreeAsync: vi.fn(() => {
+        throw new Error('fatal: not a valid worktree');
+      }),
+    };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateSession: vi.fn(async () => {}),
+    } as never);
+
+    // Act
+    await lifecycle.deleteTask(task.id);
+
+    // Assert
+    expect(board.getTask(task.id)).toBeNull();
   });
 });

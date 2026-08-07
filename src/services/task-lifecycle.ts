@@ -1,12 +1,32 @@
-import { existsSync } from 'fs';
 import type { Db } from '../db/index.js';
+import type { TaskLocation } from '../types/index.js';
 import type { BoardService } from './board.js';
-import type { GitService } from './git.js';
+import { GitService } from './git.js';
 import type { SessionManager } from './session-manager.js';
+import {
+  TransportRegistry,
+  TransportUnreachableError,
+  type ExecTransport,
+} from './transport/index.js';
+
+interface TaskCleanupRow {
+  id: string;
+  location: string | null;
+  /** Null for general tasks, which belong to no repo. */
+  localRepoPath: string | null;
+  remoteRepoPath: string | null;
+  worktreePath: string | null;
+  sessionId: string | null;
+  secondarySessionId: string | null;
+  sessionStatus: string | null;
+  secondarySessionStatus: string | null;
+}
 
 interface TaskCleanupContext {
   id: string;
-  repoPath: string;
+  location: TaskLocation;
+  /** Repo checkout path on the host this task actually runs on; null for general tasks. */
+  repoPath: string | null;
   worktreePath: string | null;
   sessionId: string | null;
   secondarySessionId: string | null;
@@ -19,6 +39,8 @@ function blocksArchiveCleanup(...statuses: Array<string | null>): boolean {
 }
 
 export class TaskLifecycleService {
+  private remoteGit: GitService | null = null;
+
   constructor(
     private db: Db,
     private board: BoardService & {
@@ -28,21 +50,24 @@ export class TaskLifecycleService {
     },
     private git: GitService,
     private session: Pick<SessionManager, 'terminateSession' | 'terminateTaskSessions'>,
+    private transports: TransportRegistry = new TransportRegistry(),
   ) {}
 
   private loadTaskCleanupContext(taskId: string): TaskCleanupContext {
     const row = this.db
-      .prepare<[string], TaskCleanupContext>(
+      .prepare<[string], TaskCleanupRow>(
         `SELECT
            t.id,
-           r.path AS repoPath,
+           t.location,
+           r.path AS localRepoPath,
+           r.remote_path AS remoteRepoPath,
            t.worktree_path AS worktreePath,
            t.session_id AS sessionId,
            t.secondary_session_id AS secondarySessionId,
            s.status AS sessionStatus,
            s2.status AS secondarySessionStatus
          FROM tasks t
-         JOIN repos r ON r.id = t.repo_id
+         LEFT JOIN repos r ON r.id = t.repo_id
          LEFT JOIN sessions s ON s.id = t.session_id
          LEFT JOIN sessions s2 ON s2.id = t.secondary_session_id
          WHERE t.id = ?`,
@@ -53,27 +78,72 @@ export class TaskLifecycleService {
       throw new Error(`Task not found: ${taskId}`);
     }
 
-    return row;
+    const location: TaskLocation = row.location === 'remote' ? 'remote' : 'local';
+    return {
+      id: row.id,
+      location,
+      repoPath: location === 'remote' ? (row.remoteRepoPath ?? row.localRepoPath) : row.localRepoPath,
+      worktreePath: row.worktreePath,
+      sessionId: row.sessionId,
+      secondarySessionId: row.secondarySessionId,
+      sessionStatus: row.sessionStatus,
+      secondarySessionStatus: row.secondarySessionStatus,
+    };
+  }
+
+  private transportFor(location: TaskLocation): ExecTransport {
+    return this.transports.forLocation(location);
+  }
+
+  private gitFor(location: TaskLocation): GitService {
+    if (location !== 'remote') {
+      return this.git;
+    }
+    this.remoteGit ??= new GitService(this.transports.getRemote());
+    return this.remoteGit;
+  }
+
+  /**
+   * Remove a task's worktree from whichever host it lives on.
+   *
+   * Both the existence probe and the `git worktree remove` must run on that
+   * host — checking the laptop filesystem for a remote path would silently skip
+   * cleanup and orphan the remote worktree.
+   *
+   * An unreachable host is rethrown so the caller can abort and the user can
+   * retry once they are back online; deleting the card anyway would strand a
+   * remote worktree and tmux session with nothing left pointing at them. A
+   * genuine git failure is swallowed instead, so a corrupt worktree can never
+   * make a card impossible to delete.
+   */
+  private async removeTaskWorktree(task: TaskCleanupContext): Promise<void> {
+    if (!task.worktreePath || !task.repoPath) {
+      return;
+    }
+
+    try {
+      if (!(await this.transportFor(task.location).exists(task.worktreePath))) {
+        return;
+      }
+      await this.gitFor(task.location).removeWorktreeAsync(task.repoPath, task.worktreePath);
+      this.board.setTaskWorktree?.(task.id, null);
+    } catch (error) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      // Keep the recorded path so a later archive or delete can retry it.
+    }
   }
 
   async archiveTask(taskId: string): Promise<void> {
     const task = this.loadTaskCleanupContext(taskId);
     this.board.archiveTask(taskId);
 
-    if (
-      !task.worktreePath ||
-      !existsSync(task.worktreePath) ||
-      blocksArchiveCleanup(task.sessionStatus, task.secondarySessionStatus)
-    ) {
+    if (blocksArchiveCleanup(task.sessionStatus, task.secondarySessionStatus)) {
       return;
     }
 
-    try {
-      this.git.removeWorktree(task.repoPath, task.worktreePath);
-      this.board.setTaskWorktree?.(taskId, null);
-    } catch {
-      // Keep the archived task pointing at the worktree so it can be cleaned up later.
-    }
+    await this.removeTaskWorktree(task);
   }
 
   async cleanupTaskResources(taskId: string): Promise<void> {
@@ -90,14 +160,7 @@ export class TaskLifecycleService {
       }
     }
 
-    if (task.worktreePath && existsSync(task.worktreePath)) {
-      try {
-        this.git.removeWorktree(task.repoPath, task.worktreePath);
-        this.board.setTaskWorktree?.(taskId, null);
-      } catch {
-        // Keep the worktree path so it can be cleaned up later.
-      }
-    }
+    await this.removeTaskWorktree(task);
   }
 
   async deleteTask(taskId: string): Promise<void> {

@@ -38,6 +38,7 @@ import type {
   InspectSessionParams,
   AcknowledgeSessionAttentionParams,
   OpenSessionParams,
+  ReconnectSessionParams,
   SendInputParams,
   GetBufferParams,
   PrepareTaskWorkspaceParams,
@@ -270,7 +271,13 @@ export async function dispatch(
       }
 
       case 'moveTask': {
-        services.board.moveTask(p as unknown as MoveTaskParams);
+        const moveParams = p as unknown as MoveTaskParams;
+        services.board.moveTask(moveParams);
+        // Closing a card (moving it to the Done track) releases its worktree,
+        // mirroring the automatic cleanup that runs when a PR is merged/closed.
+        if (moveParams.trackId === 'done') {
+          await services.taskLifecycle.cleanupTaskResources(moveParams.id);
+        }
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
@@ -421,6 +428,16 @@ export async function dispatch(
         return { id: req.id, result: session };
       }
 
+      case 'reconnectSession': {
+        const params = p as unknown as ReconnectSessionParams;
+        const result = await services.session.reconnectSession(params.taskId, params.slot);
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        return { id: req.id, result };
+      }
+
       case 'setDualSessionMode': {
         const params = p as unknown as SetDualSessionModeParams;
         await services.session.setDualSessionMode(params.taskId, params.enabled);
@@ -492,7 +509,7 @@ export async function dispatch(
       }
 
       case 'prepareTaskWorkspace': {
-        const result = services.worktrees.prepareTaskWorkspace(
+        const result = await services.worktrees.prepareTaskWorkspace(
           (p as unknown as PrepareTaskWorkspaceParams).taskId
         );
         serverEvents.emit('event', {
@@ -616,6 +633,42 @@ export async function dispatch(
       case 'doctor': {
         const results = await services.doctor.run();
         return { id: req.id, result: results };
+      }
+
+      case 'getArtifacts': {
+        // Never blocks: serves the last snapshot, whose own flags say whether
+        // it is stale or needs a login.
+        return {
+          id: req.id,
+          result: services.artifacts?.getSnapshot() ?? {
+            artifacts: [],
+            refreshedAt: 0,
+            stale: false,
+          },
+        };
+      }
+
+      case 'rolloutArtifact': {
+        // Deploys to production. The TUI gates this behind a typed confirmation;
+        // the service re-checks the artifact is configured and uses the exact
+        // version the caller confirmed.
+        if (!services.artifacts) {
+          return {
+            id: req.id,
+            result: { ok: false, message: 'No artifacts configured' },
+          };
+        }
+        const result = await services.artifacts.rollout(
+          p as unknown as import('../types/index.js').RolloutArtifactParams
+        );
+        return { id: req.id, result };
+      }
+
+      case 'refreshArtifacts': {
+        const snapshot = services.artifacts
+          ? await services.artifacts.refresh()
+          : { artifacts: [], refreshedAt: 0, stale: false };
+        return { id: req.id, result: snapshot };
       }
 
       case 'subscribe':

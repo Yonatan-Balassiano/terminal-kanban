@@ -7,7 +7,13 @@ import type { RepoRecord, RepoHealth, AddRepoParams, PreferredIDE, WorktreeMode 
 
 // --------------- Row helper ----------------------------------
 
-function rowToRepo(r: Record<string, unknown>): RepoRecord {
+/**
+ * Single mapper from a `repos` row to a {@link RepoRecord}.
+ *
+ * Exported so the board snapshot uses it too: a second hand-written copy is how
+ * `remotePath` silently went missing from everything the TUI sees.
+ */
+export function rowToRepo(r: Record<string, unknown>): RepoRecord {
   const githubOwner = (r['github_owner'] as string | null) ?? undefined;
   const githubRepo = (r['github_repo'] as string | null) ?? undefined;
   const githubUrl =
@@ -26,6 +32,7 @@ function rowToRepo(r: Record<string, unknown>): RepoRecord {
     ideCommand: (r['ide_command'] as string | null) ?? undefined,
     worktreeMode: (r['worktree_mode'] as WorktreeMode | null) ?? 'auto',
     worktreeRoot: (r['worktree_root'] as string | null) ?? undefined,
+    remotePath: (r['remote_path'] as string | null) ?? undefined,
     health: (r['health'] as RepoHealth) ?? 'ok',
     createdAt: r['created_at'] as number,
     updatedAt: r['updated_at'] as number,
@@ -97,7 +104,11 @@ export class WorkspaceService {
       .map(rowToRepo);
   }
 
-  getRepo(id: string): RepoRecord | null {
+  /** Accepts undefined so callers can pass a general task's absent repoId. */
+  getRepo(id: string | undefined): RepoRecord | null {
+    if (!id) {
+      return null;
+    }
     const row = this.db
       .prepare<[string], Record<string, unknown>>('SELECT * FROM repos WHERE id = ?')
       .get(id);
@@ -184,7 +195,10 @@ export class WorkspaceService {
         | 'worktreeMode'
         | 'worktreeRoot'
       >
-    >,
+    > & {
+      /** null clears remote support for the repo. */
+      remotePath?: string | null;
+    },
   ): RepoRecord {
     const existing = this.getRepo(id);
     if (!existing) {
@@ -237,6 +251,10 @@ export class WorkspaceService {
     if (patch.worktreeRoot !== undefined) {
       setClauses.push('worktree_root = ?');
       values.push(patch.worktreeRoot);
+    }
+    if (patch.remotePath !== undefined) {
+      setClauses.push('remote_path = ?');
+      values.push(patch.remotePath);
     }
 
     if (setClauses.length === 0) {

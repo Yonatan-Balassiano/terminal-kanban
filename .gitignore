@@ -8,3 +8,4 @@ dist-go/
 *.log
 .env
 demo/demo.gif
+.DS_Store

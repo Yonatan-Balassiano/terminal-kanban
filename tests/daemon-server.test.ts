@@ -246,6 +246,56 @@ describe('daemon deleteMission dispatch', () => {
   });
 });
 
+describe('daemon moveTask dispatch', () => {
+  it('cleans up the worktree when a card is closed (moved to the done track)', async () => {
+    const moveTask = vi.fn();
+    const cleanupTaskResources = vi.fn().mockResolvedValue(undefined);
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+
+    const response = await dispatch(
+      {
+        id: 'req-move-done',
+        method: 'moveTask',
+        params: { id: 'task-1', trackId: 'done' },
+      },
+      {
+        board: { moveTask },
+        taskLifecycle: { cleanupTaskResources },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
+    expect(cleanupTaskResources).toHaveBeenCalledWith('task-1');
+    expect(response).toEqual({ id: 'req-move-done', result: null });
+  });
+
+  it('does not clean up the worktree when moving to a non-done track', async () => {
+    const moveTask = vi.fn();
+    const cleanupTaskResources = vi.fn().mockResolvedValue(undefined);
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+
+    const response = await dispatch(
+      {
+        id: 'req-move-pr',
+        method: 'moveTask',
+        params: { id: 'task-1', trackId: 'pr' },
+      },
+      {
+        board: { moveTask },
+        taskLifecycle: { cleanupTaskResources },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'pr' });
+    expect(cleanupTaskResources).not.toHaveBeenCalled();
+    expect(response).toEqual({ id: 'req-move-pr', result: null });
+  });
+});
+
 describe('daemon mergeTaskPR dispatch', () => {
   it('updates the board immediately and does not await the follow-up sync', async () => {
     let resolveTrigger: (() => void) | null = null;

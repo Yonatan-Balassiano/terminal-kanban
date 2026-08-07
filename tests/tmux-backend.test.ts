@@ -122,6 +122,8 @@ describe('TmuxBackend', () => {
         '@agentboard_backend_session_id',
         'ab_friday_thing_2e30_s',
       ],
+      // Resolves which pane was just tagged so any stale duplicate can be cleared.
+      ['display-message', '-p', '-t', 'ab_friday_thing_2e30_s', '#{pane_id}'],
     ]);
   });
 
@@ -151,6 +153,8 @@ describe('TmuxBackend', () => {
         '@agentboard_backend_session_id',
         'ab_friday_thing_2e30_p',
       ],
+      // Resolves which pane was just tagged so any stale duplicate can be cleared.
+      ['display-message', '-p', '-t', 'ab_friday_thing_2e30_p', '#{pane_id}'],
     ]);
   });
 

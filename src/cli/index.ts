@@ -388,7 +388,14 @@ export function buildCli(): Command {
         const { openDb } = await import('../db/index.js');
         const db = openDb(paths.dbFile);
         const { DoctorService } = await import('../services/doctor.js');
-        const doctor = new DoctorService(db, paths.socketPath);
+        const { loadConfig } = await import('../config/index.js');
+        let remoteConfig;
+        try {
+          remoteConfig = loadConfig().remote;
+        } catch {
+          // Doctor still reports the local checks when the config is unreadable.
+        }
+        const doctor = new DoctorService(db, paths.socketPath, remoteConfig);
         const results = await doctor.run();
 
         if (opts.json) {
@@ -590,6 +597,81 @@ export function buildCli(): Command {
         console.error(`Error: ${(err as Error).message}`);
         process.exit(1);
       }
+    });
+
+  // ----------------------------------------------------------
+  // mcp — sign in to the server backing the artifacts rail
+  // ----------------------------------------------------------
+  const mcp = program.command('mcp').description('Manage the MCP connection used by the artifacts rail');
+
+  mcp
+    .command('login')
+    .description('Sign in to the MCP server in your browser')
+    .action(async () => {
+      try {
+        const paths = configPaths();
+        const config = loadConfig();
+        const serverUrl = config.artifacts?.mcpServerUrl ?? 'https://mcp-s.wewix.net/mcp';
+
+        const { McpOAuthClient } = await import('../services/mcp/oauth.js');
+        const auth = new McpOAuthClient({
+          serverUrl,
+          credentialsPath: paths.mcpCredentialsFile,
+        });
+
+        console.log(`Signing in to ${serverUrl} ...`);
+        await auth.login((url) => {
+          console.log('If your browser did not open, visit:\n' + url);
+        });
+        console.log('Signed in. Restart the daemon to pick it up: agentboard daemon stop && agentboard daemon start');
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  mcp
+    .command('status')
+    .description('Show whether the artifacts rail can reach its MCP server')
+    .action(async () => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const snapshot = await rpc.call<import('../types/index.js').ArtifactsSnapshot>('getArtifacts');
+        rpc.disconnect();
+
+        if (snapshot.needsAuth) {
+          console.log('Not signed in. Run: agentboard mcp login');
+        } else if (snapshot.refreshedAt === 0) {
+          console.log('No artifacts loaded yet.');
+        } else {
+          const age = Math.round((Date.now() - snapshot.refreshedAt) / 1000);
+          console.log(
+            `${snapshot.artifacts.length} artifact(s), refreshed ${age}s ago${snapshot.stale ? ' (stale)' : ''}`
+          );
+        }
+        if (snapshot.error) {
+          console.log(`Last error: ${snapshot.error}`);
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  mcp
+    .command('logout')
+    .description('Forget the cached MCP tokens')
+    .action(async () => {
+      const paths = configPaths();
+      const config = loadConfig();
+      const { McpOAuthClient } = await import('../services/mcp/oauth.js');
+      new McpOAuthClient({
+        serverUrl: config.artifacts?.mcpServerUrl ?? 'https://mcp-s.wewix.net/mcp',
+        credentialsPath: paths.mcpCredentialsFile,
+      }).logout();
+      console.log('Signed out.');
     });
 
   // ----------------------------------------------------------

@@ -11,9 +11,33 @@ import type {
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { buildBackendSessionName } from '../session-name.js';
+import {
+  buildTmuxAttachCommand,
+  buildTmuxHasSessionArgs,
+  buildTmuxKillPaneArgs,
+  buildTmuxKillSessionArgs,
+  buildTmuxListPanesArgs,
+  buildTmuxListSessionsArgs,
+  buildTmuxNewSessionArgs,
+  buildTmuxSendInputCommands,
+  buildTmuxSurviveDetachArgs,
+  buildTmuxTagPaneArgs,
+  buildTmuxUntagPaneArgs,
+  buildTmuxPaneIdArgs,
+  chainTmuxArgs,
+  parseAgentboardSessionNames,
+  TMUX_PANE_TAG_FORMAT,
+  TMUX_TAGGED_PANE_FORMAT,
+} from './tmux-commands.js';
+
+export {
+  buildTmuxAttachCommand,
+  buildTmuxSendInputCommands,
+  AGENTBOARD_PANE_SESSION_OPTION,
+} from './tmux-commands.js';
+export type { TmuxInvocation } from './tmux-commands.js';
 
 const execFileAsync = promisify(execFile);
-const agentboardPaneSessionOption = '@agentboard_backend_session_id';
 
 export interface TmuxCommandResult {
   stdout: string;
@@ -28,58 +52,12 @@ export interface TmuxBackendOptions {
   now?: () => number;
 }
 
-export interface TmuxInvocation {
-  args: string[];
-}
-
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_/:=.,+-]+$/.test(value)) {
-    return value;
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function execFileRunner(args: string[]): Promise<TmuxCommandResult> {
+/** Runs `tmux` on the machine the daemon is running on. */
+export function localTmuxRunner(args: string[]): Promise<TmuxCommandResult> {
   return execFileAsync('tmux', args, { encoding: 'utf8' }).then(({ stdout, stderr }) => ({
     stdout: String(stdout),
     stderr: String(stderr),
   }));
-}
-
-export function buildTmuxAttachCommand(backendSessionId: string): string {
-  return `env -u TMUX tmux attach-session -t ${shellQuote(backendSessionId)}`;
-}
-
-export function buildTmuxSendInputCommands(
-  backendSessionId: string,
-  data: string
-): TmuxInvocation[] {
-  const invocations: TmuxInvocation[] = [];
-  let literal = '';
-
-  const flushLiteral = () => {
-    if (literal.length === 0) {
-      return;
-    }
-    invocations.push({ args: ['send-keys', '-t', backendSessionId, '-l', literal] });
-    literal = '';
-  };
-
-  for (let index = 0; index < data.length; index += 1) {
-    const char = data[index];
-    if (char === '\r' || char === '\n') {
-      flushLiteral();
-      invocations.push({ args: ['send-keys', '-t', backendSessionId, 'Enter'] });
-      if (char === '\r' && data[index + 1] === '\n') {
-        index += 1;
-      }
-      continue;
-    }
-    literal += char;
-  }
-
-  flushLiteral();
-  return invocations;
 }
 
 function errorMessage(error: unknown): string {
@@ -95,14 +73,14 @@ export class TmuxBackend implements SessionBackend {
   private now: () => number;
 
   constructor(options: TmuxBackendOptions = {}) {
-    this.runner = options.runner ?? execFileRunner;
+    this.runner = options.runner ?? localTmuxRunner;
     this.idGenerator = options.idGenerator ?? generateId;
     this.now = options.now ?? Date.now;
   }
 
   private async ensureSessionSurvivesDetach(backendSessionId: string): Promise<void> {
     try {
-      await this.runner(['set-option', '-q', '-t', backendSessionId, 'destroy-unattached', 'off']);
+      await this.runner(buildTmuxSurviveDetachArgs(backendSessionId));
     } catch {
       // Best effort: older/missing sessions should not make attach/inspect fail.
     }
@@ -110,28 +88,54 @@ export class TmuxBackend implements SessionBackend {
 
   private async tagSessionPane(backendSessionId: string): Promise<void> {
     try {
-      await this.runner([
-        'set-option',
-        '-p',
-        '-q',
-        '-t',
-        backendSessionId,
-        agentboardPaneSessionOption,
-        backendSessionId,
-      ]);
+      await this.runner(buildTmuxTagPaneArgs(backendSessionId, backendSessionId));
     } catch {
-      // Best effort: pane tags are only needed after the pane is moved into the board layout.
+      // Best effort: pane tags are only needed after the pane is moved into the
+      // board layout. Bail out without touching existing tags — the session may
+      // be gone precisely because its pane is already parked and still tagged.
+      return;
+    }
+    await this.dropDuplicateTags(backendSessionId);
+  }
+
+  /**
+   * Keep exactly one pane carrying a given tag.
+   *
+   * Recreating a session while its previous pane is still parked in the holding
+   * session leaves two panes with the same tag, and the layout engine joins
+   * every pane it finds — dragging a dead shell in beside the live one. Only
+   * runs after a successful tag, so the freshly tagged pane is the one kept.
+   */
+  private async dropDuplicateTags(backendSessionId: string): Promise<void> {
+    const taggedPane = await this.resolveSessionPaneId(backendSessionId);
+    if (!taggedPane) {
+      return;
+    }
+
+    for (const paneId of await this.findTaggedPanes(backendSessionId)) {
+      if (paneId === taggedPane) {
+        continue;
+      }
+      try {
+        await this.runner(buildTmuxUntagPaneArgs(paneId));
+      } catch {
+        // Pane may have gone away; the next tag pass will retry.
+      }
+    }
+  }
+
+  private async resolveSessionPaneId(backendSessionId: string): Promise<string | null> {
+    try {
+      const result = await this.runner(buildTmuxPaneIdArgs(backendSessionId));
+      return result.stdout.trim() || null;
+    } catch {
+      return null;
     }
   }
 
   private async findTaggedPanes(backendSessionId: string): Promise<string[]> {
     try {
-      const result = await this.runner([
-        'list-panes',
-        '-a',
-        '-F',
-        `#{pane_id}\t#{${agentboardPaneSessionOption}}`,
-      ]);
+      const result = await this.runner(buildTmuxListPanesArgs(TMUX_TAGGED_PANE_FORMAT));
       const paneIds: string[] = [];
       for (const line of result.stdout.split('\n')) {
         const [paneId, taggedSessionId] = line.split('\t');
@@ -170,23 +174,15 @@ export class TmuxBackend implements SessionBackend {
     const existing = await this.inspect(backendSessionId);
 
     if (!existing) {
-      await this.runner([
-        'new-session',
-        '-d',
-        '-s',
-        backendSessionId,
-        '-c',
-        cwd,
-        ';',
-        'set-option',
-        '-q',
-        '-t',
-        backendSessionId,
-        'destroy-unattached',
-        'off',
-      ]);
+      await this.runner(
+        chainTmuxArgs(
+          buildTmuxNewSessionArgs({ backendSessionId, cwd }),
+          buildTmuxSurviveDetachArgs(backendSessionId)
+        )
+      );
       await this.tagSessionPane(backendSessionId);
       const bootstrapCommand = buildNewSessionBootstrapCommand({
+        taskKind: opts.taskKind,
         repoPath: opts.repoPath,
         branch: opts.branch,
         baseBranch: opts.baseBranch,
@@ -195,6 +191,8 @@ export class TmuxBackend implements SessionBackend {
         cwd: opts.cwd,
         bootstrapNotice: opts.bootstrapNotice,
         sessionBootstrapScript: opts.sessionBootstrapScript,
+        agentPermissionMode: opts.agentPermissionMode,
+        agentArgs: opts.agentArgs,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
     }
@@ -236,14 +234,14 @@ export class TmuxBackend implements SessionBackend {
   async terminate(backendSessionId: string): Promise<void> {
     const taggedPanes = await this.findTaggedPanes(backendSessionId);
     try {
-      await this.runner(['kill-session', '-t', backendSessionId]);
+      await this.runner(buildTmuxKillSessionArgs(backendSessionId));
     } catch {
       // Session may already be gone because its pane was moved into the board layout.
     }
 
     for (const taggedPane of taggedPanes) {
       try {
-        await this.runner(['kill-pane', '-t', taggedPane]);
+        await this.runner(buildTmuxKillPaneArgs(taggedPane));
       } catch {
         // Pane may already be gone.
       }
@@ -253,28 +251,19 @@ export class TmuxBackend implements SessionBackend {
   async list(): Promise<BackendSessionInfo[]> {
     const sessions = new Set<string>();
     try {
-      const result = await this.runner(['list-sessions', '-F', '#S']);
-      result.stdout
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((backendSessionId) => backendSessionId.startsWith('ab_'))
-        .forEach((backendSessionId) => sessions.add(backendSessionId));
+      const result = await this.runner(buildTmuxListSessionsArgs());
+      parseAgentboardSessionNames(result.stdout).forEach((backendSessionId) =>
+        sessions.add(backendSessionId)
+      );
     } catch {
       // The tagged-pane scan below can still find panes moved into the board layout.
     }
 
     try {
-      const result = await this.runner([
-        'list-panes',
-        '-a',
-        '-F',
-        `#{${agentboardPaneSessionOption}}`,
-      ]);
-      result.stdout
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((backendSessionId) => backendSessionId.startsWith('ab_'))
-        .forEach((backendSessionId) => sessions.add(backendSessionId));
+      const result = await this.runner(buildTmuxListPanesArgs(TMUX_PANE_TAG_FORMAT));
+      parseAgentboardSessionNames(result.stdout).forEach((backendSessionId) =>
+        sessions.add(backendSessionId)
+      );
     } catch {
       // Ignore pane scan failures.
     }
@@ -287,7 +276,7 @@ export class TmuxBackend implements SessionBackend {
 
   async inspect(backendSessionId: string): Promise<BackendSessionInfo | null> {
     try {
-      await this.runner(['has-session', '-t', backendSessionId]);
+      await this.runner(buildTmuxHasSessionArgs(backendSessionId));
       await this.ensureSessionSurvivesDetach(backendSessionId);
       await this.tagSessionPane(backendSessionId);
       return {

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,6 +15,21 @@ import (
 const (
 	headerHeight    = 2
 	statusBarHeight = 1
+	// Leads the card header so it survives truncation on narrow cards.
+	remoteTaskMarker = "☁ "
+
+	artifactDriftMarker   = "▲"
+	artifactInSyncMarker  = "✓"
+	artifactOwnedMarker   = "●"
+	artifactNoGALabel     = "no GA"
+	artifactUnknownLabel  = "?"
+	artifactFooterLabel   = "ARTIFACTS"
+	artifactStaleNote     = "stale · S refresh"
+	artifactSelectedMark  = "▸"
+	artifactChipSeparator = "  │  "
+	// Two strips pinned above the status bar: a full catalog does not fit on one
+	// line at any realistic width, and a hidden artifact is one nobody rolls out.
+	artifactFooterHeight = 2
 )
 
 var (
@@ -70,6 +86,7 @@ func renderView(m *Model) string {
 	}
 
 	parts = append(parts, fitHeight(renderContent(m), m.contentHeight()))
+	parts = append(parts, fitHeight(renderArtifactFooter(m), artifactFooterHeight))
 	parts = append(parts, fitHeight(renderStatusBar(m), statusBarHeight))
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -217,7 +234,7 @@ func renderHeader(m *Model) string {
 		parts := []string{
 			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(contextTask.Title, 48)),
 			headerText("≡", valueOrTrack(contextTrack, contextTask.TrackID), uiChrome.Accent),
-			headerText("◈", valueOrRepo(contextRepo, contextTask.RepoID), uiChrome.Blue),
+			headerText("◈", taskRepoLabel(*contextTask, contextRepo), uiChrome.Blue),
 			headerText("⌂", workspaceKind(contextTask), workspaceColor(contextTask)),
 		}
 		if contextPillar != nil {
@@ -375,11 +392,11 @@ func planBoardRender(m *Model, width int, tracks []TrackRecord) boardRenderPlan 
 		}
 	}
 
-	missionRailWidth := m.missionRailWidth()
-	showMissionRail := width >= missionRailWidth+trackColumnRenderWidth
+	railWidth := m.missionRailWidth()
+	showMissionRail := width >= railWidth+trackColumnRenderWidth
 	trackBudget := width
 	if showMissionRail {
-		trackBudget -= missionRailWidth
+		trackBudget -= railWidth
 	}
 	if trackBudget < 1 {
 		showMissionRail = false
@@ -410,12 +427,8 @@ func planBoardRender(m *Model, width int, tracks []TrackRecord) boardRenderPlan 
 func renderMissionRail(m *Model, height int) string {
 	width := m.missionRailWidth()
 	contentWidth := max(1, width-4)
-	title := "MISSIONS"
-	if !m.missionsPaneExpanded && m.focus != FocusMissions {
-		title = "MISS"
-	}
 	header := joinSpaceBetween(
-		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(m.focus == FocusMissions, uiChrome.Accent, uiChrome.Text))).Render(title),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(m.focus == FocusMissions, uiChrome.Accent, uiChrome.Text))).Render("MISSIONS"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(fmt.Sprintf("%d", len(m.missions))),
 		contentWidth,
 	)
@@ -550,6 +563,313 @@ func renderMissionTaskRow(m *Model, missionIndex, taskIndex, width int) string {
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Success))
 	}
 	return style.Render(joinSpaceBetween(left, right, width))
+}
+
+// The footer is the only always-visible surface for artifact state, so it spans
+// two rows rather than hiding artifacts behind an overflow marker. Degraded
+// modes carry no versions worth wrapping and stay on the head row.
+func renderArtifactFooter(m *Model) string {
+	width := max(1, m.width)
+	head := renderArtifactFooterHead(m.artifacts)
+	budget := width - plainWidth(head) - 1
+
+	if note, color := artifactFooterNote(m.artifacts); note != "" {
+		body := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(truncateText(note, max(1, budget)))
+		return fitWidth(head+" "+body, width)
+	}
+
+	first, second := renderArtifactChipRows(m.artifacts, m.selectedArtifactIndex, budget, width)
+	strip := fitWidth(head+" "+first, width)
+	if second == "" {
+		return strip
+	}
+	return strip + "\n" + fitWidth(second, width)
+}
+
+func renderArtifactFooterHead(snapshot ArtifactsSnapshot) string {
+	driftCount := countArtifactDrift(snapshot.Artifacts)
+	countColor := ternaryString(driftCount > 0, uiChrome.Warning, uiChrome.Muted)
+	head := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Render(artifactFooterLabel) +
+		" " + lipgloss.NewStyle().Foreground(lipgloss.Color(countColor)).Render(fmt.Sprintf("%s%d", artifactDriftMarker, driftCount))
+	if owned := countArtifactOwnedPending(snapshot.Artifacts); owned > 0 {
+		head += " " + artifactOwnedStyle(snapshot.Stale).Render(fmt.Sprintf("%s%d", artifactOwnedMarker, owned))
+	}
+	if !snapshot.Stale {
+		return head
+	}
+	return head + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Warning)).Render(artifactStaleNote)
+}
+
+// A note replaces the chips entirely: with no confirmed catalog there are no
+// versions worth showing next to it.
+func artifactFooterNote(snapshot ArtifactsSnapshot) (string, string) {
+	switch {
+	case snapshot.NeedsAuth:
+		return "sign in required · run: agentboard mcp login", uiChrome.Warning
+	case snapshot.RefreshedAt == 0:
+		return "loading…", uiChrome.Muted
+	case len(snapshot.Artifacts) == 0:
+		return "no artifacts", uiChrome.Muted
+	default:
+		return "", ""
+	}
+}
+
+// renderArtifactChipRows lays the chips out over the two footer rows. The first
+// row is narrower because it shares its line with the head.
+func renderArtifactChipRows(snapshot ArtifactsSnapshot, selectedIndex, firstWidth, secondWidth int) (string, string) {
+	chips := make([]string, len(snapshot.Artifacts))
+	chipWidths := make([]int, len(snapshot.Artifacts))
+	for index, artifact := range snapshot.Artifacts {
+		chips[index] = renderArtifactChip(artifact, index == selectedIndex, snapshot.Stale)
+		chipWidths[index] = plainWidth(chips[index])
+	}
+
+	start, split, end := artifactChipRows(chipWidths, selectedIndex, [2]int{firstWidth, secondWidth})
+	first := slices.Clone(chips[start:split])
+	second := slices.Clone(chips[split:end])
+	hidden := len(chips) - (end - start)
+	if len(second) > 0 {
+		second = withOverflowMarker(second, hidden, secondWidth)
+	} else {
+		first = withOverflowMarker(first, hidden, firstWidth)
+	}
+	return joinArtifactChips(first), joinArtifactChips(second)
+}
+
+// The marker is dropped rather than truncated when it genuinely cannot fit: a
+// clipped "+" reads as noise, while a visible chip still carries information.
+func withOverflowMarker(row []string, hidden, width int) []string {
+	if hidden <= 0 {
+		return row
+	}
+	marked := append(slices.Clone(row), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(artifactOverflowLabel(hidden)))
+	if plainWidth(joinArtifactChips(marked)) > width {
+		return row
+	}
+	return marked
+}
+
+func joinArtifactChips(chips []string) string {
+	separator := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(artifactChipSeparator)
+	return strings.Join(chips, separator)
+}
+
+// artifactChipRows returns the half-open bounds of the two rows: chips[start:split]
+// and chips[split:end]. The window slides rather than always starting at zero so
+// the selected chip cannot be pushed off the strip by the artifacts in front of it.
+func artifactChipRows(chipWidths []int, selectedIndex int, rowWidths [2]int) (int, int, int) {
+	if len(chipWidths) == 0 {
+		return 0, 0, 0
+	}
+	selectedIndex = clamp(selectedIndex, 0, len(chipWidths)-1)
+
+	for start := 0; start <= selectedIndex; start++ {
+		split := artifactChipFit(chipWidths, start, rowWidths[0])
+		end := artifactChipFit(chipWidths, split, rowWidths[1])
+		split, end = artifactReserveOverflow(chipWidths, start, split, end, rowWidths)
+		if end > selectedIndex {
+			return start, artifactBalancedSplit(chipWidths, start, split, end, rowWidths), end
+		}
+	}
+	return selectedIndex, selectedIndex, selectedIndex + 1
+}
+
+// artifactChipFit reports the exclusive end index of the chips that fit on one
+// row starting at start.
+func artifactChipFit(chipWidths []int, start, width int) int {
+	used, end := 0, start
+	for index := start; index < len(chipWidths); index++ {
+		next := used + chipWidths[index]
+		if index > start {
+			next += plainWidth(artifactChipSeparator)
+		}
+		if next > width {
+			break
+		}
+		used, end = next, index+1
+	}
+	return end
+}
+
+// Dropping chips is a last resort, but once it happens the count must not itself
+// be pushed off the edge, so the trailing row gives way until the marker fits.
+func artifactReserveOverflow(chipWidths []int, start, split, end int, rowWidths [2]int) (int, int) {
+	for end-start < len(chipWidths) {
+		hidden := len(chipWidths) - (end - start)
+		if end > split {
+			if end <= split+1 || artifactRowFitsOverflow(chipWidths, split, end, hidden, rowWidths[1]) {
+				return split, end
+			}
+			end--
+			continue
+		}
+		if split <= start+1 || artifactRowFitsOverflow(chipWidths, start, split, hidden, rowWidths[0]) {
+			return split, end
+		}
+		split, end = split-1, split-1
+	}
+	return split, end
+}
+
+func artifactRowFitsOverflow(chipWidths []int, start, end, hidden, width int) bool {
+	used := artifactRowWidth(chipWidths, start, end)
+	if end > start {
+		used += plainWidth(artifactChipSeparator)
+	}
+	return used+plainWidth(artifactOverflowLabel(hidden)) <= width
+}
+
+// Greedy packing crams the first row full and leaves a stub below it. Walking the
+// split back evens the two rows out; the loop stops as soon as the second row
+// stops fitting, since every earlier split only makes it longer.
+func artifactBalancedSplit(chipWidths []int, start, split, end int, rowWidths [2]int) int {
+	hidden := len(chipWidths) - (end - start)
+	best, bestGap := split, artifactRowGap(chipWidths, start, split, end)
+	for candidate := split - 1; candidate > start; candidate-- {
+		if hidden > 0 && !artifactRowFitsOverflow(chipWidths, candidate, end, hidden, rowWidths[1]) {
+			break
+		}
+		if artifactRowWidth(chipWidths, candidate, end) > rowWidths[1] {
+			break
+		}
+		if gap := artifactRowGap(chipWidths, start, candidate, end); gap < bestGap {
+			best, bestGap = candidate, gap
+		}
+	}
+	return best
+}
+
+func artifactRowGap(chipWidths []int, start, split, end int) int {
+	gap := artifactRowWidth(chipWidths, start, split) - artifactRowWidth(chipWidths, split, end)
+	if gap < 0 {
+		return -gap
+	}
+	return gap
+}
+
+func artifactRowWidth(chipWidths []int, start, end int) int {
+	total := 0
+	for index := start; index < end; index++ {
+		total += chipWidths[index]
+		if index > start {
+			total += plainWidth(artifactChipSeparator)
+		}
+	}
+	return total
+}
+
+func artifactOverflowLabel(hidden int) string {
+	return fmt.Sprintf("+%d", hidden)
+}
+
+func renderArtifactChip(artifact ArtifactRecord, selected bool, dim bool) string {
+	label := artifactDisplayName(artifact) + " " + artifactChipState(artifact)
+	if selected {
+		label = artifactSelectedMark + label
+	}
+
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(artifactChipColor(artifact, selected, dim)))
+	if selected {
+		style = style.Bold(true).Background(lipgloss.Color(uiChrome.AccentMuted))
+	}
+
+	chip := style.Render(label)
+	if owned := artifactOwnedLabel(artifact); owned != "" {
+		chip += " " + artifactOwnedStyle(dim).Render(owned)
+	}
+	if tag := artifactModeTag(artifact); tag != "" {
+		chip += " " + lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(tag)
+	}
+	return chip
+}
+
+// "Which of these am I holding up?" is the question the footer exists to answer,
+// so the ownership marker outranks the drift marker visually. An unresolved
+// ownership count renders nothing at all: a 0 would read as a confident "none of
+// this is yours", which is a different and possibly wrong claim.
+func artifactOwnedLabel(artifact ArtifactRecord) string {
+	if artifact.MyPendingCount == nil || *artifact.MyPendingCount <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s%d", artifactOwnedMarker, *artifact.MyPendingCount)
+}
+
+func artifactOwnedStyle(dim bool) lipgloss.Style {
+	color := ternaryString(dim, uiChrome.Muted, uiChrome.Purple)
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
+}
+
+// The version slot never renders blank: a package that never goes GA says so
+// rather than looking like a failed read.
+func artifactChipState(artifact ArtifactRecord) string {
+	switch artifact.Status {
+	case ArtifactStatusDrift:
+		return artifact.GAVersion + artifactDriftLabel(artifact)
+	case ArtifactStatusInSync:
+		return artifact.GAVersion + artifactInSyncMarker
+	case ArtifactStatusNoGA:
+		return artifactNoGALabel
+	default:
+		return artifactUnknownLabel
+	}
+}
+
+func artifactDriftLabel(artifact ArtifactRecord) string {
+	if artifact.Drift == nil {
+		return artifactDriftMarker
+	}
+	return fmt.Sprintf("%s%d", artifactDriftMarker, *artifact.Drift)
+}
+
+func artifactChipColor(artifact ArtifactRecord, selected bool, dim bool) string {
+	switch {
+	case selected:
+		return uiChrome.Accent
+	case dim:
+		return uiChrome.Muted
+	case artifact.Status == ArtifactStatusDrift:
+		return uiChrome.Warning
+	case artifact.Status == ArtifactStatusInSync:
+		return uiChrome.Success
+	default:
+		return uiChrome.Muted
+	}
+}
+
+func countArtifactDrift(artifacts []ArtifactRecord) int {
+	count := 0
+	for _, artifact := range artifacts {
+		if artifact.Status == ArtifactStatusDrift {
+			count++
+		}
+	}
+	return count
+}
+
+// Counts artifacts, not commits: the head answers "how many of these are on me?".
+func countArtifactOwnedPending(artifacts []ArtifactRecord) int {
+	count := 0
+	for _, artifact := range artifacts {
+		if artifactOwnedLabel(artifact) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func artifactModeTag(artifact ArtifactRecord) string {
+	if artifact.Mode == "" || artifact.Mode == ArtifactModeLive {
+		return ""
+	}
+	return string(artifact.Mode)
+}
+
+func artifactDisplayName(artifact ArtifactRecord) string {
+	if artifact.ShortName != "" {
+		return artifact.ShortName
+	}
+	return artifact.Name
 }
 
 func collapsedTrackIDsForBoardWidth(m *Model, width int) map[string]bool {
@@ -719,12 +1039,11 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 		titleText = "⚠ " + titleText
 	}
 	titleLines := taskTitleLinesForWidth(titleText, contentWidth)
-	branchLabel := truncateText(compactBranchLabel(task.BranchName), min(16, max(1, contentWidth/2)))
-	workspaceLabel := "root"
-	if task.WorktreePath != "" {
-		workspaceLabel = "worktree"
+	branchLabel := ""
+	if !task.IsGeneral() {
+		branchLabel = truncateText(compactBranchLabel(task.BranchName), min(16, max(1, contentWidth/2)))
 	}
-	headerLabel := truncateText(fmt.Sprintf("%s > %s", repoLabel, workspaceLabel), contentWidth)
+	headerLabel := truncateText(taskCardHeaderLabel(task, repoLabel), contentWidth)
 
 	lines := []string{
 		lipgloss.NewStyle().Foreground(lipgloss.Color(headerStatus.Color)).Render(activeSessionIcon) + " " +
@@ -789,7 +1108,10 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 	if task.SecondarySessionID != "" {
 		metaParts = append(metaParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Warning)).Render("⇵ dual"))
 	}
-	metaParts = append(metaParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("⎇ "+branchLabel))
+	// A general task owns no branch, so the ⎇ chip would be a lie.
+	if !task.IsGeneral() {
+		metaParts = append(metaParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("⎇ "+branchLabel))
+	}
 	lines = append(lines, strings.Join(metaParts, " "))
 
 	gitStatus := gitStatus(task)
@@ -816,8 +1138,52 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 		Render(strings.Join(lines, "\n"))
 }
 
+// overviewScope is one selectable row on the overview screen: every repo, plus
+// the repo-less "General" scope so general cards are reachable from somewhere
+// other than the all-repos view.
+type overviewScope struct {
+	ID    string
+	Label string
+}
+
+func (m *Model) overviewScopes() []overviewScope {
+	scopes := make([]overviewScope, 0, len(m.repos)+1)
+	for _, repo := range m.repos {
+		label := repo.Label
+		if label == "" {
+			label = repo.ID
+		}
+		scopes = append(scopes, overviewScope{ID: repo.ID, Label: label})
+	}
+
+	// With neither repos nor general cards there is nothing to scope to, and the
+	// "register a repo" hint is more useful than a lone empty row.
+	if len(scopes) == 0 && !m.hasGeneralTasks() {
+		return nil
+	}
+	return append(scopes, overviewScope{ID: GeneralScopeID, Label: "General"})
+}
+
+func (m *Model) hasGeneralTasks() bool {
+	for _, task := range m.tasks {
+		if task.IsGeneral() {
+			return true
+		}
+	}
+	return false
+}
+
+// taskScopeID is the overview row a task counts toward.
+func taskScopeID(task TaskRecord) string {
+	if task.IsGeneral() {
+		return GeneralScopeID
+	}
+	return task.RepoID
+}
+
 func renderOverviewBoard(m *Model, height int, width int) string {
-	if len(m.repos) == 0 {
+	scopes := m.overviewScopes()
+	if len(scopes) == 0 {
 		return fitHeight(
 			lipgloss.NewStyle().Padding(1, 2).Foreground(lipgloss.Color(uiChrome.Muted)).
 				Render("No repos registered. Run: agentboard repos add <path>"),
@@ -825,15 +1191,17 @@ func renderOverviewBoard(m *Model, height int, width int) string {
 		)
 	}
 
-	tasksByRepo := map[string][]TaskRecord{}
+	// Keyed by scope, not repo ID, so general tasks land in their own row
+	// instead of an empty-string bucket nothing renders.
+	tasksByScope := map[string][]TaskRecord{}
 	for _, task := range m.visibleTasks() {
-		tasksByRepo[task.RepoID] = append(tasksByRepo[task.RepoID], task)
+		tasksByScope[taskScopeID(task)] = append(tasksByScope[taskScopeID(task)], task)
 	}
 
 	contentWidth := max(1, width-2)
 	rows := []string{}
-	for i, repo := range m.repos {
-		tasks := tasksByRepo[repo.ID]
+	for i, repo := range scopes {
+		tasks := tasksByScope[repo.ID]
 
 		var activeSessions, prCount, doneCount int
 		var attentionTitle string
@@ -874,13 +1242,15 @@ func renderOverviewBoard(m *Model, height int, width int) string {
 		if activeSessions > 0 {
 			activeStr = fmt.Sprintf("▶%d", activeSessions)
 		}
-		prStr := fmt.Sprintf("PR %d", prCount)
+		// General tasks can never have a PR, so the column stays blank for them
+		// rather than reporting a zero that reads like "none yet".
+		prStr := "──"
+		if repo.ID != GeneralScopeID {
+			prStr = fmt.Sprintf("PR %d", prCount)
+		}
 		doneStr := fmt.Sprintf("✓%d", doneCount)
 
 		repoLabel := repo.Label
-		if repoLabel == "" {
-			repoLabel = repo.ID
-		}
 
 		left := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Text)).Render(truncatePlain(repoLabel, 10)) +
 			"  " +
@@ -905,7 +1275,7 @@ func renderOverviewBoard(m *Model, height int, width int) string {
 	}
 
 	body := strings.Join(rows, "\n")
-	hint := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑/↓ move  Enter → filter to repo  0 all repos  O/Esc exit")
+	hint := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑/↓ move  Enter → filter to scope  0 all repos  O/Esc exit")
 
 	return fitHeight(
 		lipgloss.NewStyle().
@@ -922,7 +1292,9 @@ func renderTaskRow(m *Model, task TaskRecord, isSelected, isActiveSession bool, 
 
 	githubStatus := githubStatusBadgeModel(task)
 	rightParts := []string{}
-	if repoLabel != "" {
+	if task.IsGeneral() {
+		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("gen"))
+	} else if repoLabel != "" {
 		rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncatePlain(repoLabel, 5)))
 	}
 	if githubStatus != nil {
@@ -1064,7 +1436,7 @@ func renderTerminalSlotPane(m *Model, activeTask TaskRecord, slot SessionSlot, h
 	}
 
 	rightBadges := []string{
-		badge("REPO "+truncateText(valueOrRepo(activeRepo, activeTask.RepoID), 12), "info", "", false),
+		badge("REPO "+truncateText(taskRepoLabel(activeTask, activeRepo), 12), "info", "", false),
 		badge(label, tone, icon, false),
 	}
 	if activeTask.SessionAttentionNeeded {
@@ -1182,7 +1554,9 @@ func renderHelpModal() string {
 		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "a or A opens the local AI chat modal", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
 		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers, d deletes the selected mission"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar, D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
+		{"Remote", "Remote tasks run their agent in tmux on another machine", "Ctrl+R reconnects the selected remote card to that machine", "It keeps the running agent when the remote session survived, and starts the host first when it is switched off", "R recreates instead: it always throws the running agent away"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
+		{"Artifacts", "The footer strip tracks GA versus latest RC for every artifact", "S refreshes it now, ▲N marks how far the latest RC is ahead of GA", "; moves the footer selection, G rolls the selected drifting artifact out to production", "Chips dim when the data is stale; run agentboard mcp login if it asks for auth"},
 		{"Views", "f opens filters, g changes board / terminal layout", "Shift+Left/Right resizes the side-by-side terminal split", ", and . switch active repo, ? toggles this help"},
 		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Shift+Left/Right resizes the split, Esc returns focus to the board"},
 		{"Setup", "If worktree setup fails because the repo uses master, run:", "agentboard repos set-default-base-branch <repo-id> master"},
@@ -1911,7 +2285,17 @@ func getMergeBlockerReason(task TaskRecord) string {
 	return ""
 }
 
+func taskLocationMarker(task TaskRecord) string {
+	if task.Location == TaskLocationRemote {
+		return remoteTaskMarker
+	}
+	return ""
+}
+
 func workspaceKind(task *TaskRecord) string {
+	if task != nil && task.IsGeneral() {
+		return "no repo"
+	}
 	if task != nil && task.WorktreePath != "" {
 		return "worktree"
 	}
@@ -1926,6 +2310,9 @@ func workspaceColor(task *TaskRecord) string {
 }
 
 func repoPositionLabel(m *Model, activeRepo *RepoRecord) string {
+	if activeRepo == nil && m.isGeneralScope() {
+		return "general"
+	}
 	if activeRepo == nil {
 		return fmt.Sprintf("all repos [%d]", len(m.repos))
 	}
@@ -1962,6 +2349,29 @@ func valueOrRepo(repo *RepoRecord, fallback string) string {
 	return repo.Label
 }
 
+// taskCardHeaderLabel is the top line of a card: where the task's work lives.
+// A general task has no repo and no worktree, so it says so outright rather
+// than rendering an empty "> root" path.
+func taskCardHeaderLabel(task TaskRecord, repoLabel string) string {
+	if task.IsGeneral() {
+		return "general · no repo"
+	}
+	workspaceLabel := "root"
+	if task.WorktreePath != "" {
+		workspaceLabel = "worktree"
+	}
+	return fmt.Sprintf("%s%s > %s", taskLocationMarker(task), repoLabel, workspaceLabel)
+}
+
+// taskRepoLabel names the repo chip for a task, standing in for the repo a
+// general task does not have.
+func taskRepoLabel(task TaskRecord, repo *RepoRecord) string {
+	if task.IsGeneral() {
+		return "general"
+	}
+	return valueOrRepo(repo, task.RepoID)
+}
+
 func headerText(icon, value, color string) string {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(icon+" ") +
 		lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(value)
@@ -1970,7 +2380,7 @@ func headerText(icon, value, color string) string {
 func kbdHints(focus AppFocus) string {
 	switch focus {
 	case FocusBoard:
-		return "↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ! attention  1-9 repo  L list  ? help"
+		return "↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G rollout  1-9 repo  ? help"
 	case FocusMissions:
 		return "j/k move  a/A ai chat  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
 	case FocusTerminal:

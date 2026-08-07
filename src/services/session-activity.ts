@@ -5,6 +5,7 @@ import type {
   SessionActivitySnapshot,
   SessionStatus,
 } from '../types/index.js';
+import type { ExecTransport } from './transport/index.js';
 
 export interface ProcessRow {
   pid: number;
@@ -267,11 +268,25 @@ export function deriveSessionActivity(
   };
 }
 
-export async function loadProcessTable(): Promise<ProcessRow[] | null> {
+/** The same flags parse identically under macOS ps and the remote's procps. */
+const PROCESS_TABLE_ARGS = ['-axo', 'pid=,ppid=,stat=,comm=,args='];
+
+/**
+ * Read the process table from a host.
+ *
+ * Defaults to the local machine so existing callers are unaffected; passing a
+ * remote transport is what gives remote sessions the same busy/idle detection
+ * local ones get.
+ */
+export async function loadProcessTable(
+  transport?: Pick<ExecTransport, 'exec'>
+): Promise<ProcessRow[] | null> {
   try {
-    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,stat=,comm=,args='], {
-      encoding: 'utf8',
-    });
+    if (transport) {
+      const { stdout } = await transport.exec(['ps', ...PROCESS_TABLE_ARGS]);
+      return parseProcessTable(stdout);
+    }
+    const { stdout } = await execFileAsync('ps', PROCESS_TABLE_ARGS, { encoding: 'utf8' });
     return parseProcessTable(String(stdout));
   } catch {
     return null;

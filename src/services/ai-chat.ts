@@ -45,6 +45,8 @@ const createTaskArgsSchema = z.object({
   pillar: optionalToolString,
   agentCli: z.enum(['claude', 'codex']).optional(),
   track: optionalToolString,
+  /** A general task belongs to no repo: just a title and an agent session. */
+  general: z.boolean().optional(),
 });
 
 const createMissionArgsSchema = z.object({
@@ -480,7 +482,9 @@ export class AIChatService {
       },
       {
         name: 'create_task',
-        description: 'Create a board task, defaulting to the current repo and backlog.',
+        description:
+          'Create a board task, defaulting to the current repo and backlog. ' +
+          'Pass general=true for a standalone card with no repo, branch, or PR.',
         parameters: {
           type: 'object',
           properties: {
@@ -489,6 +493,7 @@ export class AIChatService {
             pillar: { type: 'string' },
             agentCli: { type: 'string', enum: ['claude', 'codex'] },
             track: { type: 'string' },
+            general: { type: 'boolean' },
           },
           required: ['title'],
         },
@@ -1001,15 +1006,19 @@ export class AIChatService {
     args: z.infer<typeof createTaskArgsSchema>,
     ctx: ToolContext,
   ): Promise<ToolOutcome> {
-    const repo = this.resolveRepoRef(args.repo, ctx.context, ctx.snapshot);
+    const isGeneral = args.general === true;
+    const repo = isGeneral ? null : this.resolveRepoRef(args.repo, ctx.context, ctx.snapshot);
     const pillar = args.pillar
       ? this.resolvePillarRef(args.pillar, ctx.snapshot)
-      : this.defaultPillarForRepo(repo, ctx.snapshot);
+      : repo
+        ? this.defaultPillarForRepo(repo, ctx.snapshot)
+        : undefined;
     const track = args.track ? this.resolveTrackRef(args.track, ctx.snapshot) : { id: 'backlog' };
 
     const task = this.deps.board.createTask({
       title: args.title,
-      repoId: repo.id,
+      kind: isGeneral ? 'general' : 'repo',
+      repoId: repo?.id,
       pillarId: pillar?.id,
       agentCli: (args.agentCli ?? 'claude') as AgentCLI,
       trackId: track.id,
@@ -1017,12 +1026,13 @@ export class AIChatService {
     const snapshot = this.deps.view.getBoardSnapshot();
 
     return {
-      summary: `Created task ${task.title}.`,
+      summary: isGeneral ? `Created general task ${task.title}.` : `Created task ${task.title}.`,
       payload: {
         task: {
           id: task.id,
           title: task.title,
-          repoId: task.repoId,
+          kind: task.kind,
+          repoId: task.repoId ?? null,
           pillarId: task.pillarId ?? null,
           trackId: task.trackId,
           agentCli: task.agentCli,
@@ -1402,7 +1412,7 @@ export class AIChatService {
       throw new Error(`Repo not found for task ${task.title}`);
     }
 
-    const workspace = this.deps.worktrees.prepareTaskWorkspace(task.id);
+    const workspace = await this.deps.worktrees.prepareTaskWorkspace(task.id);
     const refreshedTask = this.deps.board.getTask(task.id);
     if (!refreshedTask) {
       throw new Error(`Task not found: ${task.id}`);

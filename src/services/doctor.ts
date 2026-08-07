@@ -3,14 +3,17 @@ import { existsSync, accessSync, constants } from 'fs';
 import { dirname } from 'path';
 import { createRequire } from 'module';
 import type { Db } from '../db/index.js';
-import type { DoctorCheck, DoctorResult } from '../types/index.js';
+import type { DoctorCheck, DoctorResult, RemoteConfig } from '../types/index.js';
+import { createRemoteProvider } from './remote/index.js';
+import { SshTransport } from './transport/index.js';
 
 const require = createRequire(import.meta.url);
 
 export class DoctorService {
   constructor(
     private db: Db,
-    private socketPath: string
+    private socketPath: string,
+    private remote?: RemoteConfig
   ) {}
 
   async run(): Promise<DoctorResult> {
@@ -25,10 +28,183 @@ export class DoctorService {
       this.checkDb(),
       this.checkSocket(),
       this.checkRepos(),
+      this.checkRemote(),
     ]);
 
     // checkRepos returns an array of checks; flatten
     return checks.flat();
+  }
+
+  /**
+   * Remote-host checks, skipped entirely when no remote is configured.
+   *
+   * The tool versions are read in one SSH round trip rather than four, since
+   * each one costs a network hop.
+   */
+  private async checkRemote(): Promise<DoctorCheck[]> {
+    const remote = this.remote;
+    if (!remote) {
+      return [];
+    }
+
+    const transport = new SshTransport({
+      host: remote.sshHost,
+      connectTimeoutMs: remote.connectTimeoutMs,
+      commandTimeoutMs: remote.commandTimeoutMs,
+    });
+
+    // Asked first, because "the workspace is switched off" and "your VPN is
+    // down" both look like an unreachable host over SSH, and only one of them
+    // is fixed by starting the workspace.
+    const workspaceChecks = await this.checkRemoteWorkspace(remote);
+
+    const startedAt = Date.now();
+    if ((await transport.reachability()) !== 'ok') {
+      return [
+        ...workspaceChecks,
+        {
+          name: 'remote:ssh',
+          status: 'fail',
+          message: `Cannot reach remote host ${remote.sshHost}`,
+          remediation: `Check your VPN, then verify: ssh ${remote.sshHost} true`,
+        },
+      ];
+    }
+
+    const checks: DoctorCheck[] = [
+      ...workspaceChecks,
+      {
+        name: 'remote:ssh',
+        status: 'pass',
+        message: `Connected to ${remote.sshHost} (${Date.now() - startedAt}ms)`,
+      },
+    ];
+
+    checks.push(await this.checkRemoteTools(transport));
+    checks.push(...(await this.checkRemoteRepos(transport)));
+    return checks;
+  }
+
+  /**
+   * Power state of the remote host, when something can report on it.
+   *
+   * Empty when no provider is configured — there is then nothing to say beyond
+   * what the SSH probe already reports.
+   */
+  private async checkRemoteWorkspace(remote: RemoteConfig): Promise<DoctorCheck[]> {
+    const provider = createRemoteProvider(remote);
+    if (!provider) {
+      return [];
+    }
+
+    const status = await provider.status();
+    const name = 'remote:workspace';
+
+    switch (status) {
+      case 'running':
+        return [{ name, status: 'pass', message: `${provider.label} is running` }];
+      case 'starting':
+        return [{ name, status: 'warn', message: `${provider.label} is still starting` }];
+      case 'stopped':
+        return [
+          {
+            name,
+            status: 'fail',
+            message: `${provider.label} is stopped`,
+            remediation: `Reconnect a remote card to start it, or run: coder start ${provider.label}`,
+          },
+        ];
+      case 'failed':
+        return [
+          {
+            name,
+            status: 'fail',
+            message: `${provider.label} is in a failed state`,
+            remediation: `Inspect the last build in Coder, then: coder start ${provider.label}`,
+          },
+        ];
+      default:
+        return [
+          {
+            name,
+            status: 'warn',
+            message: `Could not read the state of ${provider.label}`,
+            remediation: 'Verify the `coder` CLI is installed and logged in: coder list',
+          },
+        ];
+    }
+  }
+
+  private async checkRemoteTools(transport: SshTransport): Promise<DoctorCheck> {
+    const required = ['tmux', 'git', 'claude'];
+    try {
+      const { stdout } = await transport.exec([
+        'sh',
+        '-c',
+        required.map((tool) => `command -v ${tool} >/dev/null 2>&1 && echo ${tool}`).join('; '),
+      ]);
+      const found = new Set(stdout.split('\n').map((line) => line.trim()));
+      const missing = required.filter((tool) => !found.has(tool));
+
+      if (missing.length > 0) {
+        return {
+          name: 'remote:tools',
+          status: 'fail',
+          message: `Missing on the remote host: ${missing.join(', ')}`,
+          remediation: `Install them on ${transport.host}, or they will not be on the session PATH`,
+        };
+      }
+      return { name: 'remote:tools', status: 'pass', message: `Found: ${required.join(', ')}` };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { name: 'remote:tools', status: 'fail', message: `Tool probe failed: ${message}` };
+    }
+  }
+
+  private async checkRemoteRepos(transport: SshTransport): Promise<DoctorCheck[]> {
+    let repos: Array<Record<string, unknown>>;
+    try {
+      repos = this.db
+        .prepare<[], Record<string, unknown>>(
+          'SELECT label, remote_path FROM repos WHERE remote_path IS NOT NULL',
+        )
+        .all();
+    } catch {
+      return [];
+    }
+
+    if (repos.length === 0) {
+      return [
+        {
+          name: 'remote:repos',
+          status: 'warn',
+          message: 'No repo has a remote path configured',
+          remediation: 'Set "remotePath" on a repo to create remote tasks for it',
+        },
+      ];
+    }
+
+    return Promise.all(
+      repos.map(async (repo): Promise<DoctorCheck> => {
+        const label = repo['label'] as string;
+        const remotePath = repo['remote_path'] as string;
+        const name = `remote:repos:${label}`;
+        try {
+          if (!(await transport.exists(`${remotePath}/.git`))) {
+            return {
+              name,
+              status: 'warn',
+              message: `Not a git repo on the remote host: ${remotePath}`,
+              remediation: `Clone it there, or clear "remotePath" for ${label}`,
+            };
+          }
+          return { name, status: 'pass', message: `${remotePath} OK` };
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          return { name, status: 'fail', message: `Could not check ${remotePath}: ${message}` };
+        }
+      }),
+    );
   }
 
   // --------------- Individual checks -----------------------

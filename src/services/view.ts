@@ -1,6 +1,7 @@
 import type { BoardSnapshot, FilterModel, TaskRecord } from '../types/index.js';
 import type { BoardService } from './board.js';
 import type { MissionService } from './missions.js';
+import { rowToRepo } from './workspace.js';
 
 export class ViewService {
   constructor(
@@ -15,9 +16,9 @@ export class ViewService {
         return false;
       }
 
-      // repoIds
+      // repoIds — a general task belongs to no repo, so any repo filter excludes it
       if (filter.repoIds && filter.repoIds.length > 0) {
-        if (!filter.repoIds.includes(task.repoId)) return false;
+        if (task.repoId === undefined || !filter.repoIds.includes(task.repoId)) return false;
       }
 
       // pillarIds
@@ -99,29 +100,7 @@ export class ViewService {
       .prepare<[], Record<string, unknown>>('SELECT * FROM repos ORDER BY label')
       .all();
 
-    const repoList = repoRows.map((r) => ({
-      id: r['id'] as string,
-      label: r['label'] as string,
-      path: r['path'] as string,
-      githubOwner: (r['github_owner'] as string | null) ?? undefined,
-      githubRepo: (r['github_repo'] as string | null) ?? undefined,
-      githubUrl:
-        ((r['github_url'] as string | null) ??
-          (((r['github_owner'] as string | null) != null &&
-            (r['github_repo'] as string | null) != null)
-            ? `https://github.com/${r['github_owner'] as string}/${r['github_repo'] as string}`
-            : null)) ??
-        undefined,
-      defaultBaseBranch: (r['default_base_branch'] as string) ?? 'main',
-      defaultPillarId: (r['default_pillar_id'] as string | null) ?? undefined,
-      preferredIde: (r['preferred_ide'] as import('../types/index.js').PreferredIDE | null) ?? undefined,
-      ideCommand: (r['ide_command'] as string | null) ?? undefined,
-      worktreeMode: (r['worktree_mode'] as import('../types/index.js').WorktreeMode | null) ?? 'auto',
-      worktreeRoot: (r['worktree_root'] as string | null) ?? undefined,
-      health: r['health'] as import('../types/index.js').RepoHealth,
-      createdAt: r['created_at'] as number,
-      updatedAt: r['updated_at'] as number,
-    }));
+    const repoList = repoRows.map(rowToRepo);
 
     return {
       repos: repoList,

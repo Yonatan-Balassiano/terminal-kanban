@@ -1,7 +1,18 @@
-import { execFile, execSync, type ExecFileException } from 'child_process';
-import { existsSync } from 'fs';
+import { execFileSync } from 'child_process';
 import type { GitState } from '../types/index.js';
 import type { Db } from '../db/index.js';
+import { LocalTransport } from './transport/local.js';
+import { ExecError, TransportUnreachableError, type ExecTransport } from './transport/types.js';
+
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+/**
+ * Fetch/push/ls-remote and anything that materialises a working tree (`checkout`,
+ * `worktree add`, `status`) routinely outlive the transport default — 30s local,
+ * 10s over SSH. Worse, the SSH transport reports a timeout as
+ * `TransportUnreachableError`, so a merely slow monorepo checkout would be
+ * misdiagnosed as a dead host.
+ */
+const LONG_RUNNING_TIMEOUT_MS = 300_000;
 
 export interface GitWorkspaceStatus {
   branch: string;
@@ -73,112 +84,208 @@ export function parseGitWorkspaceStatus(output: string): GitWorkspaceStatus {
   };
 }
 
-export class GitService {
-  constructor(_db?: Db) {}
+export function parseWorktreeList(output: string): string[] {
+  const worktrees: string[] = [];
 
-  // --------------- Private helper ----------------------------
-
-  private exec(cmd: string, cwd: string): string {
-    try {
-      return execSync(cmd, { cwd, encoding: 'utf8' }).trim();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Git command failed: ${cmd}\n${msg}`);
+  for (const line of output.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      worktrees.push(line.slice('worktree '.length).trim());
     }
   }
 
-  private execFileAsync(cmd: string, args: string[], cwd: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      execFile(
-        cmd,
-        args,
-        {
-          cwd,
-          encoding: 'utf8',
-          maxBuffer: 10 * 1024 * 1024,
-        },
-        (
-          error: ExecFileException | null,
-          stdout: string,
-          stderr: string,
-        ) => {
-          if (error) {
-            const detail = (stderr || stdout || error.message).trim();
-            reject(new Error(`Git command failed: ${cmd} ${args.join(' ')}\n${detail}`));
-            return;
-          }
+  return worktrees;
+}
 
-          resolve(stdout.trim());
-        },
+function gitArgv(repoPath: string, ...args: string[]): string[] {
+  return ['git', '-C', repoPath, ...args];
+}
+
+function worktreeAddArgv(
+  repoPath: string,
+  worktreePath: string,
+  branch: string,
+  baseBranch: string,
+  reuseBranch: boolean,
+): string[] {
+  return reuseBranch
+    ? gitArgv(repoPath, 'worktree', 'add', worktreePath, branch)
+    : gitArgv(repoPath, 'worktree', 'add', '-b', branch, worktreePath, baseBranch);
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof ExecError) {
+    return (error.stderr || error.stdout || error.message).trim();
+  }
+  const withOutput = error as { stderr?: unknown; stdout?: unknown };
+  const detail = String(withOutput?.stderr ?? '') || String(withOutput?.stdout ?? '');
+  if (detail.trim().length > 0) {
+    return detail.trim();
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isExecTransport(value: unknown): value is ExecTransport {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<ExecTransport>;
+  return typeof candidate.exec === 'function' && typeof candidate.isRemote === 'boolean';
+}
+
+/**
+ * Runs git against whichever host the injected transport points at.
+ *
+ * The synchronous methods predate the transport and still have callers that
+ * cannot await; they run on the local machine only and throw when this service
+ * is bound to a remote transport. Every one of them has an `...Async` twin that
+ * works on either host — prefer those.
+ */
+export class GitService {
+  private readonly transport: ExecTransport;
+
+  /** `Db` is accepted for the legacy `new GitService(db)` call sites; git never reads it. */
+  constructor(transportOrDb?: ExecTransport | Db) {
+    this.transport = isExecTransport(transportOrDb) ? transportOrDb : new LocalTransport();
+  }
+
+  // --------------- Private helpers ---------------------------
+
+  private async run(
+    argv: readonly string[],
+    cwd: string,
+    timeoutMs?: number,
+  ): Promise<string> {
+    try {
+      const result = await this.transport.exec(argv, { cwd, timeoutMs });
+      return result.stdout.trim();
+    } catch (error: unknown) {
+      // An unreachable host is not a git failure; callers need to tell them apart.
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      throw new Error(`Git command failed: ${argv.join(' ')}\n${describeError(error)}`);
+    }
+  }
+
+  private runSync(argv: readonly string[], cwd: string): string {
+    const [command, ...args] = argv;
+    try {
+      const stdout = execFileSync(command, args, {
+        cwd,
+        encoding: 'utf8',
+        maxBuffer: MAX_OUTPUT_BYTES,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      return stdout.trim();
+    } catch (error: unknown) {
+      throw new Error(`Git command failed: ${argv.join(' ')}\n${describeError(error)}`);
+    }
+  }
+
+  private requireLocal(method: string): void {
+    if (this.transport.isRemote) {
+      throw new Error(
+        `GitService.${method}() runs locally only; call ${method}Async() for transport ${this.transport.id}.`,
       );
-    });
+    }
   }
 
   // --------------- Public API --------------------------------
 
-  validateRepo(repoPath: string): void {
-    if (!existsSync(repoPath)) {
+  async validateRepo(repoPath: string): Promise<void> {
+    if (!(await this.transport.exists(repoPath))) {
       throw new Error(`Repository path does not exist: ${repoPath}`);
     }
     try {
-      execSync(`git -C "${repoPath}" rev-parse --git-dir`, {
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch {
+      await this.run(gitArgv(repoPath, 'rev-parse', '--git-dir'), repoPath);
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
       throw new Error(`Not a git repository: ${repoPath}`);
     }
   }
 
   async defaultBranch(repoPath: string): Promise<string> {
     try {
-      const ref = await this.execFileAsync(
-        'git',
-        ['-C', repoPath, 'symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
+      const ref = await this.run(
+        gitArgv(repoPath, 'symbolic-ref', 'refs/remotes/origin/HEAD', '--short'),
         repoPath,
       );
       // e.g. "origin/main" → "main"
       return ref.replace(/^origin\//, '');
-    } catch {
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
       return 'main';
     }
   }
 
-  currentBranch(repoPath: string): string {
-    return this.exec(`git -C "${repoPath}" rev-parse --abbrev-ref HEAD`, repoPath);
+  async currentBranch(repoPath: string): Promise<string> {
+    return this.run(gitArgv(repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'), repoPath);
   }
 
   async remoteBranchExists(repoPath: string, branch: string, remote = 'origin'): Promise<boolean> {
     try {
-      await this.execFileAsync(
-        'git',
-        ['-C', repoPath, 'ls-remote', '--exit-code', '--heads', remote, branch],
+      await this.run(
+        gitArgv(repoPath, 'ls-remote', '--exit-code', '--heads', remote, branch),
         repoPath,
+        LONG_RUNNING_TIMEOUT_MS,
       );
       return true;
-    } catch {
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
       return false;
     }
   }
 
   branchExists(repoPath: string, branch: string): boolean {
+    this.requireLocal('branchExists');
     try {
-      execSync(`git -C "${repoPath}" show-ref --verify --quiet refs/heads/${branch}`, {
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      this.runSync(
+        gitArgv(repoPath, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`),
+        repoPath,
+      );
       return true;
     } catch {
       return false;
     }
   }
 
+  async branchExistsAsync(repoPath: string, branch: string): Promise<boolean> {
+    try {
+      await this.run(
+        gitArgv(repoPath, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`),
+        repoPath,
+      );
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      return false;
+    }
+  }
+
   createBranch(repoPath: string, branch: string, base: string): void {
-    this.exec(`git -C "${repoPath}" checkout -b ${branch} ${base}`, repoPath);
+    this.requireLocal('createBranch');
+    this.runSync(gitArgv(repoPath, 'checkout', '-b', branch, base), repoPath);
+  }
+
+  async createBranchAsync(repoPath: string, branch: string, base: string): Promise<void> {
+    await this.run(gitArgv(repoPath, 'checkout', '-b', branch, base), repoPath, LONG_RUNNING_TIMEOUT_MS);
   }
 
   checkoutBranch(repoPath: string, branch: string): void {
-    this.exec(`git -C "${repoPath}" checkout ${branch}`, repoPath);
+    this.requireLocal('checkoutBranch');
+    this.runSync(gitArgv(repoPath, 'checkout', branch), repoPath);
+  }
+
+  async checkoutBranchAsync(repoPath: string, branch: string): Promise<void> {
+    await this.run(gitArgv(repoPath, 'checkout', branch), repoPath, LONG_RUNNING_TIMEOUT_MS);
   }
 
   ensureBranch(repoPath: string, branch: string, baseBranch: string): void {
@@ -189,54 +296,87 @@ export class GitService {
     }
   }
 
-  createWorktree(repoPath: string, worktreePath: string, branch: string, baseBranch: string): void {
-    if (this.branchExists(repoPath, branch)) {
-      this.exec(`git -C "${repoPath}" worktree add "${worktreePath}" ${branch}`, repoPath);
+  async ensureBranchAsync(repoPath: string, branch: string, baseBranch: string): Promise<void> {
+    if (await this.branchExistsAsync(repoPath, branch)) {
+      await this.checkoutBranchAsync(repoPath, branch);
       return;
     }
+    await this.createBranchAsync(repoPath, branch, baseBranch);
+  }
 
-    this.exec(
-      `git -C "${repoPath}" worktree add -b "${branch}" "${worktreePath}" ${baseBranch}`,
+  createWorktree(repoPath: string, worktreePath: string, branch: string, baseBranch: string): void {
+    this.requireLocal('createWorktree');
+    const reuseBranch = this.branchExists(repoPath, branch);
+    this.runSync(
+      worktreeAddArgv(repoPath, worktreePath, branch, baseBranch, reuseBranch),
       repoPath,
     );
   }
 
+  async createWorktreeAsync(
+    repoPath: string,
+    worktreePath: string,
+    branch: string,
+    baseBranch: string,
+  ): Promise<void> {
+    const reuseBranch = await this.branchExistsAsync(repoPath, branch);
+    await this.run(
+      worktreeAddArgv(repoPath, worktreePath, branch, baseBranch, reuseBranch),
+      repoPath,
+      LONG_RUNNING_TIMEOUT_MS,
+    );
+  }
+
   removeWorktree(repoPath: string, worktreePath: string): void {
-    this.exec(`git -C "${repoPath}" worktree remove --force "${worktreePath}"`, repoPath);
+    this.requireLocal('removeWorktree');
+    this.runSync(gitArgv(repoPath, 'worktree', 'remove', '--force', worktreePath), repoPath);
+  }
+
+  async removeWorktreeAsync(repoPath: string, worktreePath: string): Promise<void> {
+    await this.run(
+      gitArgv(repoPath, 'worktree', 'remove', '--force', worktreePath),
+      repoPath,
+      LONG_RUNNING_TIMEOUT_MS,
+    );
   }
 
   pruneWorktrees(repoPath: string): void {
-    this.exec(`git -C "${repoPath}" worktree prune --expire now`, repoPath);
+    this.requireLocal('pruneWorktrees');
+    this.runSync(gitArgv(repoPath, 'worktree', 'prune', '--expire', 'now'), repoPath);
+  }
+
+  async pruneWorktreesAsync(repoPath: string): Promise<void> {
+    await this.run(gitArgv(repoPath, 'worktree', 'prune', '--expire', 'now'), repoPath);
   }
 
   listWorktrees(repoPath: string): string[] {
-    const output = this.exec(`git -C "${repoPath}" worktree list --porcelain`, repoPath);
-    const worktrees: string[] = [];
+    this.requireLocal('listWorktrees');
+    return parseWorktreeList(
+      this.runSync(gitArgv(repoPath, 'worktree', 'list', '--porcelain'), repoPath),
+    );
+  }
 
-    for (const line of output.split('\n')) {
-      if (line.startsWith('worktree ')) {
-        worktrees.push(line.slice('worktree '.length).trim());
-      }
-    }
-
-    return worktrees;
+  async listWorktreesAsync(repoPath: string): Promise<string[]> {
+    return parseWorktreeList(
+      await this.run(gitArgv(repoPath, 'worktree', 'list', '--porcelain'), repoPath),
+    );
   }
 
   async getWorkspaceStatus(repoPath: string): Promise<GitWorkspaceStatus> {
-    const output = await this.execFileAsync(
-      'git',
-      ['-C', repoPath, 'status', '--porcelain=1', '-b'],
+    const output = await this.run(
+      gitArgv(repoPath, 'status', '--porcelain=1', '-b'),
       repoPath,
+      LONG_RUNNING_TIMEOUT_MS,
     );
     return parseGitWorkspaceStatus(output);
   }
 
   async fetch(repoPath: string, remote = 'origin'): Promise<void> {
-    await this.execFileAsync('git', ['-C', repoPath, 'fetch', remote], repoPath);
+    await this.run(gitArgv(repoPath, 'fetch', remote), repoPath, LONG_RUNNING_TIMEOUT_MS);
   }
 
   async rebaseOnto(repoPath: string, upstream: string): Promise<void> {
-    await this.execFileAsync('git', ['-C', repoPath, 'rebase', upstream], repoPath);
+    await this.run(gitArgv(repoPath, 'rebase', upstream), repoPath, LONG_RUNNING_TIMEOUT_MS);
   }
 
   async pushCurrentBranch(
@@ -245,11 +385,11 @@ export class GitService {
     remote = 'origin',
     setUpstream = true,
   ): Promise<void> {
-    const args = ['-C', repoPath, 'push'];
+    const args = ['push'];
     if (setUpstream) {
       args.push('--set-upstream');
     }
     args.push(remote, branch);
-    await this.execFileAsync('git', args, repoPath);
+    await this.run(gitArgv(repoPath, ...args), repoPath, LONG_RUNNING_TIMEOUT_MS);
   }
 }

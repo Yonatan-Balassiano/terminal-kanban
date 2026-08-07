@@ -55,6 +55,8 @@ func renderModal(m *Model) string {
 		return renderAIChatModal(m)
 	case ModalMissionDeps:
 		return renderMissionDependenciesModal(m)
+	case ModalArtifactRollout:
+		return renderArtifactRolloutModal(m)
 	default:
 		return lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
@@ -71,10 +73,7 @@ func renderCreateTaskModal(m *Model) string {
 	}
 
 	options := m.createTaskPillarOptions()
-	selectedRepo := ""
-	if len(m.repos) > 0 {
-		selectedRepo = m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].Label
-	}
+	selectedRepo := m.createTaskRepoOptionAt(state.RepoIndex).Label
 	if selectedRepo == "" {
 		selectedRepo = "None"
 	}
@@ -84,6 +83,7 @@ func renderCreateTaskModal(m *Model) string {
 		selectedPillar = options[clamp(state.PillarIndex, 0, len(options)-1)].Label
 	}
 	selectedAgent := createTaskAgentOptionAt(state.AgentIndex).Label
+	selectedLocation := m.createTaskLocationLabelAt(state.RepoIndex, state.LocationIndex)
 
 	linePrefix := func(line createTaskLine) string {
 		if state.ActiveLine == line {
@@ -106,6 +106,7 @@ func renderCreateTaskModal(m *Model) string {
 		lineColor(createTaskRepoLine).Render(fmt.Sprintf("%s Repo: %s", linePrefix(createTaskRepoLine), selectedRepo)),
 		lineColor(createTaskPillarLine).Render(fmt.Sprintf("%s Pillar: %s", linePrefix(createTaskPillarLine), selectedPillar)),
 		lineColor(createTaskAgentLine).Render(fmt.Sprintf("%s Agent: %s", linePrefix(createTaskAgentLine), selectedAgent)),
+		lineColor(createTaskLocationLine).Render(fmt.Sprintf("%s Runs on: %s", linePrefix(createTaskLocationLine), selectedLocation)),
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[↑/↓ lines]  [←/→ change current field]"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
@@ -302,6 +303,56 @@ func renderPRCommentModal(m *Model) string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] post  [Esc] cancel"),
 	}
 	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+// Everything that decides the blast radius — full artifact id, the exact
+// version jump, and the graduality — is on screen before the field can be armed.
+func renderArtifactRolloutModal(m *Model) string {
+	state := m.artifactRolloutModal
+	if state == nil {
+		return ""
+	}
+
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
+	armed := state.Confirm == artifactRolloutConfirmWord
+	confirmColor := ternaryString(armed, uiChrome.Success, uiChrome.Muted)
+
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Danger)).Render("ROLL OUT TO PRODUCTION"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(state.Name),
+		fmt.Sprintf("%s  →  %s", artifactVersionOrUnknown(state.CurrentVersion), artifactVersionOrUnknown(state.TargetVersion)),
+	}
+
+	if note := artifactOwnershipNote(state.PendingRcCount, state.MyPendingCount); note != "" {
+		lines = append(lines, artifactOwnedStyle(false).Render(note))
+	}
+
+	lines = append(lines,
+		fmt.Sprintf("graduality: ‹ %s ›", artifactGradualityAt(state.GradualityIndex)),
+		muted.Render("comment: generated automatically"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(confirmColor)).
+			Render(fmt.Sprintf("type %s to confirm: %s|", artifactRolloutConfirmWord, state.Confirm)),
+		muted.Render("[←/→] graduality  [Enter] confirm  [Esc] cancel"),
+	)
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+// Confirmation context, not a gate: silent when ownership could not be resolved,
+// because guessing here would misattribute somebody else's pending work.
+func artifactOwnershipNote(pendingRcCount, myPendingCount *int) string {
+	if pendingRcCount == nil || myPendingCount == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d of %d pending RCs are yours", *myPendingCount, *pendingRcCount)
+}
+
+func artifactVersionOrUnknown(version string) string {
+	if version == "" {
+		return artifactUnknownLabel
+	}
+	return version
 }
 
 func renderDeleteConfirmModal(m *Model) string {

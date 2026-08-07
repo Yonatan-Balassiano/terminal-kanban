@@ -3,7 +3,8 @@ import type { Db } from '../db/index.js';
 import type { SyncResult, TaskRecord, TaskSyncPatch } from '../types/index.js';
 import type { BoardService } from './board.js';
 import { GitHubServiceError, type GitHubService, type PRInfo } from './github.js';
-import type { GitService } from './git.js';
+import { GitService } from './git.js';
+import { TransportRegistry } from './transport/index.js';
 import type { MissionService } from './missions.js';
 
 function buildAutoPRTitle(taskId: string, taskTitle: string): string {
@@ -90,7 +91,14 @@ export class SyncService {
   private readonly delayedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly delayedRetryBudgetByTaskId = new Map<string, number>();
   private activeJobCount = 0;
+  private remoteGit: GitService | null = null;
   readonly syncEvent = new EventEmitter();
+
+  /**
+   * Set by the daemon so remote tasks read their git state over SSH. Defaults to
+   * local-only, which keeps the several overloaded constructor forms unchanged.
+   */
+  transports: TransportRegistry = new TransportRegistry();
 
   constructor(
     board: BoardService,
@@ -172,6 +180,9 @@ export class SyncService {
   }
 
   async createTaskPR(taskId: string): Promise<PRInfo> {
+    if (this.board.getTask(taskId)?.kind === 'general') {
+      throw new Error('General tasks have no repo or branch, so they cannot have a pull request');
+    }
     this.bumpDelayedRetryBudget(taskId);
     const result = await this.enqueueTask(taskId, { cause: 'ensure_pr', waitForRemoteBranch: true });
     const task = this.board.getTask(taskId);
@@ -451,9 +462,18 @@ export class SyncService {
     return false;
   }
 
+  /** Git badges must be read on the host the task's worktree actually lives on. */
+  private gitFor(task: TaskRecord): GitService {
+    if (task.location !== 'remote') {
+      return this.git;
+    }
+    this.remoteGit ??= new GitService(this.transports.getRemote());
+    return this.remoteGit;
+  }
+
   private async syncGitStatus(task: TaskRecord, repoPath: string): Promise<TaskSyncPatch | null> {
     try {
-      const gitStatus = await this.git.getWorkspaceStatus(task.worktreePath ?? repoPath);
+      const gitStatus = await this.gitFor(task).getWorkspaceStatus(task.worktreePath ?? repoPath);
       return {
         gitState: gitStatus.gitState,
         gitAheadCount: gitStatus.aheadCount,
@@ -470,12 +490,13 @@ export class SyncService {
     const result: TaskReconcileResult = emptySyncResult();
     const task = this.board.getTask(taskId);
 
-    if (!task || task.archivedAt != null || !task.branchName) {
+    // A general task has no repo, branch, or PR — there is nothing to reconcile.
+    if (!task || task.archivedAt != null || task.kind === 'general' || !task.branchName) {
       this.clearDelayedRetry(taskId);
       return result;
     }
 
-    const repoRow = this.loadRepoRow(task.repoId);
+    const repoRow = task.repoId ? this.loadRepoRow(task.repoId) : undefined;
     if (!repoRow) {
       if (
         this.applyTaskSyncPatch(task, {
@@ -506,10 +527,16 @@ export class SyncService {
         .prepare<[string, number, string], void>(
           'UPDATE repos SET default_base_branch = ?, updated_at = ? WHERE id = ?',
         )
-        .run(baseBranch, Date.now(), task.repoId);
+        .run(baseBranch, Date.now(), task.repoId!);
     }
 
-    const gitPatch = await this.syncGitStatus(task, repoPath);
+    // GitHub work below stays on the local checkout; only the git-state read
+    // follows the task to its own host.
+    const gitStatusRepoPath =
+      task.location === 'remote'
+        ? ((repoRow['remote_path'] as string | null) ?? repoPath)
+        : repoPath;
+    const gitPatch = await this.syncGitStatus(task, gitStatusRepoPath);
 
     if (!githubOwner || !githubRepo) {
       const patch: TaskSyncPatch = {

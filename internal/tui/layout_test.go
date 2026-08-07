@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -1113,5 +1114,426 @@ func TestFlushPendingTerminalBoardNavCmdSkipsLiteralTabAfterNavigation(t *testin
 	}
 	if cmd != nil {
 		t.Fatal("flushPendingTerminalBoardNavCmd() should not send a literal tab after navigation")
+	}
+}
+
+func artifactFooterTestModel(width int, artifacts []ArtifactRecord) *Model {
+	return &Model{
+		focus: FocusBoard,
+		width: width,
+		artifacts: ArtifactsSnapshot{
+			RefreshedAt: 1785100000000,
+			Artifacts:   artifacts,
+		},
+	}
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func TestRenderArtifactFooterShowsAChipStateForEachStatus(t *testing.T) {
+	model := artifactFooterTestModel(200, []ArtifactRecord{
+		{ShortName: "ecom-integrations", Status: ArtifactStatusDrift, GAVersion: "1.1258.0", LatestRCVersion: "1.1259.0", Drift: intPtr(1)},
+		{ShortName: "assistant-web5", Status: ArtifactStatusInSync, GAVersion: "1.3309.0", LatestRCVersion: "1.3309.0"},
+		{ShortName: "web5-protos", Status: ArtifactStatusNoGA, LatestRCVersion: "1.0.5"},
+		{ShortName: "mystery-lib", Status: ArtifactStatusUnknown},
+	})
+
+	footer := renderArtifactFooter(model)
+	assertRenderedLinesWithinWidth(t, footer, 200)
+
+	plain := stripANSI(footer)
+	if lines := strings.Count(plain, "\n") + 1; lines > artifactFooterHeight {
+		t.Fatalf("renderArtifactFooter() = %q, want at most %d rows", plain, artifactFooterHeight)
+	}
+	for _, want := range []string{
+		artifactFooterLabel,
+		"ecom-integrations 1.1258.0" + artifactDriftMarker + "1",
+		"assistant-web5 1.3309.0" + artifactInSyncMarker,
+		"web5-protos " + artifactNoGALabel,
+		"mystery-lib " + artifactUnknownLabel,
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("renderArtifactFooter() = %q, want %q", plain, want)
+		}
+	}
+}
+
+func TestRenderArtifactFooterCountsDriftingArtifacts(t *testing.T) {
+	model := artifactFooterTestModel(200, []ArtifactRecord{
+		{ShortName: "one", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+		{ShortName: "two", Status: ArtifactStatusDrift, GAVersion: "2.0.0", LatestRCVersion: "2.1.0"},
+		{ShortName: "three", Status: ArtifactStatusDrift, GAVersion: "3.0.0", LatestRCVersion: "3.1.0"},
+		{ShortName: "four", Status: ArtifactStatusInSync, GAVersion: "4.0.0", LatestRCVersion: "4.0.0"},
+	})
+
+	plain := stripANSI(renderArtifactFooter(model))
+	if !strings.Contains(plain, artifactFooterLabel+" "+artifactDriftMarker+"3") {
+		t.Fatalf("renderArtifactFooter() = %q, want drift count %q", plain, artifactDriftMarker+"3")
+	}
+}
+
+func TestRenderArtifactFooterTagsNonLiveModeOnly(t *testing.T) {
+	model := artifactFooterTestModel(120, []ArtifactRecord{
+		{ShortName: "dev-thing", Mode: "DEV", Status: ArtifactStatusInSync, GAVersion: "1.0.0", LatestRCVersion: "1.0.0"},
+		{ShortName: "live-thing", Mode: ArtifactModeLive, Status: ArtifactStatusInSync, GAVersion: "2.0.0", LatestRCVersion: "2.0.0"},
+	})
+
+	plain := stripANSI(renderArtifactFooter(model))
+	if !strings.Contains(plain, "DEV") {
+		t.Fatalf("renderArtifactFooter() = %q, want the DEV mode tag", plain)
+	}
+	if strings.Contains(plain, string(ArtifactModeLive)) {
+		t.Fatalf("renderArtifactFooter() = %q, want no tag for LIVE artifacts", plain)
+	}
+}
+
+func TestRenderArtifactFooterHighlightsTheSelectedChip(t *testing.T) {
+	model := artifactFooterTestModel(120, []ArtifactRecord{
+		{ShortName: "first", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+		{ShortName: "second", Status: ArtifactStatusDrift, GAVersion: "2.0.0", LatestRCVersion: "2.1.0"},
+	})
+	model.selectedArtifactIndex = 1
+
+	plain := stripANSI(renderArtifactFooter(model))
+	if !strings.Contains(plain, artifactSelectedMark+"second") {
+		t.Fatalf("renderArtifactFooter() = %q, want the selected chip marked", plain)
+	}
+	if strings.Contains(plain, artifactSelectedMark+"first") {
+		t.Fatalf("renderArtifactFooter() = %q, want only the selected chip marked", plain)
+	}
+}
+
+func TestRenderArtifactFooterCountsHiddenChipsInTheOverflowMarker(t *testing.T) {
+	artifacts := []ArtifactRecord{}
+	for _, name := range []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"} {
+		artifacts = append(artifacts, ArtifactRecord{ShortName: name, Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"})
+	}
+	model := artifactFooterTestModel(50, artifacts)
+
+	footer := renderArtifactFooter(model)
+	assertRenderedLinesWithinWidth(t, footer, 50)
+
+	plain := stripANSI(footer)
+	shown := 0
+	for _, artifact := range artifacts {
+		if strings.Contains(plain, artifact.ShortName) {
+			shown++
+		}
+	}
+	if shown == 0 || shown == len(artifacts) {
+		t.Fatalf("renderArtifactFooter() = %q, want some chips dropped for width", plain)
+	}
+	if !strings.Contains(plain, artifactOverflowLabel(len(artifacts)-shown)) {
+		t.Fatalf("renderArtifactFooter() = %q, want overflow marker %q", plain, artifactOverflowLabel(len(artifacts)-shown))
+	}
+}
+
+func TestRenderArtifactFooterKeepsTheSelectedChipVisibleOnOverflow(t *testing.T) {
+	artifacts := []ArtifactRecord{}
+	for _, name := range []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"} {
+		artifacts = append(artifacts, ArtifactRecord{ShortName: name, Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"})
+	}
+	model := artifactFooterTestModel(50, artifacts)
+	model.selectedArtifactIndex = len(artifacts) - 1
+
+	plain := stripANSI(renderArtifactFooter(model))
+	if !strings.Contains(plain, artifactSelectedMark+"foxtrot") {
+		t.Fatalf("renderArtifactFooter() = %q, want the selected chip kept on the strip", plain)
+	}
+}
+
+func TestRenderArtifactFooterMarksStaleSnapshot(t *testing.T) {
+	model := artifactFooterTestModel(120, []ArtifactRecord{
+		{ShortName: "ecom", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+	})
+	model.artifacts.Stale = true
+
+	plain := stripANSI(renderArtifactFooter(model))
+	if !strings.Contains(plain, "stale") {
+		t.Fatalf("renderArtifactFooter() = %q, want the stale note", plain)
+	}
+	if !strings.Contains(plain, "ecom") {
+		t.Fatalf("renderArtifactFooter() = %q, want stale chips to stay visible", plain)
+	}
+}
+
+func TestRenderArtifactFooterShowsLoginHintWhenAuthIsNeeded(t *testing.T) {
+	model := artifactFooterTestModel(120, []ArtifactRecord{
+		{ShortName: "ecom", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+	})
+	model.artifacts.NeedsAuth = true
+
+	footer := renderArtifactFooter(model)
+	assertRenderedLinesWithinWidth(t, footer, 120)
+
+	plain := stripANSI(footer)
+	if !strings.Contains(plain, "agentboard mcp login") {
+		t.Fatalf("renderArtifactFooter() = %q, want the mcp login hint", plain)
+	}
+	if strings.Contains(plain, "1.1.0") {
+		t.Fatalf("renderArtifactFooter() = %q, want chips replaced by the auth hint", plain)
+	}
+}
+
+func TestRenderArtifactFooterShowsLoadingBeforeFirstRefresh(t *testing.T) {
+	model := &Model{focus: FocusBoard, width: 120}
+
+	plain := stripANSI(renderArtifactFooter(model))
+	if !strings.Contains(plain, "loading") {
+		t.Fatalf("renderArtifactFooter() = %q, want the loading note", plain)
+	}
+}
+
+// The catalog the footer was widened for: every entry drifts and five of them
+// carry the user's own commits.
+func web5CatalogArtifacts() []ArtifactRecord {
+	return []ArtifactRecord{
+		{ShortName: "web5.ecom-integrations", Status: ArtifactStatusDrift, GAVersion: "1.1258.0", LatestRCVersion: "1.1259.0", Drift: intPtr(1), PendingRcCount: intPtr(2), MyPendingCount: intPtr(0)},
+		{ShortName: "bo-web5-history", Status: ArtifactStatusDrift, GAVersion: "1.465.0", LatestRCVersion: "1.470.0", Drift: intPtr(5), PendingRcCount: intPtr(6), MyPendingCount: intPtr(1)},
+		{ShortName: "wix-assistant-web5", Status: ArtifactStatusDrift, GAVersion: "1.3301.0", LatestRCVersion: "1.3311.0", Drift: intPtr(10), PendingRcCount: intPtr(11), MyPendingCount: intPtr(6)},
+		{ShortName: "enterprise.web5.evaluator", Mode: "DEV", Status: ArtifactStatusDrift, GAVersion: "1.282.0", LatestRCVersion: "1.286.0", Drift: intPtr(4), PendingRcCount: intPtr(5), MyPendingCount: intPtr(1)},
+		{ShortName: "enterpise.web5.prompt-manager", Status: ArtifactStatusDrift, GAVersion: "1.258.0", LatestRCVersion: "1.269.0", Drift: intPtr(11), PendingRcCount: intPtr(12), MyPendingCount: intPtr(2)},
+		{ShortName: "conversation-configuration", Status: ArtifactStatusDrift, GAVersion: "1.1756.0", LatestRCVersion: "1.1765.0", Drift: intPtr(9), PendingRcCount: intPtr(10), MyPendingCount: intPtr(2)},
+	}
+}
+
+func TestRenderArtifactFooterFitsTheWholeCatalogOnTwoRows(t *testing.T) {
+	artifacts := web5CatalogArtifacts()
+	model := artifactFooterTestModel(200, artifacts)
+
+	footer := renderArtifactFooter(model)
+	assertRenderedLinesWithinWidth(t, footer, 200)
+
+	rows := strings.Split(stripANSI(footer), "\n")
+	if len(rows) != artifactFooterHeight {
+		t.Fatalf("renderArtifactFooter() = %q, want %d rows", footer, artifactFooterHeight)
+	}
+	for _, artifact := range artifacts {
+		if !strings.Contains(stripANSI(footer), artifact.ShortName) {
+			t.Fatalf("renderArtifactFooter() = %q, want %q visible", footer, artifact.ShortName)
+		}
+	}
+	if strings.Contains(stripANSI(footer), "+") {
+		t.Fatalf("renderArtifactFooter() = %q, want no overflow marker when every chip fits", footer)
+	}
+	for index, row := range rows {
+		if !strings.Contains(row, artifactDriftMarker) {
+			t.Fatalf("row %d = %q, want chips balanced across both rows", index, row)
+		}
+	}
+}
+
+func TestRenderArtifactFooterHeadSummarisesDriftAndOwnership(t *testing.T) {
+	model := artifactFooterTestModel(200, web5CatalogArtifacts())
+
+	plain := stripANSI(renderArtifactFooter(model))
+	want := artifactFooterLabel + " " + artifactDriftMarker + "6 " + artifactOwnedMarker + "5"
+	if !strings.Contains(plain, want) {
+		t.Fatalf("renderArtifactFooter() = %q, want head %q", plain, want)
+	}
+}
+
+func TestRenderArtifactFooterMarksTheArtifactsYouAreHoldingUp(t *testing.T) {
+	model := artifactFooterTestModel(200, web5CatalogArtifacts())
+
+	plain := stripANSI(renderArtifactFooter(model))
+	if !strings.Contains(plain, "wix-assistant-web5 1.3301.0"+artifactDriftMarker+"10 "+artifactOwnedMarker+"6") {
+		t.Fatalf("renderArtifactFooter() = %q, want the owned pending count on the chip", plain)
+	}
+}
+
+func TestRenderArtifactFooterShowsNoOwnershipMarkerWithoutOwnedChanges(t *testing.T) {
+	cases := []struct {
+		name           string
+		myPendingCount *int
+	}{
+		{"ownership unknown", nil},
+		{"confidently none", intPtr(0)},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			model := artifactFooterTestModel(120, []ArtifactRecord{{
+				ShortName:       "ecom-integrations",
+				Status:          ArtifactStatusDrift,
+				GAVersion:       "1.1258.0",
+				LatestRCVersion: "1.1259.0",
+				Drift:           intPtr(1),
+				PendingRcCount:  intPtr(2),
+				MyPendingCount:  testCase.myPendingCount,
+			}})
+
+			plain := stripANSI(renderArtifactFooter(model))
+			if strings.Contains(plain, artifactOwnedMarker) {
+				t.Fatalf("renderArtifactFooter() = %q, want no ownership marker", plain)
+			}
+			if strings.Contains(plain, "0") && strings.Contains(plain, artifactOwnedMarker+"0") {
+				t.Fatalf("renderArtifactFooter() = %q, want no zero ownership count", plain)
+			}
+		})
+	}
+}
+
+func TestContentHeightLeavesRoomForBothFooterRows(t *testing.T) {
+	model := &Model{focus: FocusBoard, width: 120, height: 40}
+
+	if got, want := model.contentHeight(), 40-headerHeight-artifactFooterHeight-statusBarHeight; got != want {
+		t.Fatalf("contentHeight() = %d, want %d", got, want)
+	}
+}
+
+func TestRenderMissionRailKeepsTheSideColumnForMissionsOnly(t *testing.T) {
+	model := artifactFooterTestModel(200, []ArtifactRecord{
+		{ShortName: "ecom-integrations", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+	})
+	model.missions = []MissionSnapshot{{ID: "mission-1", Title: "Cross-repo rollout"}}
+
+	plain := stripANSI(renderMissionRail(model, 12))
+	if !strings.Contains(plain, "MISSIONS") {
+		t.Fatalf("renderMissionRail() = %q, want the mission rail", plain)
+	}
+	if strings.Contains(plain, artifactFooterLabel) {
+		t.Fatalf("renderMissionRail() = %q, want artifacts kept out of the side column", plain)
+	}
+}
+
+func TestHandleKeyShiftSRequestsArtifactRefresh(t *testing.T) {
+	model := &Model{focus: FocusBoard}
+
+	if cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}); cmd == nil {
+		t.Fatal("handleKey(S) returned nil cmd, want an artifact refresh")
+	}
+}
+
+func TestHandleKeySemicolonMovesTheFooterSelection(t *testing.T) {
+	model := artifactFooterTestModel(120, []ArtifactRecord{
+		{ShortName: "first", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+		{ShortName: "second", Status: ArtifactStatusDrift, GAVersion: "2.0.0", LatestRCVersion: "2.1.0"},
+	})
+
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{';'}})
+	if model.selectedArtifactIndex != 1 {
+		t.Fatalf("selectedArtifactIndex = %d, want 1", model.selectedArtifactIndex)
+	}
+
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{';'}})
+	if model.selectedArtifactIndex != 0 {
+		t.Fatalf("selectedArtifactIndex = %d, want the selection to wrap to 0", model.selectedArtifactIndex)
+	}
+}
+
+func TestApplyArtifactsClampsTheFooterSelectionToTheNewSnapshot(t *testing.T) {
+	model := artifactFooterTestModel(120, []ArtifactRecord{
+		{ShortName: "first", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+		{ShortName: "second", Status: ArtifactStatusDrift, GAVersion: "2.0.0", LatestRCVersion: "2.1.0"},
+	})
+	model.selectedArtifactIndex = 1
+
+	model.applyArtifacts(artifactsLoadedMsg{snapshot: ArtifactsSnapshot{
+		RefreshedAt: 1785100000001,
+		Artifacts:   []ArtifactRecord{{ShortName: "first", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"}},
+	}})
+
+	if model.selectedArtifactIndex != 0 {
+		t.Fatalf("selectedArtifactIndex = %d, want 0 after the list shrank", model.selectedArtifactIndex)
+	}
+}
+
+func TestApplyArtifactsKeepsLastRowsAndMarksStaleOnError(t *testing.T) {
+	model := artifactFooterTestModel(120, []ArtifactRecord{
+		{ShortName: "ecom", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
+	})
+
+	model.applyArtifacts(artifactsLoadedMsg{err: errors.New("daemon unreachable")})
+
+	if !model.artifacts.Stale {
+		t.Fatal("artifacts.Stale = false, want true after a failed load")
+	}
+	if len(model.artifacts.Artifacts) != 1 {
+		t.Fatalf("artifacts = %#v, want the previous rows kept", model.artifacts.Artifacts)
+	}
+	if model.statusMessage != "" {
+		t.Fatalf("statusMessage = %q, want the background poll to stay silent", model.statusMessage)
+	}
+
+	model.applyArtifacts(artifactsLoadedMsg{manual: true, err: errors.New("daemon unreachable")})
+	if model.statusMessage != "daemon unreachable" {
+		t.Fatalf("statusMessage = %q, want the manual refresh error surfaced", model.statusMessage)
+	}
+}
+
+func TestRenderTaskCardMarksGeneralTaskWithoutBranch(t *testing.T) {
+	card := renderTaskCard(
+		&Model{},
+		TaskRecord{
+			ID:        "task-1",
+			Title:     "Read the MCP spec",
+			Kind:      TaskKindGeneral,
+			UpdatedAt: 1,
+		},
+		false,
+		false,
+		nil,
+		"",
+	)
+
+	plain := ansiPattern.ReplaceAllString(card, "")
+	if !strings.Contains(plain, "general") {
+		t.Fatalf("renderTaskCard() = %q, want a general marker", plain)
+	}
+	if strings.Contains(plain, "⎇") {
+		t.Fatalf("renderTaskCard() = %q, want no branch chip on a general task", plain)
+	}
+}
+
+func TestRenderTaskCardKeepsBranchChipForRepoTasks(t *testing.T) {
+	card := renderTaskCard(
+		&Model{},
+		TaskRecord{
+			ID:         "task-1",
+			Title:      "Ship follow-up",
+			RepoID:     "repo-1",
+			BranchName: "feat/ship-follow-up",
+			UpdatedAt:  1,
+		},
+		false,
+		false,
+		nil,
+		"web5.0-poc",
+	)
+
+	plain := ansiPattern.ReplaceAllString(card, "")
+	if !strings.Contains(plain, "⎇") {
+		t.Fatalf("renderTaskCard() = %q, want a branch chip", plain)
+	}
+}
+
+func TestRenderOverviewBoardListsGeneralScope(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{{ID: "repo-1", Label: "web5-poc"}},
+		tasks: []TaskRecord{
+			{ID: "task-1", Title: "Fix login", RepoID: "repo-1", TrackID: "backlog"},
+			{ID: "task-2", Title: "Read the MCP spec", Kind: TaskKindGeneral, TrackID: "done"},
+		},
+	}
+
+	plain := ansiPattern.ReplaceAllString(renderOverviewBoard(model, 20, 80), "")
+
+	if !strings.Contains(plain, "General") {
+		t.Fatalf("overview = %q, want a General row", plain)
+	}
+	// The general row counts its own cards, not the repo's.
+	if !strings.Contains(plain, "✓1") {
+		t.Fatalf("overview = %q, want the general row to count its done card", plain)
+	}
+}
+
+func TestRenderOverviewBoardWithoutReposOrGeneralTasksAsksForARepo(t *testing.T) {
+	plain := ansiPattern.ReplaceAllString(renderOverviewBoard(&Model{}, 20, 80), "")
+
+	if !strings.Contains(plain, "No repos registered") {
+		t.Fatalf("overview = %q, want the register-a-repo hint", plain)
 	}
 }

@@ -1,15 +1,30 @@
+import { homedir } from 'os';
 import type {
+  AgentCLI,
+  AgentPermissionMode,
+  BackendSessionInfo,
   SessionRecord,
   SessionBackend,
   SessionBackendType,
   SessionStatus,
   SessionSlot,
+  TaskLocation,
   GetBufferResult,
+  ReconnectSessionResult,
 } from '../types/index.js';
 import type { Db } from '../db/index.js';
 import type { BoardService } from './board.js';
 import { PtyBackend } from './session-backends/pty.js';
 import { TmuxBackend } from './session-backends/tmux.js';
+import { SshTmuxBackend } from './session-backends/ssh.js';
+import {
+  LOCAL_TRANSPORT_ID,
+  TransportRegistry,
+  TransportUnreachableError,
+  type ExecTransport,
+} from './transport/index.js';
+import type { RemoteHostProvider } from './remote/index.js';
+import { buildBackendSessionName } from './session-name.js';
 import type { TerminalBufferService } from './terminal-buffer.js';
 import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
@@ -43,8 +58,10 @@ interface SessionRow {
 interface TaskRow {
   id: string;
   title: string;
-  repo_id: string;
+  kind: string | null;
+  repo_id: string | null;
   agent_cli: 'claude' | 'codex' | null;
+  location: string | null;
   track_id: string;
   branch_name: string | null;
   worktree_path: string | null;
@@ -55,7 +72,13 @@ interface TaskRow {
 interface RepoRow {
   id: string;
   path: string;
+  remote_path: string | null;
   default_base_branch: string | null;
+}
+
+/** A general task has no repo, branch, or worktree — only a session. */
+function isGeneralTaskRow(task: Pick<TaskRow, 'kind'>): boolean {
+  return task.kind === 'general';
 }
 
 interface PreparedSessionWorkspace extends TaskWorkspaceInfo {
@@ -89,6 +112,10 @@ function rowToRecord(row: SessionRow): SessionRecord {
   };
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // --------------- SessionManager ------------------------------
 
 export class SessionManager {
@@ -96,8 +123,15 @@ export class SessionManager {
   private lastOutputAtBySessionKey = new Map<string, number>();
   private lastBusyBySessionKey = new Map<string, boolean>();
   private openSessionInFlight = new Map<string, Promise<SessionRecord>>();
-  private processTableCache?: { rows: ProcessRow[]; loadedAt: number };
-  private processTableLoadInFlight?: Promise<ProcessRow[] | null>;
+  private processTableCache = new Map<string, { rows: ProcessRow[]; loadedAt: number }>();
+  private processTableLoadInFlight = new Map<string, Promise<ProcessRow[] | null>>();
+  private remoteStartInFlight = false;
+
+  /**
+   * Set by the daemon so work that finishes after its RPC returned — a remote
+   * host waking up, minutes later — can still push the board to the TUI.
+   */
+  onSessionsChanged?: () => void;
 
   constructor(
     private db: Db,
@@ -113,7 +147,12 @@ export class SessionManager {
     private buffers: TerminalBufferService,
     private onBufferUpdate?: (taskId: string, slot: SessionSlot, buffer: GetBufferResult) => void,
     private sessionBootstrapScript = '',
-    private sessionBackend: SessionBackendType = 'tmux'
+    private sessionBackend: SessionBackendType = 'tmux',
+    private transports: TransportRegistry = new TransportRegistry(),
+    private agentPermissionMode: AgentPermissionMode = 'default',
+    private agentArgs: Partial<Record<AgentCLI, string[]>> = {},
+    /** Powers the remote host back on. Null when nothing can start it. */
+    private remoteProvider: RemoteHostProvider | null = null
   ) {
     this.buffers.subscribeAll((taskId, slot, buffer) => {
       this.onBufferUpdate?.(taskId, slot, buffer);
@@ -123,6 +162,11 @@ export class SessionManager {
   protected createBackend(backendType: SessionBackendType): SessionBackend {
     if (backendType === 'tmux') {
       return new TmuxBackend();
+    }
+
+    if (backendType === 'ssh') {
+      const transport = this.transports.getRemote();
+      return new SshTmuxBackend({ transport, host: transport.host });
     }
 
     return new PtyBackend((taskId, slot, data) => {
@@ -159,6 +203,51 @@ export class SessionManager {
     return slot === 'secondary' ? task.secondary_session_id : task.session_id;
   }
 
+  private taskLocation(task: TaskRow): TaskLocation {
+    if (isGeneralTaskRow(task)) {
+      return 'local';
+    }
+    return task.location === 'remote' ? 'remote' : 'local';
+  }
+
+  /**
+   * Remote tasks always use the ssh backend; local tasks keep whatever the
+   * config selected. Only session *creation* consults this — every later call
+   * reads `backend_type` off the persisted session row.
+   */
+  private backendTypeForTask(task: TaskRow): SessionBackendType {
+    return this.taskLocation(task) === 'remote' ? 'ssh' : this.sessionBackend;
+  }
+
+  /**
+   * The repo checkout path on whichever host the task runs on, or the home
+   * directory for a general task, which has no checkout at all.
+   */
+  private repoPathForTask(task: TaskRow, repo: RepoRow | null): string {
+    if (!repo || isGeneralTaskRow(task)) {
+      return homedir();
+    }
+    if (this.taskLocation(task) !== 'remote') {
+      return repo.path;
+    }
+    if (!repo.remote_path) {
+      throw new Error(
+        `Task ${task.id} is set to run remotely, but repo ${repo.id} has no remote path configured. ` +
+          'Set "remotePath" for the repo, or move the task back to local.'
+      );
+    }
+    return repo.remote_path;
+  }
+
+  /**
+   * Which host a live session runs on. Derived from the persisted backend type
+   * rather than the task row, so it stays correct even if the task's location is
+   * changed while a session is still running under the old backend.
+   */
+  private transportForBackend(backendType: SessionBackendType): ExecTransport {
+    return this.transports.forLocation(backendType === 'ssh' ? 'remote' : 'local');
+  }
+
   private noteSessionOutput(taskId: string, slot: SessionSlot): void {
     this.lastOutputAtBySessionKey.set(this.sessionKey(taskId, slot), Date.now());
   }
@@ -167,35 +256,41 @@ export class SessionManager {
     return this.board.clearTaskSessionAttention?.(taskId) ?? false;
   }
 
-  protected async loadProcessTableRows(): Promise<ProcessRow[] | null> {
-    return loadProcessTable();
+  protected async loadProcessTableRows(transport?: ExecTransport): Promise<ProcessRow[] | null> {
+    return loadProcessTable(transport?.isRemote ? transport : undefined);
   }
 
-  private async getProcessTableRows(): Promise<ProcessRow[] | null> {
+  /**
+   * Cached per host: a remote `ps` is an SSH round trip, and the TUI polls every
+   * task on a 2.5s tick, so one read per host per window is shared by all of them.
+   */
+  private async getProcessTableRows(transport?: ExecTransport): Promise<ProcessRow[] | null> {
+    const key = transport?.id ?? LOCAL_TRANSPORT_ID;
     const now = Date.now();
-    if (
-      this.processTableCache &&
-      now - this.processTableCache.loadedAt <= processTableCacheWindowMs
-    ) {
-      return this.processTableCache.rows;
+
+    const cached = this.processTableCache.get(key);
+    if (cached && now - cached.loadedAt <= processTableCacheWindowMs) {
+      return cached.rows;
     }
 
-    if (this.processTableLoadInFlight) {
-      return this.processTableLoadInFlight;
+    const inFlight = this.processTableLoadInFlight.get(key);
+    if (inFlight) {
+      return inFlight;
     }
 
-    this.processTableLoadInFlight = this.loadProcessTableRows()
+    const load = this.loadProcessTableRows(transport)
       .then((rows) => {
         if (rows) {
-          this.processTableCache = { rows, loadedAt: Date.now() };
+          this.processTableCache.set(key, { rows, loadedAt: Date.now() });
         }
         return rows;
       })
       .finally(() => {
-        this.processTableLoadInFlight = undefined;
+        this.processTableLoadInFlight.delete(key);
       });
 
-    return this.processTableLoadInFlight;
+    this.processTableLoadInFlight.set(key, load);
+    return load;
   }
 
   private async ensureSessionBranch(
@@ -240,7 +335,7 @@ export class SessionManager {
     repoPath: string
   ): Promise<PreparedSessionWorkspace> {
     try {
-      return this.worktrees.prepareTaskWorkspace(taskId);
+      return await this.worktrees.prepareTaskWorkspace(taskId);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       await this.board.setTaskLastSessionCwd?.(taskId, repoPath);
@@ -278,7 +373,7 @@ export class SessionManager {
     // 1. Load task
     const taskRow = this.db
       .prepare<[string], TaskRow>(
-        `SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path,
+        `SELECT id, title, kind, repo_id, agent_cli, location, track_id, branch_name, worktree_path,
                 session_id, secondary_session_id
            FROM tasks
           WHERE id = ?`
@@ -287,12 +382,21 @@ export class SessionManager {
 
     if (!taskRow) throw new Error(`Task not found: ${taskId}`);
 
-    // 2. Load repo
-    const repoRow = this.db
-      .prepare<[string], RepoRow>('SELECT id, path, default_base_branch FROM repos WHERE id = ?')
-      .get(taskRow.repo_id);
+    const isGeneral = isGeneralTaskRow(taskRow);
 
-    if (!repoRow) throw new Error(`Repo not found for task ${taskId} (repoId=${taskRow.repo_id})`);
+    // 2. Load repo — a general task has none, and needs none.
+    const repoRow = isGeneral
+      ? null
+      : (this.db
+          .prepare<
+            [string],
+            RepoRow
+          >('SELECT id, path, remote_path, default_base_branch FROM repos WHERE id = ?')
+          .get(taskRow.repo_id ?? '') ?? null);
+
+    if (!isGeneral && !repoRow) {
+      throw new Error(`Repo not found for task ${taskId} (repoId=${taskRow.repo_id})`);
+    }
 
     // 3. Check for a live session already linked to this task
     const linkedSessionId = this.linkedSessionId(taskRow, slot);
@@ -310,11 +414,14 @@ export class SessionManager {
           const backend = this.getBackend(existing.backendType);
           const info = await backend.inspect(existing.backendSessionId);
           if (info) {
-            // Still alive — reattach
-            let attachCommand = existing.attachCommand;
-            if (!attachCommand) {
-              const metadata = await backend.attachMetadata(existing.backendSessionId);
-              attachCommand = metadata.command;
+            // Still alive — reattach. attachMetadata() is the backend's chance to
+            // repair whatever attaching needs: tmux re-tags its pane, ssh rebuilds
+            // the local wrapper a dropped connection destroyed. It must run on
+            // every reattach, not just when attach_command is missing, or a
+            // remote session can never be revived.
+            const metadata = await backend.attachMetadata(existing.backendSessionId);
+            const attachCommand = metadata.command;
+            if (attachCommand !== existing.attachCommand) {
               this.db
                 .prepare<
                   [string, number, string],
@@ -322,6 +429,13 @@ export class SessionManager {
                 >('UPDATE sessions SET attach_command = ?, updated_at = ? WHERE id = ?')
                 .run(attachCommand, Date.now(), existing.id);
             }
+            // A general task owns no branch, so reattaching must never run a
+            // checkout in whatever directory the session happens to sit in.
+            if (isGeneral) {
+              this.clearTaskAttention(taskId);
+              return { ...existing, attachCommand, branch: undefined, slot };
+            }
+
             const currentBranch = resolveTaskBranchName(
               taskRow.title,
               taskRow.id,
@@ -340,7 +454,7 @@ export class SessionManager {
             if (shouldResetBranch) {
               await this.ensureSessionBranch(
                 existing,
-                taskRow.worktree_path ?? repoRow.path,
+                taskRow.worktree_path ?? this.repoPathForTask(taskRow, repoRow),
                 currentBranch,
                 previousBranch
               );
@@ -353,45 +467,58 @@ export class SessionManager {
       }
     }
 
-    // 4. Determine branch
-    const branch = resolveTaskBranchName(
-      taskRow.title,
-      taskRow.id,
-      taskRow.branch_name ?? undefined
-    );
+    const backendType = this.backendTypeForTask(taskRow);
+    const backend = this.getBackend(backendType);
 
-    // 5. Create or reuse a backend session
-    const backend = this.getBackend(this.sessionBackend);
+    // 4. Adopt a session the task lost track of, before creating a second one
+    const adopted = await this.adoptExistingSession(taskRow, slot, backendType, backend);
+    if (adopted) {
+      return adopted;
+    }
+
+    // 5. Determine branch (general tasks have none)
+    const branch = isGeneral
+      ? ''
+      : resolveTaskBranchName(taskRow.title, taskRow.id, taskRow.branch_name ?? undefined);
+
+    // 6. Create a backend session
     const backendHealth = await backend.healthCheck();
     if (!backendHealth.available) {
       throw new Error(
-        `${this.sessionBackend} session backend unavailable: ${backendHealth.error ?? 'backend not available'}`
+        `${backendType} session backend unavailable: ${backendHealth.error ?? 'backend not available'}`
       );
     }
 
-    const workspace = await this.prepareWorkspaceForSession(taskId, repoRow.path);
+    const taskRepoPath = this.repoPathForTask(taskRow, repoRow);
+    const workspace = await this.prepareWorkspaceForSession(taskId, taskRepoPath);
 
     const createdSession = await backend.create({
       taskId,
       taskTitle: taskRow.title,
       slot,
-      repoPath: repoRow.path,
+      taskKind: isGeneral ? 'general' : 'repo',
+      repoPath: isGeneral ? '' : taskRepoPath,
       branch,
       agentCli: taskRow.agent_cli ?? 'claude',
       cwd: workspace.path,
-      baseBranch: repoRow.default_base_branch ?? 'main',
+      baseBranch: repoRow?.default_base_branch ?? 'main',
       usesWorktree: workspace.usedWorktree,
       bootstrapNotice: workspace.bootstrapNotice,
       sessionBootstrapScript: this.sessionBootstrapScript,
+      agentPermissionMode: this.agentPermissionMode,
+      agentArgs: this.agentArgs,
     });
     const sessionRecord: SessionRecord = {
       ...createdSession,
       taskId,
       slot,
+      branch: isGeneral ? undefined : createdSession.branch,
     };
 
-    // 6. Persist to DB
-    await this.board.setTaskBranch?.(taskId, branch);
+    // 7. Persist to DB
+    if (!isGeneral) {
+      await this.board.setTaskBranch?.(taskId, branch);
+    }
 
     const now = Date.now();
     this.db
@@ -432,8 +559,9 @@ export class SessionManager {
         now
       );
 
-    // 7. Link session to task
+    // 8. Link session to task
     await this.board.linkSession?.(taskId, sessionRecord.id, slot);
+    this.markSupersededSessions(taskId, slot, sessionRecord.id);
     if (taskRow.track_id === 'backlog') {
       this.board.moveTask({ id: taskId, trackId: 'in-progress' });
     }
@@ -442,12 +570,111 @@ export class SessionManager {
     return sessionRecord;
   }
 
+  // ---- adoption --------------------------------------------
+
+  /**
+   * Reclaim a session row the task no longer points at, when its backend session
+   * turns out to still be alive.
+   *
+   * Backend session names are derived from the task, not stored, so a task that
+   * lost its link — a reconcile pass marked it orphaned while the host was
+   * briefly unreachable, say — can be matched back to the session it left
+   * running. Without this, opening the task inserts a *second* row for the very
+   * same backend session, and the board accumulates orphaned twins that keep
+   * worktree cleanup from ever running.
+   */
+  private async adoptExistingSession(
+    taskRow: TaskRow,
+    slot: SessionSlot,
+    backendType: SessionBackendType,
+    backend: SessionBackend
+  ): Promise<SessionRecord | null> {
+    const backendSessionId = buildBackendSessionName(taskRow.title, taskRow.id, slot);
+    const candidate = this.db
+      .prepare<[string, SessionSlot, SessionBackendType, string], SessionRow>(
+        `SELECT * FROM sessions
+          WHERE task_id = ?
+            AND slot = ?
+            AND backend_type = ?
+            AND backend_session_id = ?
+            AND status <> 'terminated'
+          ORDER BY updated_at DESC
+          LIMIT 1`
+      )
+      .get(taskRow.id, slot, backendType, backendSessionId);
+
+    if (!candidate) {
+      return null;
+    }
+
+    // A TransportUnreachableError propagates on purpose: "cannot tell" must never
+    // be read as "dead", or an unreachable host quietly forks a second session
+    // alongside the one still running the agent.
+    const info = await backend.inspect(backendSessionId);
+    if (!info) {
+      return null;
+    }
+
+    const metadata = await backend.attachMetadata(backendSessionId);
+    return this.reviveSessionRow(rowToRecord(candidate), metadata.command, slot);
+  }
+
+  /** Put a session row back in service and make the task point at it again. */
+  private async reviveSessionRow(
+    session: SessionRecord,
+    attachCommand: string,
+    slot: SessionSlot
+  ): Promise<SessionRecord> {
+    const now = Date.now();
+    this.db
+      .prepare<[string, number, number, string], void>(
+        `UPDATE sessions
+            SET status = 'active', attach_command = ?, last_heartbeat = ?, updated_at = ?
+          WHERE id = ?`
+      )
+      .run(attachCommand, now, now, session.id);
+
+    await this.board.linkSession?.(session.taskId, session.id, slot);
+    this.markSupersededSessions(session.taskId, slot, session.id);
+    this.collapseDuplicateSessions(session.taskId, slot, session.id);
+    this.clearTaskAttention(session.taskId);
+
+    return { ...session, status: 'active', attachCommand, slot };
+  }
+
+  /**
+   * Delete retired rows that duplicate a live one.
+   *
+   * {@link markSupersededSessions} retires the losers but keeps them, which is
+   * right when they describe a genuinely different backend session. Rows sharing
+   * the *same* `backend_session_id` as the live row describe nothing extra —
+   * they are bookkeeping from a re-open that failed to recognise its own
+   * session, so they are dropped outright.
+   */
+  private collapseDuplicateSessions(
+    taskId: string,
+    slot: SessionSlot,
+    keepSessionId: string
+  ): number {
+    const result = this.db
+      .prepare<[string, SessionSlot, string, string], void>(
+        `DELETE FROM sessions
+          WHERE task_id = ?
+            AND slot = ?
+            AND id <> ?
+            AND backend_session_id IS NOT NULL
+            AND backend_session_id = (SELECT backend_session_id FROM sessions WHERE id = ?)`
+      )
+      .run(taskId, slot, keepSessionId, keepSessionId);
+    return result.changes;
+  }
+
   // ---- getSession ------------------------------------------
 
   getSession(taskId: string, slot: SessionSlot = 'primary'): SessionRecord | null {
     const task = this.db
       .prepare<[string], TaskRow>(
-        `SELECT id, title, repo_id, agent_cli, track_id, branch_name, worktree_path,
+        `SELECT id, title, kind, repo_id, agent_cli, location, track_id, branch_name, worktree_path,
                 session_id, secondary_session_id
            FROM tasks
           WHERE id = ?`
@@ -476,8 +703,8 @@ export class SessionManager {
     const session = this.getSession(taskId, slot);
     if (!session) throw new Error(`No active session for task: ${taskId}`);
     if (!session.backendSessionId) throw new Error(`Session has no backend ID: ${session.id}`);
-    if (session.backendType === 'tmux') {
-      throw new Error('tmux sessions receive input directly in the tmux pane.');
+    if (session.backendType === 'tmux' || session.backendType === 'ssh') {
+      throw new Error(`${session.backendType} sessions receive input directly in the tmux pane.`);
     }
 
     const backend = this.getBackend(session.backendType);
@@ -496,7 +723,7 @@ export class SessionManager {
     slot: SessionSlot = 'primary'
   ): Promise<void> {
     const session = this.getSession(taskId, slot);
-    if (!session?.backendSessionId || session.backendType === 'tmux') {
+    if (!session?.backendSessionId || session.backendType === 'tmux' || session.backendType === 'ssh') {
       return;
     }
 
@@ -533,7 +760,29 @@ export class SessionManager {
       activity = deriveFallbackSessionActivity(taskId, session.id, session.status);
     } else {
       const backend = this.getBackend(session.backendType);
-      const info = await backend.inspect(session.backendSessionId);
+      let info: BackendSessionInfo | null;
+      try {
+        info = await backend.inspect(session.backendSessionId);
+      } catch (error) {
+        // The host is unreachable, so the session's real state is unknown. Report
+        // it as idle rather than orphaned: the remote session is very likely still
+        // running, and the board must stay usable while the VPN is down.
+        if (error instanceof TransportUnreachableError) {
+          return {
+            activity: {
+              taskId,
+              sessionId: session.id,
+              slot,
+              sessionStatus: 'idle',
+              isBusy: false,
+              updatedAt: Date.now(),
+            },
+            attentionChanged: false,
+          };
+        }
+        throw error;
+      }
+
       if (!info) {
         activity = {
           taskId,
@@ -554,7 +803,9 @@ export class SessionManager {
             info.currentCommand
           );
         } else {
-          const processRows = await this.getProcessTableRows();
+          const processRows = await this.getProcessTableRows(
+            this.transportForBackend(session.backendType)
+          );
           activity = processRows
             ? deriveSessionActivity(
                 taskId,
@@ -644,6 +895,178 @@ export class SessionManager {
     return this.openSessionInner(taskId, slot);
   }
 
+  // ---- reconnect -------------------------------------------
+
+  /**
+   * Re-link a remote task to the machine its agent is running on.
+   *
+   * Distinct from {@link recreateSession}, which always throws the running agent
+   * away. Reconnect repairs the plumbing and keeps the agent whenever it can:
+   * the local wrapper pane and the SSH connection are disposable, the remote
+   * tmux session holding the agent is not.
+   */
+  async reconnectSession(
+    taskId: string,
+    slot: SessionSlot = 'primary'
+  ): Promise<ReconnectSessionResult> {
+    const taskRow = this.loadTaskRow(taskId);
+    if (!taskRow) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+    if (this.taskLocation(taskRow) !== 'remote') {
+      throw new Error('Reconnect applies to remote tasks only.');
+    }
+
+    const provider = this.remoteProvider;
+    if (provider) {
+      const status = await provider.status();
+
+      if (status === 'failed') {
+        return {
+          state: 'unreachable',
+          message: `${provider.label} is in a failed state. Fix it in Coder, then reconnect again.`,
+        };
+      }
+
+      // A build takes minutes, so it runs detached and the board is patched when
+      // it lands. Holding the RPC open for it would freeze the TUI instead.
+      if (status === 'stopped' || status === 'starting') {
+        this.startRemoteHostThenReconnect(taskRow, slot, provider, status === 'stopped');
+        return {
+          state: 'starting',
+          message:
+            status === 'stopped'
+              ? `Starting ${provider.label}. The card reconnects on its own once it is up.`
+              : `${provider.label} is already starting. The card reconnects on its own once it is up.`,
+        };
+      }
+      // 'running' and 'unknown' both fall through: SSH is the authority, and an
+      // unanswerable provider must never block a reconnect to a host that is up.
+    }
+
+    return this.reconnectToLiveHost(taskRow, slot);
+  }
+
+  private async reconnectToLiveHost(
+    taskRow: TaskRow,
+    slot: SessionSlot
+  ): Promise<ReconnectSessionResult> {
+    await this.resetRemoteTransport();
+
+    let transport: ReturnType<TransportRegistry['getRemote']>;
+    try {
+      transport = this.transports.getRemote();
+    } catch (error) {
+      return { state: 'unreachable', message: errorMessage(error) };
+    }
+
+    // Optional warm-up: pay the cold connect once rather than on each of the
+    // several round trips below. A failure here is not fatal — every exec opens
+    // the master on demand — so the reachability probe stays the real verdict.
+    await transport.ensureMaster().catch(() => undefined);
+
+    if ((await transport.reachability()) !== 'ok') {
+      return {
+        state: 'unreachable',
+        message: `Cannot reach ${transport.host}. Check your VPN, then verify: ssh ${transport.host} true`,
+      };
+    }
+
+    // Ask before opening, because openSession repairs the difference silently
+    // and the user should be told which of the two things happened.
+    const backend = this.getBackend('ssh');
+    const backendSessionId = buildBackendSessionName(taskRow.title, taskRow.id, slot);
+    let wasAlive: boolean;
+    try {
+      wasAlive = (await backend.inspect(backendSessionId)) !== null;
+    } catch (error) {
+      if (error instanceof TransportUnreachableError) {
+        return { state: 'unreachable', message: errorMessage(error) };
+      }
+      throw error;
+    }
+
+    // Clear the local plumbing before reopening. A wrapper pane whose attach
+    // loop has died still carries its tag, and the passive attach path reads
+    // that tag as a living wrapper — so without this, reconnect reports success
+    // while the card stays welded to a dead shell.
+    await backend.resetAttachment?.(backendSessionId);
+
+    const session = await this.openSession(taskRow.id, slot);
+    return wasAlive
+      ? {
+          state: 'attached',
+          message: `Reconnected to ${backendSessionId} on ${transport.host}.`,
+          session,
+        }
+      : {
+          state: 'recreated',
+          message: `The remote session was gone, so a fresh one was started on ${transport.host}.`,
+          session,
+        };
+  }
+
+  /**
+   * Start the host, then reconnect once it answers.
+   *
+   * Detached on purpose: a workspace build runs for minutes, and the caller was
+   * answered with 'starting' before this began. The board patch at the end is
+   * how the result reaches the user.
+   */
+  private startRemoteHostThenReconnect(
+    taskRow: TaskRow,
+    slot: SessionSlot,
+    provider: RemoteHostProvider,
+    needsStart: boolean
+  ): void {
+    // One build at a time. Two `coder start` calls racing on the same workspace
+    // is at best wasted, at worst a second build queued behind the first.
+    if (this.remoteStartInFlight) {
+      return;
+    }
+    this.remoteStartInFlight = true;
+
+    void (async () => {
+      try {
+        if (needsStart) {
+          await provider.start();
+        }
+        if (await provider.waitUntilRunning()) {
+          await this.reconnectToLiveHost(taskRow, slot);
+        }
+      } catch {
+        // There is no longer a caller to throw to. The board patch below shows
+        // whatever state the attempt actually reached.
+      } finally {
+        this.remoteStartInFlight = false;
+        this.onSessionsChanged?.();
+      }
+    })();
+  }
+
+  /**
+   * Discard the remote transport and anything holding a reference to it.
+   *
+   * The cached backend closed over the transport instance, so dropping only the
+   * registry entry would leave the backend talking through the dead
+   * ControlMaster — and reporting the sessions behind it as gone.
+   */
+  private async resetRemoteTransport(): Promise<void> {
+    this.backends.delete('ssh');
+    await this.transports.resetRemote();
+  }
+
+  private loadTaskRow(taskId: string): TaskRow | undefined {
+    return this.db
+      .prepare<[string], TaskRow>(
+        `SELECT id, title, kind, repo_id, agent_cli, location, track_id, branch_name, worktree_path,
+                session_id, secondary_session_id
+           FROM tasks
+          WHERE id = ?`
+      )
+      .get(taskId);
+  }
+
   async setDualSessionMode(taskId: string, enabled: boolean): Promise<void> {
     if (enabled) {
       await this.openSession(taskId, 'primary');
@@ -670,7 +1093,91 @@ export class SessionManager {
 
   // ---- reconcile -------------------------------------------
 
+  /**
+   * Retire earlier session rows for a task slot once a new one takes over.
+   *
+   * Only the row linked from `tasks` is authoritative. When a session had to be
+   * recreated, the previous row kept `status='active'` forever — which blocks
+   * worktree cleanup on archive and inflates every scan over live sessions.
+   *
+   * The backend session is deliberately left alone: a superseded row usually
+   * carries the *same* `backend_session_id` as the live one, so terminating it
+   * would kill the session that is still running.
+   */
+  private markSupersededSessions(taskId: string, slot: SessionSlot, keepSessionId: string): number {
+    const result = this.db
+      .prepare<[number, string, SessionSlot, string], void>(
+        `UPDATE sessions
+            SET status = 'orphaned', updated_at = ?
+          WHERE task_id = ?
+            AND slot = ?
+            AND id <> ?
+            AND status IN ('active','idle')`
+      )
+      .run(Date.now(), taskId, slot, keepSessionId);
+    return result.changes;
+  }
+
+  /**
+   * Retire every live-looking session row no task points at.
+   *
+   * Same reasoning as {@link markSupersededSessions}, applied board-wide to
+   * clean up rows orphaned before that call existed. Backends are untouched.
+   */
+  private markUnlinkedSessionsOrphaned(): number {
+    const result = this.db
+      .prepare<[number], void>(
+        `UPDATE sessions
+            SET status = 'orphaned', updated_at = ?
+          WHERE status IN ('active','idle')
+            AND id NOT IN (
+              SELECT session_id FROM tasks WHERE session_id IS NOT NULL
+              UNION
+              SELECT secondary_session_id FROM tasks WHERE secondary_session_id IS NOT NULL
+            )`
+      )
+      .run(Date.now());
+    return result.changes;
+  }
+
+  private markSessionOrphaned(sessionId: string): void {
+    this.db
+      .prepare<
+        [string, number, string],
+        void
+      >('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
+      .run('orphaned', Date.now(), sessionId);
+  }
+
+  /**
+   * Board-wide sweep of the duplicates {@link collapseDuplicateSessions} clears
+   * per task, for pairs created before adoption existed.
+   */
+  private collapseDuplicateSessionsGlobally(): number {
+    const result = this.db
+      .prepare<[], void>(
+        `DELETE FROM sessions
+          WHERE status = 'orphaned'
+            AND backend_session_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM sessions live
+               WHERE live.task_id = sessions.task_id
+                 AND live.slot = sessions.slot
+                 AND live.backend_session_id = sessions.backend_session_id
+                 AND live.id <> sessions.id
+                 AND live.status IN ('active','idle')
+            )`
+      )
+      .run();
+    return result.changes;
+  }
+
   async reconcile(): Promise<void> {
+    // Retire unlinked rows first: they are known-stale without asking a backend,
+    // and on a remote board each skipped row is an SSH round trip saved.
+    this.markUnlinkedSessionsOrphaned();
+    this.collapseDuplicateSessionsGlobally();
+
     const rows = this.db
       .prepare<[], SessionRow>(`SELECT * FROM sessions WHERE status IN ('active','idle')`)
       .all();
@@ -683,21 +1190,16 @@ export class SessionManager {
         const backend = this.getBackend(session.backendType);
         const info = await backend.inspect(session.backendSessionId);
         if (!info) {
-          this.db
-            .prepare<
-              [string, number, string],
-              void
-            >('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
-            .run('orphaned', Date.now(), session.id);
+          this.markSessionOrphaned(session.id);
         }
-      } catch {
-        // On error, mark orphaned conservatively
-        this.db
-          .prepare<
-            [string, number, string],
-            void
-          >('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
-          .run('orphaned', Date.now(), session.id);
+      } catch (error) {
+        // An unreachable host means "unknown", not "dead". Marking a remote
+        // session orphaned because the VPN happened to be down at daemon start
+        // would discard a session that is still running perfectly well.
+        if (error instanceof TransportUnreachableError) {
+          continue;
+        }
+        this.markSessionOrphaned(session.id);
       }
     }
   }

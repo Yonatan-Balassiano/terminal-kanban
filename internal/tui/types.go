@@ -16,6 +16,8 @@ type TerminalLayoutMode string
 type SessionActivityKind string
 type AgentCLI string
 type MissionTaskStatus string
+type ArtifactStatus string
+type ArtifactMode string
 
 type AppFocus string
 type ModalType string
@@ -28,7 +30,42 @@ const (
 const (
 	SessionBackendTmux SessionBackendType = "tmux"
 	SessionBackendPty  SessionBackendType = "pty"
+	SessionBackendSSH  SessionBackendType = "ssh"
 )
+
+const (
+	TaskLocationLocal  = "local"
+	TaskLocationRemote = "remote"
+)
+
+// GeneralScopeID is the board scope that shows only general tasks. It stands in
+// for a repo ID in activeRepoID, which is why it uses a shape no real repo ID
+// can take.
+const GeneralScopeID = "__general__"
+
+const (
+	// TaskKindRepo is the normal card: a repo, a branch, a worktree, GitHub state.
+	TaskKindRepo = "repo"
+	// TaskKindGeneral is a standalone card — a title and an agent session, with
+	// no repo, branch, worktree, or PR.
+	TaskKindGeneral = "general"
+)
+
+// IsGeneral reports whether the task is a standalone card with no repo.
+func (t TaskRecord) IsGeneral() bool {
+	return t.Kind == TaskKindGeneral
+}
+
+const (
+	ArtifactStatusInSync  ArtifactStatus = "in-sync"
+	ArtifactStatusDrift   ArtifactStatus = "drift"
+	ArtifactStatusNoGA    ArtifactStatus = "no-ga"
+	ArtifactStatusUnknown ArtifactStatus = "unknown"
+)
+
+// Any mode other than LIVE is tagged in the footer so a DEV or MAINTENANCE
+// artifact is never read as production.
+const ArtifactModeLive ArtifactMode = "LIVE"
 
 const (
 	FocusBoard     AppFocus = "board"
@@ -57,6 +94,7 @@ const (
 	ModalViewPicker      ModalType = "view-picker"
 	ModalAIChat          ModalType = "ai-chat"
 	ModalSetBranch       ModalType = "set-branch"
+	ModalArtifactRollout ModalType = "artifact-rollout"
 	ModalHelp            ModalType = "help"
 	ModalNone            ModalType = ""
 )
@@ -74,6 +112,7 @@ type RepoRecord struct {
 	IDECommand        string       `json:"ideCommand"`
 	WorktreeMode      WorktreeMode `json:"worktreeMode"`
 	WorktreeRoot      string       `json:"worktreeRoot"`
+	RemotePath        string       `json:"remotePath"`
 	Health            RepoHealth   `json:"health"`
 	CreatedAt         int64        `json:"createdAt"`
 	UpdatedAt         int64        `json:"updatedAt"`
@@ -102,7 +141,9 @@ type TaskRecord struct {
 	ID                        string           `json:"id"`
 	Title                     string           `json:"title"`
 	Description               string           `json:"description"`
+	Kind                      string           `json:"kind"`
 	RepoID                    string           `json:"repoId"`
+	Location                  string           `json:"location"`
 	AgentCLI                  AgentCLI         `json:"agentCli"`
 	TrackID                   string           `json:"trackId"`
 	PillarID                  string           `json:"pillarId"`
@@ -182,6 +223,42 @@ type MissionSnapshot struct {
 	Tasks       []MissionTaskRecord `json:"tasks"`
 }
 
+type ArtifactRecord struct {
+	Name      string       `json:"name"`
+	ShortName string       `json:"shortName"`
+	Mode      ArtifactMode `json:"mode,omitempty"`
+	// Libraries and proto packages publish RCs but never go GA, so an absent GA
+	// version is meaningful data rather than a gap.
+	GAVersion       string `json:"gaVersion,omitempty"`
+	LatestRCVersion string `json:"latestRcVersion"`
+	Drift           *int   `json:"drift,omitempty"`
+	// Release candidates built since the current GA.
+	PendingRcCount *int `json:"pendingRcCount,omitempty"`
+	// How many of those RCs came from the user. Nil means ownership could not be
+	// resolved, which must stay distinguishable from a confident zero: rendering
+	// an unknown as 0 would claim none of the pending work is theirs.
+	MyPendingCount *int           `json:"myPendingCount,omitempty"`
+	Status         ArtifactStatus `json:"status"`
+	RepoURL        string         `json:"repoUrl"`
+	PathInRepo     string         `json:"pathInRepo"`
+	IsArchived     bool           `json:"isArchived"`
+}
+
+type ArtifactsSnapshot struct {
+	Artifacts   []ArtifactRecord `json:"artifacts"`
+	RefreshedAt int64            `json:"refreshedAt"`
+	Stale       bool             `json:"stale"`
+	NeedsAuth   bool             `json:"needsAuth"`
+	Error       string           `json:"error,omitempty"`
+}
+
+type ArtifactRolloutResult struct {
+	OK            bool   `json:"ok"`
+	TransactionID string `json:"transactionId"`
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+}
+
 type SessionRecord struct {
 	ID               string             `json:"id"`
 	TaskID           string             `json:"taskId"`
@@ -196,6 +273,15 @@ type SessionRecord struct {
 	LastBufferSnap   string             `json:"lastBufferSnapshot"`
 	CreatedAt        int64              `json:"createdAt"`
 	UpdatedAt        int64              `json:"updatedAt"`
+}
+
+// Outcome of reconnecting a remote card. State is one of "attached",
+// "recreated", "starting", or "unreachable"; only the first two carry a session
+// — a waking or unreachable host has nothing to attach to yet.
+type ReconnectSessionResult struct {
+	State   string         `json:"state"`
+	Message string         `json:"message"`
+	Session *SessionRecord `json:"session,omitempty"`
 }
 
 type SavedViewRecord struct {

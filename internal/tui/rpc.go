@@ -161,8 +161,18 @@ func rpcTimeout(method string) time.Duration {
 		return 20 * time.Second
 	case "createTaskPR", "commentTaskPR", "mergeTaskPR", "triggerSync":
 		return 45 * time.Second
+	case "refreshArtifacts":
+		// Bypasses the daemon cache and re-reads the upstream artifact catalog.
+		return 30 * time.Second
+	case "rolloutArtifact":
+		// A production rollout is registered upstream before it acknowledges.
+		return 90 * time.Second
 	case "openSession", "recreateSession":
 		return 20 * time.Second
+	case "reconnectSession":
+		// Cold SSH connect to a just-woken host, then a wrapper rebuild. The
+		// workspace-start path answers immediately and finishes in the background.
+		return 45 * time.Second
 	default:
 		return 10 * time.Second
 	}

@@ -34,6 +34,7 @@ const (
 	terminalFooterHeight      = 1
 	terminalInputFlushMillis  = 6
 	terminalBoardNavTimeout   = 250 * time.Millisecond
+	artifactsPollInterval     = 60 * time.Second
 )
 
 type boardLoadedMsg struct {
@@ -61,6 +62,9 @@ type sessionOpenedMsg struct {
 	activity  *SessionActivitySnapshot
 	layoutErr error
 	err       error
+	// Replaces the generic "Opened task shell." line. Reconnect uses it to say
+	// whether the running agent was recovered or a new one had to be started.
+	statusOverride string
 }
 
 type bufferLoadedMsg struct {
@@ -94,8 +98,20 @@ type chatTurnMsg struct {
 	err    error
 }
 
+type artifactsLoadedMsg struct {
+	snapshot ArtifactsSnapshot
+	manual   bool
+	err      error
+}
+
+type artifactRolloutMsg struct {
+	result ArtifactRolloutResult
+	err    error
+}
+
 type spinnerTickMsg struct{}
 type sessionPollTickMsg struct{}
+type artifactsPollTickMsg struct{}
 type terminalBoardNavTimeoutMsg struct {
 	Version int
 }
@@ -138,6 +154,7 @@ type Model struct {
 	tasks      []TaskRecord
 	missions   []MissionSnapshot
 	savedViews []SavedViewRecord
+	artifacts  ArtifactsSnapshot
 
 	focus                         AppFocus
 	modal                         ModalType
@@ -148,6 +165,7 @@ type Model struct {
 	selectedTaskIndex             int
 	selectedMissionIndex          int
 	selectedMissionTaskIndex      int
+	selectedArtifactIndex         int
 	terminalPaneVisible           bool
 	terminalLayoutMode            TerminalLayoutMode
 	boardDensityMode              string
@@ -210,6 +228,7 @@ type Model struct {
 	commandPaletteModal       *commandPaletteModalState
 	aiChatModal               *aiChatModalState
 	missionDependenciesModal  *missionDependenciesModalState
+	artifactRolloutModal      *artifactRolloutModalState
 }
 
 func NewModel(socketPath string) (*Model, error) {
@@ -239,6 +258,8 @@ func (m *Model) Init() tea.Cmd {
 		m.loadBoardCmd(),
 		waitForEventCmd(m.client.Events()),
 		sessionPollTickCmd(),
+		m.fetchArtifactsCmd(),
+		artifactsPollTickCmd(),
 	)
 }
 
@@ -303,6 +324,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(commands...)
 
+	case artifactsPollTickMsg:
+		return m, tea.Batch(artifactsPollTickCmd(), m.fetchArtifactsCmd())
+
+	case artifactsLoadedMsg:
+		m.applyArtifacts(msg)
+		return m, nil
+
+	case artifactRolloutMsg:
+		return m, m.applyArtifactRollout(msg)
+
 	case boardLoadedMsg:
 		if msg.err != nil {
 			m.daemonConnected = false
@@ -361,10 +392,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeTaskID = msg.taskID
 		m.focusedTerminalSlot = normalizeSessionSlot(msg.slot)
 		m.setTerminalSessionMetadata(msg.slot, msg.session.Branch, msg.session.BackendType, msg.session.BackendSessionID, msg.session.AttachCommand)
-		m.terminalPaneVisible = msg.session.BackendType != SessionBackendTmux
+		m.terminalPaneVisible = !msg.session.BackendType.attachesInTmuxPane()
 		m.terminalFullscreen = false
 		m.setTerminalScrollOffset(msg.slot, 0)
-		if msg.session.BackendType == SessionBackendTmux {
+		if msg.session.BackendType.attachesInTmuxPane() {
 			m.focus = FocusBoard
 		} else {
 			m.focus = FocusTerminal
@@ -377,13 +408,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.layoutErr != nil {
 			m.statusMessage = msg.layoutErr.Error()
-		} else if msg.session.BackendType == SessionBackendTmux {
+		} else if msg.statusOverride != "" {
+			m.statusMessage = msg.statusOverride
+		} else if msg.session.BackendType.attachesInTmuxPane() {
 			m.statusMessage = "Attached task shell in tmux pane."
 		} else {
 			m.statusMessage = "Opened task shell."
 		}
 		cmds := []tea.Cmd{m.syncSessionUpdateWatchCmd()}
-		if msg.session.BackendType != SessionBackendTmux {
+		if !msg.session.BackendType.attachesInTmuxPane() {
 			cmds = append(cmds, m.resizeActiveSessionCmd(), m.loadVisibleTerminalStateCmd())
 		}
 		if spin := m.startSpinnerChainCmd(); spin != nil {
@@ -570,6 +603,10 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	if key.String() == "ctrl+r" {
+		return m.reconnectSelectedTaskCmd()
+	}
+
 	if m.boardOverviewMode {
 		return m.handleOverviewKey(key)
 	}
@@ -594,7 +631,7 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "enter":
 		task := m.selectedTask()
 		if task != nil {
-			if task.ID == m.activeTaskID && m.terminalBackendTypeForSlot(SessionSlotPrimary) == SessionBackendTmux {
+			if task.ID == m.activeTaskID && m.terminalBackendTypeForSlot(SessionSlotPrimary).attachesInTmuxPane() {
 				m.focusedTerminalSlot = SessionSlotPrimary
 				if backendSessionID := m.terminalBackendSessionIDForSlot(SessionSlotPrimary); backendSessionID != "" {
 					return m.attachTmuxSessionCmd(backendSessionID)
@@ -609,6 +646,14 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		}
 	case "s":
 		return m.syncCmd()
+	case "S":
+		return m.refreshArtifactsCmd()
+	case ";":
+		m.moveArtifactSelection(1)
+		return nil
+	case "G":
+		m.openArtifactRolloutModal()
+		return nil
 	case "u":
 		return m.toggleMissionsPaneCmd(true)
 	case "t":
@@ -654,13 +699,11 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	case "O":
 		m.boardOverviewMode = true
-		if len(m.repos) > 0 {
-			m.overviewSelectedIndex = 0
-			for i, repo := range m.repos {
-				if repo.ID == m.activeRepoID {
-					m.overviewSelectedIndex = i
-					break
-				}
+		m.overviewSelectedIndex = 0
+		for i, scope := range m.overviewScopes() {
+			if scope.ID == m.activeRepoID {
+				m.overviewSelectedIndex = i
+				break
 			}
 		}
 		return nil
@@ -760,10 +803,11 @@ func (m *Model) handleOverviewKey(key tea.KeyMsg) tea.Cmd {
 	case "up", "k":
 		m.overviewSelectedIndex = max(0, m.overviewSelectedIndex-1)
 	case "down", "j":
-		m.overviewSelectedIndex = min(len(m.repos)-1, m.overviewSelectedIndex+1)
+		m.overviewSelectedIndex = min(len(m.overviewScopes())-1, m.overviewSelectedIndex+1)
 	case "enter":
-		if m.overviewSelectedIndex < len(m.repos) {
-			m.activeRepoID = m.repos[m.overviewSelectedIndex].ID
+		scopes := m.overviewScopes()
+		if m.overviewSelectedIndex < len(scopes) {
+			m.activeRepoID = scopes[m.overviewSelectedIndex].ID
 			m.selectedTrackIndex = 0
 			m.selectedTaskIndex = 0
 			m.boardOverviewMode = false
@@ -1228,6 +1272,95 @@ func sessionPollTickCmd() tea.Cmd {
 	return tea.Tick(2500*time.Millisecond, func(_ time.Time) tea.Msg { return sessionPollTickMsg{} })
 }
 
+func artifactsPollTickCmd() tea.Cmd {
+	return tea.Tick(artifactsPollInterval, func(_ time.Time) tea.Msg { return artifactsPollTickMsg{} })
+}
+
+func (m *Model) fetchArtifactsCmd() tea.Cmd {
+	return m.artifactsCmd("getArtifacts", false)
+}
+
+func (m *Model) refreshArtifactsCmd() tea.Cmd {
+	return m.artifactsCmd("refreshArtifacts", true)
+}
+
+func (m *Model) artifactsCmd(method string, manual bool) tea.Cmd {
+	return func() tea.Msg {
+		var snapshot ArtifactsSnapshot
+		if err := m.client.Call(method, nil, &snapshot); err != nil {
+			return artifactsLoadedMsg{manual: manual, err: err}
+		}
+		return artifactsLoadedMsg{snapshot: snapshot, manual: manual}
+	}
+}
+
+// A failed load keeps the last chips on screen but marks them stale, so the
+// footer never presents versions it could not confirm. Only an explicit refresh
+// talks back through the status bar; the 60s poll stays silent.
+func (m *Model) applyArtifacts(msg artifactsLoadedMsg) {
+	if msg.err != nil {
+		m.artifacts.Stale = true
+		m.artifacts.Error = msg.err.Error()
+		if msg.manual {
+			m.statusMessage = msg.err.Error()
+		}
+		return
+	}
+
+	m.artifacts = msg.snapshot
+	m.selectedArtifactIndex = clamp(m.selectedArtifactIndex, 0, max(0, len(msg.snapshot.Artifacts)-1))
+	if msg.manual {
+		m.statusMessage = "Artifacts refreshed."
+	}
+}
+
+func (m *Model) moveArtifactSelection(delta int) {
+	m.selectedArtifactIndex = wrapIndex(m.selectedArtifactIndex, len(m.artifacts.Artifacts), delta)
+}
+
+func (m *Model) selectedArtifact() *ArtifactRecord {
+	artifacts := m.artifacts.Artifacts
+	if len(artifacts) == 0 {
+		return nil
+	}
+	artifact := artifacts[clamp(m.selectedArtifactIndex, 0, len(artifacts)-1)]
+	return &artifact
+}
+
+func (m *Model) rolloutArtifactCmd(params map[string]string) tea.Cmd {
+	return func() tea.Msg {
+		var result ArtifactRolloutResult
+		if err := m.client.Call("rolloutArtifact", params, &result); err != nil {
+			return artifactRolloutMsg{err: err}
+		}
+		return artifactRolloutMsg{result: result}
+	}
+}
+
+func (m *Model) applyArtifactRollout(msg artifactRolloutMsg) tea.Cmd {
+	if msg.err != nil {
+		m.statusMessage = "Rollout failed: " + msg.err.Error()
+		return nil
+	}
+
+	m.statusMessage = artifactRolloutStatusMessage(msg.result)
+	if !msg.result.OK {
+		return nil
+	}
+	return m.refreshArtifactsCmd()
+}
+
+func artifactRolloutStatusMessage(result ArtifactRolloutResult) string {
+	message := result.Message
+	if message == "" {
+		message = ternaryString(result.OK, "Rollout requested.", "Rollout was rejected.")
+	}
+	if result.OK {
+		return message
+	}
+	return "Rollout failed: " + message
+}
+
 func (m *Model) boardActionCmd(method string, params interface{}, status string) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.client.Call(method, params, nil); err != nil {
@@ -1259,7 +1392,7 @@ func (m *Model) openSessionCmd(taskID string, recreate bool, slot SessionSlot) t
 			return sessionOpenedMsg{err: err}
 		}
 
-		if session.BackendType == SessionBackendTmux {
+		if session.BackendType.attachesInTmuxPane() {
 			return sessionOpenedMsg{
 				taskID:    taskID,
 				slot:      normalizedSlot,
@@ -1292,13 +1425,80 @@ func (m *Model) openSessionCmd(taskID string, recreate bool, slot SessionSlot) t
 	}
 }
 
+// Guard the reconnect keybinding: the RPC rejects local tasks, but saying so
+// here costs no round trip and reads better than a daemon error.
+func (m *Model) reconnectSelectedTaskCmd() tea.Cmd {
+	task := m.selectedTask()
+	if task == nil {
+		m.statusMessage = "Select a task to reconnect it."
+		return nil
+	}
+	if task.Location != TaskLocationRemote {
+		m.statusMessage = "Reconnect applies to remote tasks."
+		return nil
+	}
+	return m.reconnectSessionCmd(task.ID, SessionSlotPrimary)
+}
+
+// Re-link a remote card to the machine its agent runs on, waking the host first
+// when something is configured to do that.
+func (m *Model) reconnectSessionCmd(taskID string, slot SessionSlot) tea.Cmd {
+	return func() tea.Msg {
+		normalizedSlot := normalizeSessionSlot(slot)
+
+		var result ReconnectSessionResult
+		if err := m.client.Call("reconnectSession", map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &result); err != nil {
+			return sessionOpenedMsg{err: err}
+		}
+
+		var board BoardSnapshot
+		if err := m.client.Call("getBoard", nil, &board); err != nil {
+			return sessionOpenedMsg{err: err}
+		}
+
+		// A waking host and an unreachable one both leave nothing to attach to.
+		// Refresh the board and let the message explain what happens next; the
+		// daemon pushes another patch when a background start finishes.
+		if result.Session == nil {
+			return boardActionMsg{board: &board, status: result.Message}
+		}
+
+		session := *result.Session
+		if session.BackendType.attachesInTmuxPane() {
+			return sessionOpenedMsg{
+				taskID:         taskID,
+				slot:           normalizedSlot,
+				session:        session,
+				board:          &board,
+				statusOverride: result.Message,
+				layoutErr:      attachTaskSessionInTmux(session.BackendSessionID),
+			}
+		}
+
+		var buffer GetBufferResult
+		if err := m.client.Call("getBuffer", map[string]string{"taskId": taskID, "slot": string(normalizedSlot)}, &buffer); err != nil {
+			return sessionOpenedMsg{err: err}
+		}
+		buffer.ANSILines = defaultANSILines(buffer.Lines, buffer.ANSILines)
+
+		return sessionOpenedMsg{
+			taskID:         taskID,
+			slot:           normalizedSlot,
+			session:        session,
+			board:          &board,
+			buffer:         &buffer,
+			statusOverride: result.Message,
+		}
+	}
+}
+
 func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 	if m.activeTaskID == "" {
 		return nil
 	}
 
 	m.normalizeFocusedTerminalSlot()
-	if m.terminalBackendTypeForSlot(m.focusedTerminalSlot) == SessionBackendTmux {
+	if m.terminalBackendTypeForSlot(m.focusedTerminalSlot).attachesInTmuxPane() {
 		backendSessionID := m.terminalBackendSessionIDForSlot(m.focusedTerminalSlot)
 		if backendSessionID == "" {
 			return m.openSessionCmd(m.activeTaskID, false, m.focusedTerminalSlot)
@@ -1411,6 +1611,10 @@ func (m *Model) syncCmd() tea.Cmd {
 
 func (m *Model) createTaskPRCmd(task *TaskRecord) tea.Cmd {
 	if task == nil {
+		return nil
+	}
+	if task.IsGeneral() {
+		m.statusMessage = "General tasks have no repo or branch, so they cannot have a PR."
 		return nil
 	}
 	m.statusMessage = "PR creation in progress..."
@@ -1799,11 +2003,19 @@ func (m *Model) chatContext() ChatContext {
 	}
 }
 
+// isGeneralScope reports whether the board is narrowed to general tasks — the
+// cards that belong to no repo, and so would otherwise be reachable only from
+// the all-repos scope.
+func (m *Model) isGeneralScope() bool {
+	return m.activeRepoID == GeneralScopeID
+}
+
 func (m *Model) switchRepo(direction int) {
 	repoIDs := []string{""}
 	for _, repo := range m.repos {
 		repoIDs = append(repoIDs, repo.ID)
 	}
+	repoIDs = append(repoIDs, GeneralScopeID)
 	if len(repoIDs) == 0 {
 		m.activeRepoID = ""
 		return
@@ -1828,7 +2040,9 @@ func (m *Model) sortedTracks() []TrackRecord {
 
 func (m *Model) visibleTasks() []TaskRecord {
 	visible := append([]TaskRecord{}, m.tasks...)
-	if m.activeRepoID != "" {
+	if m.isGeneralScope() {
+		visible = filterTasks(visible, func(task TaskRecord) bool { return task.IsGeneral() })
+	} else if m.activeRepoID != "" {
 		visible = filterTasks(visible, func(task TaskRecord) bool { return task.RepoID == m.activeRepoID })
 	}
 	if len(m.filters.RepoIDs) > 0 {
@@ -2199,6 +2413,13 @@ func (m *Model) terminalBackendTypeForSlot(slot SessionSlot) SessionBackendType 
 	return m.activeSessionBackendType
 }
 
+// attachesInTmuxPane reports whether the session lives in a tmux pane rather than an
+// embedded PTY. A remote session is reached through a local tmux wrapper session, so
+// it joins panes and renders through exactly the same path as a local tmux session.
+func (backendType SessionBackendType) attachesInTmuxPane() bool {
+	return backendType == SessionBackendTmux || backendType == SessionBackendSSH
+}
+
 func (m *Model) terminalBackendSessionIDForSlot(slot SessionSlot) string {
 	if normalizeSessionSlot(slot) == SessionSlotSecondary {
 		return m.secondarySessionBackendID
@@ -2316,7 +2537,7 @@ func (m *Model) loadVisibleTerminalStateCmd() tea.Cmd {
 }
 
 func (m *Model) terminalPaneShouldRender() bool {
-	return m.terminalPaneVisible && m.activeTaskID != "" && m.terminalBackendTypeForSlot(m.focusedTerminalSlot) != SessionBackendTmux
+	return m.terminalPaneVisible && m.activeTaskID != "" && !m.terminalBackendTypeForSlot(m.focusedTerminalSlot).attachesInTmuxPane()
 }
 
 func (m *Model) boardRenderWidth() int {
@@ -2366,7 +2587,7 @@ func (m *Model) terminalViewportHeight() int {
 }
 
 func (m *Model) contentHeight() int {
-	height := m.height - 2 - 1
+	height := m.height - headerHeight - artifactFooterHeight - statusBarHeight
 	if shouldShowFilterBar(m.filters, m.focus) {
 		height--
 	}

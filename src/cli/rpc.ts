@@ -19,6 +19,10 @@ function rpcTimeoutMs(method: RPCMethod): number {
     case 'openSession':
     case 'recreateSession':
       return 20_000;
+    case 'reconnectSession':
+      // Cold SSH connect to a just-woken host, then a wrapper rebuild. The
+      // workspace-start path answers immediately and finishes in the background.
+      return 45_000;
     default:
       return 10_000;
   }

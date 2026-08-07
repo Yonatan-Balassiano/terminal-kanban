@@ -1487,3 +1487,204 @@ describe('SessionManager branch fallback', () => {
     expect(board.getTask(task.id)?.secondarySessionId).toBe('session-2');
   });
 });
+
+describe('SessionManager session revival', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function makeBuffers() {
+    return {
+      write: vi.fn(),
+      has: vi.fn(() => false),
+      getBuffer: vi.fn(() => ({ lines: [], ansiLines: [], cursorX: 0, cursorY: 0 })),
+      subscribeAll: vi.fn(() => () => {}),
+      destroy: vi.fn(),
+      resize: vi.fn(),
+    };
+  }
+
+  it('lets the backend repair the attachment every time a live session is reopened', async () => {
+    // Arrange — a session that is still alive on its backend. For the ssh
+    // backend attachMetadata() is what rebuilds the local wrapper a dropped
+    // connection destroyed, so skipping it makes remote sessions unrevivable.
+    const task = board.createTask({ title: 'Revive me', repoId: 'repo-1' });
+    board.linkSession(task.id, 'session-1');
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, slot, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'session-1',
+      task.id,
+      'primary',
+      'tmux',
+      'ab_revive_me_0001_p',
+      'tmux attach -t ab_revive_me_0001_p',
+      'active',
+      '/tmp/repo-1',
+      task.branchName,
+      1,
+      1,
+      1
+    );
+
+    const attachMetadata = vi.fn(
+      async (): Promise<AttachMetadata> => ({ command: 'tmux attach -t ab_revive_me_0001_p' })
+    );
+    const backend: SessionBackend = {
+      create: vi.fn(),
+      attachMetadata,
+      sendInput: vi.fn(),
+      resize: vi.fn(),
+      list: vi.fn(async () => []),
+      inspect: vi.fn(
+        async (id: string): Promise<BackendSessionInfo> => ({ backendSessionId: id, status: 'active' })
+      ),
+      terminate: vi.fn(),
+      healthCheck: vi.fn(async (): Promise<BackendHealth> => ({ available: true })),
+    } as unknown as SessionBackend;
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      makeBuffers() as never,
+      { prepareTaskWorkspace: () => ({ taskId: task.id, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false }) },
+      backend
+    );
+
+    // Act
+    const reopened = await manager.openSession(task.id);
+
+    // Assert
+    expect(attachMetadata).toHaveBeenCalledWith('ab_revive_me_0001_p');
+    expect(backend.create).not.toHaveBeenCalled();
+    expect(reopened.id).toBe('session-1');
+  });
+});
+
+describe('SessionManager duplicate session rows', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function insertSession(id: string, taskId: string, backendSessionId: string, status: string) {
+    db.prepare(
+      `INSERT INTO sessions
+         (id, task_id, slot, backend_type, backend_session_id, attach_command, status,
+          cwd, branch, last_heartbeat, created_at, updated_at)
+       VALUES (?, ?, 'primary', 'tmux', ?, null, ?, null, null, 1, 1, 1)`
+    ).run(id, taskId, backendSessionId, status);
+  }
+
+  function makeManager() {
+    const backend: SessionBackend = {
+      create: vi.fn(),
+      attachMetadata: vi.fn(async () => ({ command: 'x' })),
+      sendInput: vi.fn(),
+      resize: vi.fn(),
+      list: vi.fn(async () => []),
+      inspect: vi.fn(async (id: string) => ({ backendSessionId: id, status: 'active' as const })),
+      terminate: vi.fn(),
+      healthCheck: vi.fn(async () => ({ available: true })),
+    } as unknown as SessionBackend;
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write: vi.fn(),
+        has: vi.fn(() => false),
+        getBuffer: vi.fn(() => ({ lines: [], ansiLines: [], cursorX: 0, cursorY: 0 })),
+        subscribeAll: vi.fn(() => () => {}),
+        destroy: vi.fn(),
+        resize: vi.fn(),
+      } as never,
+      { prepareTaskWorkspace: (taskId: string) => ({ taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false }) },
+      backend
+    );
+    return { manager, backend };
+  }
+
+  it('drops duplicate rows describing the same backend session as the live one', async () => {
+    // Arrange — two rows for one task sharing a backend session name, which is
+    // how the board ends up with several "active" sessions for one card.
+    const task = board.createTask({ title: 'Dup', repoId: 'repo-1' });
+    insertSession('sess-old', task.id, 'ab_dup_p', 'active');
+    insertSession('sess-new', task.id, 'ab_dup_p', 'active');
+    board.linkSession(task.id, 'sess-new');
+    const { manager, backend } = makeManager();
+
+    // Act
+    await manager.reconcile();
+
+    // Assert — the stale row described nothing the live row does not, so it is
+    // removed outright rather than left behind as a permanent orphan.
+    const rows = db
+      .prepare('SELECT id, status FROM sessions WHERE task_id = ?')
+      .all(task.id) as Array<{ id: string; status: string }>;
+    expect(rows).toEqual([{ id: 'sess-new', status: 'active' }]);
+    // Both rows shared a backend session, so killing the stale one would have
+    // taken down the session that is still running.
+    expect(backend.terminate).not.toHaveBeenCalled();
+  });
+
+  it('does not probe a backend for rows it is about to retire', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Dup2', repoId: 'repo-1' });
+    insertSession('sess-old', task.id, 'ab_dup2_p', 'active');
+    insertSession('sess-new', task.id, 'ab_dup2_p', 'active');
+    board.linkSession(task.id, 'sess-new');
+    const { manager, backend } = makeManager();
+
+    // Act
+    await manager.reconcile();
+
+    // Assert — one live row left, so exactly one inspect.
+    expect((backend.inspect as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+  });
+
+  it('leaves a single linked session untouched', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Solo', repoId: 'repo-1' });
+    insertSession('sess-1', task.id, 'ab_solo_p', 'active');
+    board.linkSession(task.id, 'sess-1');
+    const { manager } = makeManager();
+
+    // Act
+    await manager.reconcile();
+
+    // Assert
+    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get('sess-1') as { status: string };
+    expect(row.status).toBe('active');
+  });
+});

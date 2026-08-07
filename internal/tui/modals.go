@@ -13,25 +13,48 @@ type filterColumn string
 type addMissionTaskModalStage string
 
 const (
-	createTaskTitleLine   createTaskLine = "title"
-	createTaskRepoLine    createTaskLine = "repo"
-	createTaskPillarLine  createTaskLine = "pillar"
-	createTaskAgentLine   createTaskLine = "agent"
-	createTaskBlockedLine createTaskLine = "blocked"
+	createTaskTitleLine    createTaskLine = "title"
+	createTaskRepoLine     createTaskLine = "repo"
+	createTaskPillarLine   createTaskLine = "pillar"
+	createTaskAgentLine    createTaskLine = "agent"
+	createTaskLocationLine createTaskLine = "location"
+	createTaskBlockedLine  createTaskLine = "blocked"
 
 	filterRepoColumn   filterColumn = "repo"
 	filterPillarColumn filterColumn = "pillar"
 
 	addMissionTaskStageDetails  addMissionTaskModalStage = "details"
 	addMissionTaskStageBlockers addMissionTaskModalStage = "blockers"
+
+	// Typed in full before Enter does anything, so no single keypress can ship
+	// an artifact to production.
+	artifactRolloutConfirmWord = "GA"
 )
 
+// gradual_safer leads because it is the slower, more reversible rollout.
+var artifactGradualityOptions = []string{"gradual_safer", "gradual_quicker"}
+
+func artifactGradualityAt(index int) string {
+	return artifactGradualityOptions[clamp(index, 0, len(artifactGradualityOptions)-1)]
+}
+
+// Built from the modal's own snapshot rather than the live catalog: the version
+// the user read and confirmed is the only version allowed to reach production.
+func artifactRolloutParams(state artifactRolloutModalState) map[string]string {
+	return map[string]string{
+		"name":          state.Name,
+		"targetVersion": state.TargetVersion,
+		"graduality":    artifactGradualityAt(state.GradualityIndex),
+	}
+}
+
 type createTaskModalState struct {
-	Value       string
-	RepoIndex   int
-	PillarIndex int
-	AgentIndex  int
-	ActiveLine  createTaskLine
+	Value         string
+	RepoIndex     int
+	PillarIndex   int
+	AgentIndex    int
+	LocationIndex int
+	ActiveLine    createTaskLine
 }
 
 type createMissionModalState struct {
@@ -123,6 +146,19 @@ type aiChatModalState struct {
 	PendingPrompt string
 }
 
+type artifactRolloutModalState struct {
+	Name string
+	// Snapshotted at open time so a newly landed RC can never be shipped by
+	// surprise between reading the modal and confirming it.
+	CurrentVersion string
+	TargetVersion  string
+	// Informational only — ownership never gates the confirmation.
+	PendingRcCount  *int
+	MyPendingCount  *int
+	GradualityIndex int
+	Confirm         string
+}
+
 type missionDependenciesModalState struct {
 	MissionID              string
 	TaskID                 string
@@ -140,6 +176,11 @@ type createTaskAgentOption struct {
 	Label string
 }
 
+type createTaskLocationOption struct {
+	Value string
+	Label string
+}
+
 type filterOption struct {
 	ID    string
 	Label string
@@ -152,6 +193,77 @@ var createTaskAgentOptions = []createTaskAgentOption{
 
 func createTaskAgentOptionAt(index int) createTaskAgentOption {
 	return createTaskAgentOptions[clamp(index, 0, len(createTaskAgentOptions)-1)]
+}
+
+var createTaskLocationOptions = []createTaskLocationOption{
+	{Value: TaskLocationLocal, Label: "Local"},
+	{Value: TaskLocationRemote, Label: "Remote"},
+}
+
+// createTaskRepoOption is one entry on the create-task modal's Repo line. The
+// last entry is always the repo-less "General" choice, which is why the modal
+// counts these instead of m.repos.
+type createTaskRepoOption struct {
+	// Empty for the General option.
+	ID              string
+	Label           string
+	DefaultPillarID string
+	RemotePath      string
+	IsGeneral       bool
+}
+
+// createTaskRepoOptions lists every repo plus the standalone "General" card,
+// which needs no repo, branch, or worktree.
+func (m *Model) createTaskRepoOptions() []createTaskRepoOption {
+	options := make([]createTaskRepoOption, 0, len(m.repos)+1)
+	for _, repo := range m.repos {
+		options = append(options, createTaskRepoOption{
+			ID:              repo.ID,
+			Label:           repo.Label,
+			DefaultPillarID: repo.DefaultPillarID,
+			RemotePath:      repo.RemotePath,
+		})
+	}
+	return append(options, createTaskRepoOption{Label: "General (no repo)", IsGeneral: true})
+}
+
+func (m *Model) createTaskRepoOptionAt(index int) createTaskRepoOption {
+	options := m.createTaskRepoOptions()
+	return options[clamp(index, 0, len(options)-1)]
+}
+
+func createTaskLocationOptionAt(index int) createTaskLocationOption {
+	return createTaskLocationOptions[clamp(index, 0, len(createTaskLocationOptions)-1)]
+}
+
+// repoSupportsRemote reports whether the repo at repoIndex has a checkout on the
+// remote host. Without one there is nowhere for a remote task to run. A general
+// task has no checkout anywhere, so it always runs locally.
+func (m *Model) repoSupportsRemote(repoIndex int) bool {
+	if len(m.repos) == 0 {
+		return false
+	}
+	option := m.createTaskRepoOptionAt(repoIndex)
+	return !option.IsGeneral && option.RemotePath != ""
+}
+
+// createTaskLocationAt resolves the effective location for the modal. It is derived
+// rather than stored so that switching repos re-evaluates the choice on its own.
+func (m *Model) createTaskLocationAt(repoIndex, locationIndex int) createTaskLocationOption {
+	if !m.repoSupportsRemote(repoIndex) {
+		return createTaskLocationOptions[0]
+	}
+	return createTaskLocationOptionAt(locationIndex)
+}
+
+func (m *Model) createTaskLocationLabelAt(repoIndex, locationIndex int) string {
+	if m.createTaskRepoOptionAt(repoIndex).IsGeneral {
+		return createTaskLocationOptions[0].Label + " (general tasks are local)"
+	}
+	if !m.repoSupportsRemote(repoIndex) {
+		return createTaskLocationOptions[0].Label + " (no remote configured)"
+	}
+	return createTaskLocationOptionAt(locationIndex).Label
 }
 
 func (m *Model) closeModal() {
@@ -174,6 +286,7 @@ func (m *Model) closeModal() {
 	m.commandPaletteModal = nil
 	m.aiChatModal = nil
 	m.missionDependenciesModal = nil
+	m.artifactRolloutModal = nil
 }
 
 func (m *Model) openHelpModal() {
@@ -183,8 +296,12 @@ func (m *Model) openHelpModal() {
 }
 
 func (m *Model) openCreateTaskModal() {
+	// Follow the board's current scope, including the general one — creating a
+	// card while looking at general tasks should default to a general card.
 	initialRepoIndex := 0
-	if m.activeRepoID != "" {
+	if m.isGeneralScope() {
+		initialRepoIndex = len(m.repos)
+	} else if m.activeRepoID != "" {
 		for index, repo := range m.repos {
 			if repo.ID == m.activeRepoID {
 				initialRepoIndex = index
@@ -195,14 +312,11 @@ func (m *Model) openCreateTaskModal() {
 
 	pillarOptions := m.createTaskPillarOptions()
 	initialPillarIndex := 0
-	if len(m.repos) > 0 {
-		defaultPillarID := m.repos[initialRepoIndex].DefaultPillarID
-		if defaultPillarID != "" {
-			for index, option := range pillarOptions {
-				if option.ID == defaultPillarID {
-					initialPillarIndex = index
-					break
-				}
+	if defaultPillarID := m.createTaskRepoOptionAt(initialRepoIndex).DefaultPillarID; defaultPillarID != "" {
+		for index, option := range pillarOptions {
+			if option.ID == defaultPillarID {
+				initialPillarIndex = index
+				break
 			}
 		}
 	}
@@ -211,10 +325,11 @@ func (m *Model) openCreateTaskModal() {
 	m.modal = ModalCreateTask
 	m.focus = FocusModal
 	m.createTaskModal = &createTaskModalState{
-		RepoIndex:   initialRepoIndex,
-		PillarIndex: initialPillarIndex,
-		AgentIndex:  0,
-		ActiveLine:  createTaskTitleLine,
+		RepoIndex:     initialRepoIndex,
+		PillarIndex:   initialPillarIndex,
+		AgentIndex:    0,
+		LocationIndex: 0,
+		ActiveLine:    createTaskTitleLine,
 	}
 }
 
@@ -316,6 +431,10 @@ func (m *Model) openSetBranchModal(task *TaskRecord) {
 		m.statusMessage = "Select a task to change its branch."
 		return
 	}
+	if task.IsGeneral() {
+		m.statusMessage = "General tasks have no repo, so there is no branch to set."
+		return
+	}
 	m.closeModal()
 	m.modal = ModalSetBranch
 	m.focus = FocusModal
@@ -352,6 +471,47 @@ func (m *Model) openPRCommentModal(task *TaskRecord) {
 	m.modal = ModalPRComment
 	m.focus = FocusModal
 	m.prCommentModal = &prCommentModalState{TaskID: task.ID}
+}
+
+func (m *Model) openArtifactRolloutModal() {
+	artifact := m.selectedArtifact()
+	if artifact == nil {
+		m.statusMessage = "No artifact to roll out."
+		return
+	}
+	if blocker := artifactRolloutBlockerReason(*artifact); blocker != "" {
+		m.statusMessage = blocker
+		return
+	}
+	m.closeModal()
+	m.modal = ModalArtifactRollout
+	m.focus = FocusModal
+	m.artifactRolloutModal = &artifactRolloutModalState{
+		Name:           artifact.Name,
+		CurrentVersion: artifact.GAVersion,
+		TargetVersion:  artifact.LatestRCVersion,
+		PendingRcCount: artifact.PendingRcCount,
+		MyPendingCount: artifact.MyPendingCount,
+	}
+}
+
+// Only a drifting artifact has an RC ahead of GA to promote; anything else would
+// be a production deploy with nothing to deploy.
+func artifactRolloutBlockerReason(artifact ArtifactRecord) string {
+	name := artifactDisplayName(artifact)
+	switch artifact.Status {
+	case ArtifactStatusDrift:
+		if artifact.LatestRCVersion == "" {
+			return name + " has no RC version to roll out."
+		}
+		return ""
+	case ArtifactStatusInSync:
+		return name + " is already in sync."
+	case ArtifactStatusNoGA:
+		return name + " never goes GA, so there is nothing to roll out."
+	default:
+		return name + " has an unknown release state, so it cannot be rolled out."
+	}
 }
 
 func (m *Model) openDeleteConfirmModal(task *TaskRecord) {
@@ -542,6 +702,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleAIChatModalKey(key)
 	case ModalMissionDeps:
 		return m.handleMissionDependenciesModalKey(key)
+	case ModalArtifactRollout:
+		return m.handleArtifactRolloutModalKey(key)
 	default:
 		if key.Type == tea.KeyEsc {
 			m.closeModal()
@@ -566,19 +728,21 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 		if title == "" {
 			return nil
 		}
-		repoID := ""
-		if len(m.repos) > 0 {
-			repoID = m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].ID
-		}
+		repo := m.createTaskRepoOptionAt(state.RepoIndex)
 		pillarID := ""
 		options := m.createTaskPillarOptions()
 		if len(options) > 0 {
 			pillarID = options[clamp(state.PillarIndex, 0, len(options)-1)].ID
 		}
 		agentCLI := string(createTaskAgentOptionAt(state.AgentIndex).Value)
-		if repoID == "" {
-			m.statusMessage = "Add a repo before creating tasks."
+		location := m.createTaskLocationAt(state.RepoIndex, state.LocationIndex).Value
+		if !repo.IsGeneral && repo.ID == "" {
+			m.statusMessage = "Add a repo, or pick General, before creating tasks."
 			return nil
+		}
+		kind := TaskKindRepo
+		if repo.IsGeneral {
+			kind = TaskKindGeneral
 		}
 		m.closeModal()
 		backlogIndex := indexTrack(m.sortedTracks(), "backlog")
@@ -586,9 +750,11 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 			m.selectedTrackIndex = backlogIndex
 			m.selectedTaskIndex = 0
 		}
-		return m.createTaskCmd(title, repoID, pillarID, agentCLI)
+		return m.createTaskCmd(title, kind, repo.ID, pillarID, agentCLI, location)
 	case tea.KeyUp:
 		switch state.ActiveLine {
+		case createTaskLocationLine:
+			state.ActiveLine = createTaskAgentLine
 		case createTaskAgentLine:
 			state.ActiveLine = createTaskPillarLine
 		case createTaskPillarLine:
@@ -605,13 +771,15 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 			state.ActiveLine = createTaskPillarLine
 		case createTaskPillarLine:
 			state.ActiveLine = createTaskAgentLine
+		case createTaskAgentLine:
+			state.ActiveLine = createTaskLocationLine
 		}
 		return nil
 	case tea.KeyLeft:
 		switch state.ActiveLine {
 		case createTaskRepoLine:
-			if len(m.repos) > 1 {
-				state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), -1)
+			if repoOptionCount := len(m.createTaskRepoOptions()); repoOptionCount > 1 {
+				state.RepoIndex = wrapIndex(state.RepoIndex, repoOptionCount, -1)
 			}
 		case createTaskPillarLine:
 			options := m.createTaskPillarOptions()
@@ -622,13 +790,17 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 			if len(createTaskAgentOptions) > 1 {
 				state.AgentIndex = wrapIndex(state.AgentIndex, len(createTaskAgentOptions), -1)
 			}
+		case createTaskLocationLine:
+			if m.repoSupportsRemote(state.RepoIndex) {
+				state.LocationIndex = wrapIndex(state.LocationIndex, len(createTaskLocationOptions), -1)
+			}
 		}
 		return nil
 	case tea.KeyRight:
 		switch state.ActiveLine {
 		case createTaskRepoLine:
-			if len(m.repos) > 1 {
-				state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), 1)
+			if repoOptionCount := len(m.createTaskRepoOptions()); repoOptionCount > 1 {
+				state.RepoIndex = wrapIndex(state.RepoIndex, repoOptionCount, 1)
 			}
 		case createTaskPillarLine:
 			options := m.createTaskPillarOptions()
@@ -638,6 +810,10 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 		case createTaskAgentLine:
 			if len(createTaskAgentOptions) > 1 {
 				state.AgentIndex = wrapIndex(state.AgentIndex, len(createTaskAgentOptions), 1)
+			}
+		case createTaskLocationLine:
+			if m.repoSupportsRemote(state.RepoIndex) {
+				state.LocationIndex = wrapIndex(state.LocationIndex, len(createTaskLocationOptions), 1)
 			}
 		}
 		return nil
@@ -650,20 +826,20 @@ func (m *Model) handleCreateTaskModalKey(key tea.KeyMsg) tea.Cmd {
 
 	switch key.String() {
 	case ",":
-		if state.ActiveLine == createTaskRepoLine && len(m.repos) > 1 {
-			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), -1)
+		if repoOptionCount := len(m.createTaskRepoOptions()); state.ActiveLine == createTaskRepoLine && repoOptionCount > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, repoOptionCount, -1)
 		}
 	case "<":
-		if state.ActiveLine == createTaskRepoLine && len(m.repos) > 1 {
-			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), -1)
+		if repoOptionCount := len(m.createTaskRepoOptions()); state.ActiveLine == createTaskRepoLine && repoOptionCount > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, repoOptionCount, -1)
 		}
 	case ".":
-		if state.ActiveLine == createTaskRepoLine && len(m.repos) > 1 {
-			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), 1)
+		if repoOptionCount := len(m.createTaskRepoOptions()); state.ActiveLine == createTaskRepoLine && repoOptionCount > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, repoOptionCount, 1)
 		}
 	case ">":
-		if state.ActiveLine == createTaskRepoLine && len(m.repos) > 1 {
-			state.RepoIndex = wrapIndex(state.RepoIndex, len(m.repos), 1)
+		if repoOptionCount := len(m.createTaskRepoOptions()); state.ActiveLine == createTaskRepoLine && repoOptionCount > 1 {
+			state.RepoIndex = wrapIndex(state.RepoIndex, repoOptionCount, 1)
 		}
 	case "[":
 		if state.ActiveLine == createTaskPillarLine {
@@ -1008,6 +1184,42 @@ func (m *Model) handlePRCommentModalKey(key tea.KeyMsg) tea.Cmd {
 	}
 	if next, changed := appendPrintableInput(state.Value, key); changed {
 		state.Value = next
+	}
+	return nil
+}
+
+func (m *Model) handleArtifactRolloutModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.artifactRolloutModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+
+	switch key.Type {
+	case tea.KeyEsc:
+		m.closeModal()
+		return nil
+	case tea.KeyLeft:
+		state.GradualityIndex = wrapIndex(state.GradualityIndex, len(artifactGradualityOptions), -1)
+		return nil
+	case tea.KeyRight:
+		state.GradualityIndex = wrapIndex(state.GradualityIndex, len(artifactGradualityOptions), 1)
+		return nil
+	case tea.KeyEnter:
+		if state.Confirm != artifactRolloutConfirmWord {
+			m.statusMessage = "Type " + artifactRolloutConfirmWord + " to confirm the production rollout."
+			return nil
+		}
+		params := artifactRolloutParams(*state)
+		m.closeModal()
+		return m.rolloutArtifactCmd(params)
+	case tea.KeyBackspace, tea.KeyDelete:
+		state.Confirm = trimLastRune(state.Confirm)
+		return nil
+	}
+
+	if next, changed := appendPrintableInput(state.Confirm, key); changed {
+		state.Confirm = next
 	}
 	return nil
 }
@@ -1492,6 +1704,12 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 			return m.openSessionCmd(contextTask.ID, true, SessionSlotPrimary)
 		}
 		return nil
+	case "reconnect-remote":
+		m.closeModal()
+		if contextTask != nil {
+			return m.reconnectSessionCmd(contextTask.ID, SessionSlotPrimary)
+		}
+		return nil
 	case "toggle-dual-shell":
 		m.closeModal()
 		if contextTask != nil {
@@ -1601,7 +1819,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "release-mission-task", Title: "Release mission task to backlog", Section: "Mission", Detail: "Add the selected mission task to the regular board backlog.", Shortcut: "u", Keywords: []string{"mission", "release", "backlog"}, Disabled: selectedMissionTask == nil || selectedMissionTask.ReleasedToBoard, DisabledReason: "Select an unreleased mission task before releasing it."},
 		{ID: "create-task", Title: "Create task", Section: "Task", Detail: "Add a new task into the backlog track.", Shortcut: "n", Keywords: []string{"new", "backlog", "add"}},
 		{ID: "rename-task", Title: "Rename current task", Section: "Task", Detail: detailOrFallback(contextTask, "Rename %s", "Rename the current task."), Shortcut: "r", Keywords: []string{"title", "edit"}, Disabled: contextTask == nil, DisabledReason: "Select a task to rename it."},
-		{ID: "set-branch", Title: "Change tracked branch", Section: "Task", Detail: detailOrFallback(contextTask, "Change branch for %s", "Change the tracked branch for the current task."), Shortcut: "w", Keywords: []string{"branch", "pr", "switch"}, Disabled: contextTask == nil, DisabledReason: "Select a task to change its branch."},
+		{ID: "set-branch", Title: "Change tracked branch", Section: "Task", Detail: detailOrFallback(contextTask, "Change branch for %s", "Change the tracked branch for the current task."), Shortcut: "w", Keywords: []string{"branch", "pr", "switch"}, Disabled: contextTask == nil || contextTask.IsGeneral(), DisabledReason: "Select a repo task to change its branch."},
 		{ID: "edit-description", Title: "Edit task description", Section: "Task", Detail: "Open the long-form task description editor.", Shortcut: "Ctrl+D", Keywords: []string{"notes", "description"}, Disabled: contextTask == nil, DisabledReason: "Select a task to edit its description."},
 		{ID: "delete-task", Title: "Delete current task", Section: "Task", Detail: "Delete the selected task after confirmation.", Shortcut: "d", Keywords: []string{"remove"}, Disabled: contextTask == nil, DisabledReason: "Select a task to delete it."},
 		{ID: "assign-pillar", Title: "Assign pillar", Section: "Task", Detail: "Attach or change the pillar for the current task.", Shortcut: "p", Keywords: []string{"label", "pillar"}, Disabled: contextTask == nil, DisabledReason: "Select a task to assign a pillar."},
@@ -1611,12 +1829,13 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "move-task-right", Title: "Move task right", Section: "Task", Detail: "Move the current task to the next track.", Shortcut: "]", Keywords: []string{"next track", "kanban"}, Disabled: contextTask == nil || contextTrackIndex < 0 || contextTrackIndex >= len(m.sortedTracks())-1, DisabledReason: "The current task is already in the last track."},
 		{ID: "open-shell", Title: "Open task shell", Section: "Session", Detail: "Start or attach the session for the current task.", Shortcut: "Enter", Keywords: []string{"terminal", "session", "shell"}, Disabled: contextTask == nil, DisabledReason: "Select a task to open its shell."},
 		{ID: "recreate-shell", Title: "Recreate task shell", Section: "Session", Detail: "Recreate the current task shell with the native backend.", Shortcut: "R", Keywords: []string{"terminal", "session", "restart"}, Disabled: contextTask == nil, DisabledReason: "Select a task to recreate its shell."},
+		{ID: "reconnect-remote", Title: "Reconnect remote session", Section: "Session", Detail: "Re-link the current card to its remote machine, starting it if it is off.", Shortcut: "Ctrl+R", Keywords: []string{"remote", "ssh", "reattach", "reconnect", "workspace", "coder"}, Disabled: contextTask == nil || contextTask.Location != TaskLocationRemote, DisabledReason: "Reconnect applies to remote tasks."},
 		{ID: "toggle-dual-shell", Title: "Toggle dual shell", Section: "Session", Detail: detailOrFallback(contextTask, ternaryString(contextTask != nil && contextTask.SecondarySessionID != "", "Close the lower terminal for %s", "Open a lower dev terminal for %s"), "Open or close the secondary shell for the current task."), Shortcut: "B", Keywords: []string{"terminal", "dual", "secondary", "dev"}, Disabled: contextTask == nil, DisabledReason: "Select a task to toggle its dual shell."},
 		{ID: "focus-terminal", Title: "Focus terminal pane", Section: "Session", Detail: "Jump into the embedded terminal pane.", Shortcut: "t", Keywords: []string{"terminal", "pane"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before focusing the terminal pane."},
 		{ID: "fullscreen-terminal", Title: "Expand terminal workspace", Section: "Session", Detail: "Make the terminal take over the workspace.", Shortcut: "z", Keywords: []string{"terminal", "fullscreen", "expand"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before expanding the terminal."},
 		{ID: "open-ide", Title: "Open workspace in IDE", Section: "Workspace", Detail: "Open the current task workspace in the configured IDE.", Shortcut: "i", Keywords: []string{"editor", "workspace"}, Disabled: contextTask == nil, DisabledReason: "Select a task to open its workspace."},
 		{ID: "open-workspace", Title: "Reveal workspace", Section: "Workspace", Detail: "Open the current task workspace in Finder or Explorer.", Shortcut: "x", Keywords: []string{"finder", "explorer", "folder"}, Disabled: contextTask == nil, DisabledReason: "Select a task to reveal its workspace."},
-		{ID: "create-pr", Title: "Create or ensure pull request", Section: "GitHub", Detail: "Create the PR immediately for the current task branch.", Shortcut: "c", Keywords: []string{"github", "pull request"}, Disabled: contextTask == nil, DisabledReason: "Select a task to create a pull request."},
+		{ID: "create-pr", Title: "Create or ensure pull request", Section: "GitHub", Detail: "Create the PR immediately for the current task branch.", Shortcut: "c", Keywords: []string{"github", "pull request"}, Disabled: contextTask == nil || contextTask.IsGeneral(), DisabledReason: "Select a repo task to create a pull request."},
 		{ID: "retry-pushed-pr-creation", Title: "Retry pushed-branch PR creation", Section: "GitHub", Detail: "Restart the background PR creation watcher after a branch push.", Shortcut: "C", Keywords: []string{"github", "pull request", "push", "retry"}, Disabled: contextTask == nil || contextTask.BranchName == "", DisabledReason: "Select a task with a branch to watch for PR creation."},
 		{ID: "comment-pr", Title: "Comment on pull request", Section: "GitHub", Detail: "Open a composer and post a comment with gh CLI.", Shortcut: "j", Keywords: []string{"github", "pull request", "comment"}, Disabled: contextTask == nil || !canCommentOnTaskPR(*contextTask), DisabledReason: "The current task does not have an open or draft pull request."},
 		{ID: "open-pr", Title: "Open pull request", Section: "GitHub", Detail: "Open the current task PR in the browser.", Shortcut: "o", Keywords: []string{"github", "browser", "pr"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: "The current task does not have an open pull request."},
@@ -1649,16 +1868,30 @@ func (m *Model) filteredCommandPaletteCommands(query string) []CommandPaletteIte
 	return filtered
 }
 
-func (m *Model) createTaskCmd(title, repoID, pillarID, agentCLI string) tea.Cmd {
+func createTaskParams(title, kind, repoID, pillarID, agentCLI, location string) map[string]interface{} {
 	params := map[string]interface{}{
 		"title":    title,
-		"repoId":   repoID,
+		"kind":     kind,
 		"agentCli": agentCLI,
+		"location": location,
+	}
+	// A general task carries no repo, so sending an empty repoId would only give
+	// the daemon something to reject.
+	if repoID != "" {
+		params["repoId"] = repoID
 	}
 	if pillarID != "" {
 		params["pillarId"] = pillarID
 	}
-	return m.boardActionCmd("createTask", params, "Created task.")
+	return params
+}
+
+func (m *Model) createTaskCmd(title, kind, repoID, pillarID, agentCLI, location string) tea.Cmd {
+	status := "Created task."
+	if kind == TaskKindGeneral {
+		status = "Created general task."
+	}
+	return m.boardActionCmd("createTask", createTaskParams(title, kind, repoID, pillarID, agentCLI, location), status)
 }
 
 func (m *Model) createMissionCmd(title string) tea.Cmd {

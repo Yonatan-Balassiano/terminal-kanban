@@ -53,6 +53,133 @@ func TestRenderCreateTaskModalShowsSelectedAgent(t *testing.T) {
 	}
 }
 
+func TestHandleCreateTaskModalKeyNavigatesToLocationLine(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo", RemotePath: "/home/coder/project/monorepo"},
+		},
+		createTaskModal: &createTaskModalState{
+			Value:      "Ship it",
+			ActiveLine: createTaskAgentLine,
+		},
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	if model.createTaskModal.ActiveLine != createTaskLocationLine {
+		t.Fatalf("active line = %q, want %q", model.createTaskModal.ActiveLine, createTaskLocationLine)
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	if model.createTaskModal.ActiveLine != createTaskLocationLine {
+		t.Fatalf("active line = %q, want it to stay on the last line", model.createTaskModal.ActiveLine)
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyUp})
+
+	if model.createTaskModal.ActiveLine != createTaskAgentLine {
+		t.Fatalf("active line = %q, want %q", model.createTaskModal.ActiveLine, createTaskAgentLine)
+	}
+}
+
+func TestHandleCreateTaskModalKeyCyclesLocationWhenRepoHasRemote(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo", RemotePath: "/home/coder/project/monorepo"},
+		},
+		createTaskModal: &createTaskModalState{
+			Value:      "Ship it",
+			ActiveLine: createTaskLocationLine,
+		},
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyRight})
+
+	if got := model.createTaskLocationAt(0, model.createTaskModal.LocationIndex).Value; got != TaskLocationRemote {
+		t.Fatalf("location = %q, want %q", got, TaskLocationRemote)
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyLeft})
+
+	if got := model.createTaskLocationAt(0, model.createTaskModal.LocationIndex).Value; got != TaskLocationLocal {
+		t.Fatalf("location = %q, want %q", got, TaskLocationLocal)
+	}
+}
+
+func TestHandleCreateTaskModalKeyLocksLocationWhenRepoHasNoRemote(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo"},
+		},
+		createTaskModal: &createTaskModalState{
+			Value:      "Ship it",
+			ActiveLine: createTaskLocationLine,
+		},
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyRight})
+
+	if model.createTaskModal.LocationIndex != 0 {
+		t.Fatalf("location index = %d, want 0", model.createTaskModal.LocationIndex)
+	}
+	if got := model.createTaskLocationAt(0, model.createTaskModal.LocationIndex).Value; got != TaskLocationLocal {
+		t.Fatalf("location = %q, want %q", got, TaskLocationLocal)
+	}
+}
+
+func TestCreateTaskLocationFollowsSelectedRepo(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Remote repo", RemotePath: "/home/coder/project/monorepo"},
+			{ID: "repo-2", Label: "Local only repo"},
+		},
+		createTaskModal: &createTaskModalState{
+			Value:         "Ship it",
+			LocationIndex: 1,
+			ActiveLine:    createTaskRepoLine,
+		},
+	}
+
+	if got := model.createTaskLocationAt(0, model.createTaskModal.LocationIndex).Value; got != TaskLocationRemote {
+		t.Fatalf("location for remote-capable repo = %q, want %q", got, TaskLocationRemote)
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyRight})
+
+	if model.createTaskModal.RepoIndex != 1 {
+		t.Fatalf("repo index = %d, want 1", model.createTaskModal.RepoIndex)
+	}
+	if got := model.createTaskLocationAt(model.createTaskModal.RepoIndex, model.createTaskModal.LocationIndex).Value; got != TaskLocationLocal {
+		t.Fatalf("location for local-only repo = %q, want %q", got, TaskLocationLocal)
+	}
+}
+
+func TestRenderCreateTaskModalShowsLocation(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Remote repo", RemotePath: "/home/coder/project/monorepo"},
+			{ID: "repo-2", Label: "Local only repo"},
+		},
+		createTaskModal: &createTaskModalState{
+			Value:         "Ship it",
+			LocationIndex: 1,
+			ActiveLine:    createTaskLocationLine,
+		},
+	}
+
+	rendered := ansiPattern.ReplaceAllString(renderCreateTaskModal(model), "")
+	if !strings.Contains(rendered, "Runs on: Remote") {
+		t.Fatalf("rendered modal missing remote location line:\n%s", rendered)
+	}
+
+	model.createTaskModal.RepoIndex = 1
+	rendered = ansiPattern.ReplaceAllString(renderCreateTaskModal(model), "")
+	if !strings.Contains(rendered, "Runs on: Local (no remote configured)") {
+		t.Fatalf("rendered modal missing locked location line:\n%s", rendered)
+	}
+}
+
 func TestHandleCreateMissionModalKeyAllowsSpace(t *testing.T) {
 	model := &Model{
 		createMissionModal: &createMissionModalState{
@@ -475,5 +602,493 @@ func TestRenderAIChatModalShowsTranscriptAndExecution(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "model requires more system memory") {
 		t.Fatalf("rendered modal missing error detail:\n%s", rendered)
+	}
+}
+
+func artifactRolloutTestModel(artifacts []ArtifactRecord) *Model {
+	return &Model{
+		focus: FocusBoard,
+		artifacts: ArtifactsSnapshot{
+			RefreshedAt: 1785100000000,
+			Artifacts:   artifacts,
+		},
+	}
+}
+
+func TestOpenArtifactRolloutModalSnapshotsTheDisplayedVersions(t *testing.T) {
+	model := artifactRolloutTestModel([]ArtifactRecord{{
+		Name:            "com.wixpress.enterpise.web5.ecom-integrations",
+		ShortName:       "ecom-integrations",
+		Status:          ArtifactStatusDrift,
+		GAVersion:       "1.258.0",
+		LatestRCVersion: "1.269.0",
+	}})
+
+	model.openArtifactRolloutModal()
+
+	if model.modal != ModalArtifactRollout {
+		t.Fatalf("modal = %q, want %q", model.modal, ModalArtifactRollout)
+	}
+	state := model.artifactRolloutModal
+	if state.Name != "com.wixpress.enterpise.web5.ecom-integrations" {
+		t.Fatalf("Name = %q, want the full artifact id", state.Name)
+	}
+	if state.CurrentVersion != "1.258.0" || state.TargetVersion != "1.269.0" {
+		t.Fatalf("versions = %q → %q, want 1.258.0 → 1.269.0", state.CurrentVersion, state.TargetVersion)
+	}
+	if artifactGradualityAt(state.GradualityIndex) != "gradual_safer" {
+		t.Fatalf("graduality = %q, want gradual_safer by default", artifactGradualityAt(state.GradualityIndex))
+	}
+}
+
+func TestRenderArtifactRolloutModalShowsOwnershipContext(t *testing.T) {
+	model := artifactRolloutTestModel([]ArtifactRecord{{
+		Name:            "com.wixpress.wix-assistant-web5",
+		ShortName:       "wix-assistant-web5",
+		Status:          ArtifactStatusDrift,
+		GAVersion:       "1.3301.0",
+		LatestRCVersion: "1.3311.0",
+		PendingRcCount:  intPtr(11),
+		MyPendingCount:  intPtr(6),
+	}})
+
+	model.openArtifactRolloutModal()
+
+	rendered := stripANSI(renderArtifactRolloutModal(model))
+	if !strings.Contains(rendered, "6 of 11 pending RCs are yours") {
+		t.Fatalf("rendered modal missing the ownership line:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "type "+artifactRolloutConfirmWord+" to confirm") {
+		t.Fatalf("rendered modal missing the arming field:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "1.3311.0") {
+		t.Fatalf("rendered modal missing the frozen target version:\n%s", rendered)
+	}
+}
+
+func TestRenderArtifactRolloutModalOmitsOwnershipWhenItIsUnknown(t *testing.T) {
+	model := artifactRolloutTestModel([]ArtifactRecord{{
+		Name:            "com.wixpress.wix-assistant-web5",
+		ShortName:       "wix-assistant-web5",
+		Status:          ArtifactStatusDrift,
+		GAVersion:       "1.3301.0",
+		LatestRCVersion: "1.3311.0",
+		PendingRcCount:  intPtr(11),
+	}})
+
+	model.openArtifactRolloutModal()
+
+	rendered := stripANSI(renderArtifactRolloutModal(model))
+	if strings.Contains(rendered, "pending RCs are yours") {
+		t.Fatalf("rendered modal claims ownership it could not resolve:\n%s", rendered)
+	}
+}
+
+func TestOpenArtifactRolloutModalRefusesNonDriftingArtifacts(t *testing.T) {
+	cases := []struct {
+		name     string
+		artifact ArtifactRecord
+		want     string
+	}{
+		{"in sync", ArtifactRecord{ShortName: "prompt-manager", Status: ArtifactStatusInSync, GAVersion: "1.0.0"}, "prompt-manager is already in sync."},
+		{"no GA", ArtifactRecord{ShortName: "web5-protos", Status: ArtifactStatusNoGA, LatestRCVersion: "1.0.5"}, "web5-protos never goes GA, so there is nothing to roll out."},
+		{"unknown", ArtifactRecord{ShortName: "mystery-lib", Status: ArtifactStatusUnknown}, "mystery-lib has an unknown release state, so it cannot be rolled out."},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			model := artifactRolloutTestModel([]ArtifactRecord{testCase.artifact})
+
+			model.openArtifactRolloutModal()
+
+			if model.modal != ModalNone {
+				t.Fatalf("modal = %q, want no rollout modal for %s", model.modal, testCase.name)
+			}
+			if model.statusMessage != testCase.want {
+				t.Fatalf("statusMessage = %q, want %q", model.statusMessage, testCase.want)
+			}
+		})
+	}
+}
+
+func TestHandleArtifactRolloutModalKeyTogglesGraduality(t *testing.T) {
+	model := &Model{artifactRolloutModal: &artifactRolloutModalState{}}
+
+	model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyRight})
+	if got := artifactGradualityAt(model.artifactRolloutModal.GradualityIndex); got != "gradual_quicker" {
+		t.Fatalf("graduality = %q, want gradual_quicker after →", got)
+	}
+
+	model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyLeft})
+	if got := artifactGradualityAt(model.artifactRolloutModal.GradualityIndex); got != "gradual_safer" {
+		t.Fatalf("graduality = %q, want gradual_safer after ←", got)
+	}
+}
+
+func TestHandleArtifactRolloutModalKeyEnterDoesNothingUntilArmed(t *testing.T) {
+	for _, confirm := range []string{"", "g", "ga", "GAA", "Ga"} {
+		model := &Model{
+			modal:                ModalArtifactRollout,
+			artifactRolloutModal: &artifactRolloutModalState{Name: "artifact", TargetVersion: "1.269.0", Confirm: confirm},
+		}
+
+		cmd := model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+		if cmd != nil {
+			t.Fatalf("handleArtifactRolloutModalKey(enter) with confirm %q returned a cmd, want no rollout", confirm)
+		}
+		if model.modal != ModalArtifactRollout {
+			t.Fatalf("modal = %q with confirm %q, want the modal to stay open", model.modal, confirm)
+		}
+	}
+}
+
+func TestHandleArtifactRolloutModalKeyEnterRollsOutWhenArmed(t *testing.T) {
+	model := &Model{
+		modal: ModalArtifactRollout,
+		artifactRolloutModal: &artifactRolloutModalState{
+			Name:            "com.wixpress.enterpise.web5.ecom-integrations",
+			CurrentVersion:  "1.258.0",
+			TargetVersion:   "1.269.0",
+			GradualityIndex: 1,
+			Confirm:         artifactRolloutConfirmWord,
+		},
+	}
+
+	cmd := model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("handleArtifactRolloutModalKey(enter) returned nil cmd, want a rollout")
+	}
+	if model.modal != ModalNone {
+		t.Fatalf("modal = %q, want the modal closed after confirming", model.modal)
+	}
+}
+
+func TestArtifactRolloutParamsUseTheDisplayedTargetVersion(t *testing.T) {
+	params := artifactRolloutParams(artifactRolloutModalState{
+		Name:            "com.wixpress.enterpise.web5.ecom-integrations",
+		CurrentVersion:  "1.258.0",
+		TargetVersion:   "1.269.0",
+		GradualityIndex: 1,
+	})
+
+	want := map[string]string{
+		"name":          "com.wixpress.enterpise.web5.ecom-integrations",
+		"targetVersion": "1.269.0",
+		"graduality":    "gradual_quicker",
+	}
+	for key, value := range want {
+		if params[key] != value {
+			t.Fatalf("params[%q] = %q, want %q", key, params[key], value)
+		}
+	}
+	if len(params) != len(want) {
+		t.Fatalf("params = %#v, want exactly %#v", params, want)
+	}
+}
+
+func TestHandleArtifactRolloutModalKeyEditsAndCancelsTheConfirmField(t *testing.T) {
+	model := &Model{modal: ModalArtifactRollout, artifactRolloutModal: &artifactRolloutModalState{}}
+
+	model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+
+	if model.artifactRolloutModal.Confirm != artifactRolloutConfirmWord {
+		t.Fatalf("Confirm = %q, want %q after backspace editing", model.artifactRolloutModal.Confirm, artifactRolloutConfirmWord)
+	}
+
+	model.handleArtifactRolloutModalKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.modal != ModalNone {
+		t.Fatalf("modal = %q, want Esc to cancel", model.modal)
+	}
+}
+
+func TestApplyArtifactRolloutSurfacesTheServerMessage(t *testing.T) {
+	model := &Model{}
+
+	if cmd := model.applyArtifactRollout(artifactRolloutMsg{result: ArtifactRolloutResult{OK: true, Message: "Rollout gr-42 started."}}); cmd == nil {
+		t.Fatal("applyArtifactRollout() returned nil cmd on success, want an artifacts refresh")
+	}
+	if model.statusMessage != "Rollout gr-42 started." {
+		t.Fatalf("statusMessage = %q, want the server message", model.statusMessage)
+	}
+
+	if cmd := model.applyArtifactRollout(artifactRolloutMsg{result: ArtifactRolloutResult{Message: "not authorised"}}); cmd != nil {
+		t.Fatal("applyArtifactRollout() returned a cmd on failure, want no refresh")
+	}
+	if model.statusMessage != "Rollout failed: not authorised" {
+		t.Fatalf("statusMessage = %q, want the failure surfaced", model.statusMessage)
+	}
+}
+
+func TestRenderArtifactRolloutModalShowsTheProductionDetails(t *testing.T) {
+	model := &Model{
+		modal: ModalArtifactRollout,
+		artifactRolloutModal: &artifactRolloutModalState{
+			Name:           "com.wixpress.enterpise.web5.ecom-integrations",
+			CurrentVersion: "1.258.0",
+			TargetVersion:  "1.269.0",
+		},
+	}
+
+	plain := stripANSI(renderArtifactRolloutModal(model))
+	for _, want := range []string{
+		"ROLL OUT TO PRODUCTION",
+		"com.wixpress.enterpise.web5.ecom-integrations",
+		"1.258.0  →  1.269.0",
+		"gradual_safer",
+		"comment: generated automatically",
+		"type GA to confirm:",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("renderArtifactRolloutModal() = %q, want %q", plain, want)
+		}
+	}
+}
+
+func findPaletteCommand(items []CommandPaletteItem, id string) *CommandPaletteItem {
+	for i := range items {
+		if items[i].ID == id {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
+func TestCommandPaletteReconnectIsEnabledOnlyForRemoteTasks(t *testing.T) {
+	remote := &Model{
+		activeTaskID: "task-remote",
+		tasks:        []TaskRecord{{ID: "task-remote", Location: TaskLocationRemote}},
+	}
+	item := findPaletteCommand(remote.commandPaletteCommands(), "reconnect-remote")
+	if item == nil {
+		t.Fatal("reconnect-remote command is missing from the palette")
+	}
+	if item.Disabled {
+		t.Fatalf("reconnect should be enabled for a remote task, got disabled: %q", item.DisabledReason)
+	}
+
+	local := &Model{
+		activeTaskID: "task-local",
+		tasks:        []TaskRecord{{ID: "task-local", Location: TaskLocationLocal}},
+	}
+	item = findPaletteCommand(local.commandPaletteCommands(), "reconnect-remote")
+	if item == nil {
+		t.Fatal("reconnect-remote command is missing from the palette")
+	}
+	if !item.Disabled {
+		t.Fatal("reconnect should be disabled for a local task")
+	}
+	if !strings.Contains(item.DisabledReason, "remote") {
+		t.Fatalf("disabled reason = %q, want it to mention remote tasks", item.DisabledReason)
+	}
+
+	none := &Model{}
+	item = findPaletteCommand(none.commandPaletteCommands(), "reconnect-remote")
+	if item == nil || !item.Disabled {
+		t.Fatal("reconnect should be disabled when no task is selected")
+	}
+}
+
+func TestCreateTaskRepoOptionsEndWithGeneral(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo One"},
+			{ID: "repo-2", Label: "Repo Two"},
+		},
+	}
+
+	options := model.createTaskRepoOptions()
+
+	if len(options) != 3 {
+		t.Fatalf("repo option count = %d, want 3", len(options))
+	}
+	last := options[len(options)-1]
+	if !last.IsGeneral || last.ID != "" {
+		t.Fatalf("last option = %+v, want the repo-less general option", last)
+	}
+}
+
+func TestHandleCreateTaskModalKeyCyclesToGeneralOption(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo One"},
+		},
+		createTaskModal: &createTaskModalState{
+			Value:      "Read the spec",
+			ActiveLine: createTaskRepoLine,
+		},
+	}
+
+	model.handleCreateTaskModalKey(tea.KeyMsg{Type: tea.KeyRight})
+
+	if got := model.createTaskRepoOptionAt(model.createTaskModal.RepoIndex); !got.IsGeneral {
+		t.Fatalf("selected repo option = %+v, want the general option", got)
+	}
+}
+
+func TestRenderCreateTaskModalShowsGeneralRepoOption(t *testing.T) {
+	model := &Model{
+		repos: []RepoRecord{
+			{ID: "repo-1", Label: "Repo One"},
+		},
+		createTaskModal: &createTaskModalState{
+			Value:      "Read the spec",
+			RepoIndex:  1,
+			ActiveLine: createTaskRepoLine,
+		},
+	}
+
+	rendered := renderCreateTaskModal(model)
+
+	if !strings.Contains(rendered, "Repo: General (no repo)") {
+		t.Fatalf("rendered modal missing the general repo option:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "general tasks are local") {
+		t.Fatalf("rendered modal should lock a general task to local:\n%s", rendered)
+	}
+}
+
+func TestCreateTaskParamsOmitsRepoIDForGeneralTasks(t *testing.T) {
+	params := createTaskParams("Read the spec", TaskKindGeneral, "", "", "claude", TaskLocationLocal)
+
+	if _, ok := params["repoId"]; ok {
+		t.Fatalf("general task params should carry no repoId: %+v", params)
+	}
+	if params["kind"] != TaskKindGeneral {
+		t.Fatalf("kind = %v, want %q", params["kind"], TaskKindGeneral)
+	}
+}
+
+func TestCreateTaskParamsKeepsRepoIDForRepoTasks(t *testing.T) {
+	params := createTaskParams("Ship it", TaskKindRepo, "repo-1", "pillar-1", "codex", TaskLocationRemote)
+
+	if params["repoId"] != "repo-1" {
+		t.Fatalf("repoId = %v, want repo-1", params["repoId"])
+	}
+	if params["kind"] != TaskKindRepo {
+		t.Fatalf("kind = %v, want %q", params["kind"], TaskKindRepo)
+	}
+}
+
+func TestOpenSetBranchModalRejectsGeneralTasks(t *testing.T) {
+	model := &Model{}
+
+	model.openSetBranchModal(&TaskRecord{ID: "task-1", Kind: TaskKindGeneral})
+
+	if model.modal == ModalSetBranch {
+		t.Fatal("set-branch modal should not open for a general task")
+	}
+	if !strings.Contains(model.statusMessage, "no repo") {
+		t.Fatalf("status message = %q, want an explanation about the missing repo", model.statusMessage)
+	}
+}
+
+func TestVisibleTasksInGeneralScopeShowsOnlyGeneralTasks(t *testing.T) {
+	model := &Model{
+		activeRepoID: GeneralScopeID,
+		tasks: []TaskRecord{
+			{ID: "task-1", Title: "Repo card", RepoID: "repo-1"},
+			{ID: "task-2", Title: "General card", Kind: TaskKindGeneral},
+		},
+	}
+
+	visible := model.visibleTasks()
+
+	if len(visible) != 1 || visible[0].ID != "task-2" {
+		t.Fatalf("visible tasks = %+v, want only the general card", visible)
+	}
+}
+
+func TestVisibleTasksInAllReposScopeIncludesGeneralTasks(t *testing.T) {
+	model := &Model{
+		tasks: []TaskRecord{
+			{ID: "task-1", Title: "Repo card", RepoID: "repo-1"},
+			{ID: "task-2", Title: "General card", Kind: TaskKindGeneral},
+		},
+	}
+
+	if got := len(model.visibleTasks()); got != 2 {
+		t.Fatalf("visible task count = %d, want 2", got)
+	}
+}
+
+func TestVisibleTasksScopedToRepoHidesGeneralTasks(t *testing.T) {
+	model := &Model{
+		activeRepoID: "repo-1",
+		tasks: []TaskRecord{
+			{ID: "task-1", Title: "Repo card", RepoID: "repo-1"},
+			{ID: "task-2", Title: "General card", Kind: TaskKindGeneral},
+		},
+	}
+
+	visible := model.visibleTasks()
+
+	if len(visible) != 1 || visible[0].ID != "task-1" {
+		t.Fatalf("visible tasks = %+v, want only the repo card", visible)
+	}
+}
+
+func TestSwitchRepoCyclesThroughGeneralScope(t *testing.T) {
+	model := &Model{repos: []RepoRecord{{ID: "repo-1", Label: "Repo One"}}}
+
+	model.switchRepo(1)
+	if model.activeRepoID != "repo-1" {
+		t.Fatalf("after one step activeRepoID = %q, want repo-1", model.activeRepoID)
+	}
+
+	model.switchRepo(1)
+	if !model.isGeneralScope() {
+		t.Fatalf("after two steps activeRepoID = %q, want the general scope", model.activeRepoID)
+	}
+
+	model.switchRepo(1)
+	if model.activeRepoID != "" {
+		t.Fatalf("after three steps activeRepoID = %q, want all repos", model.activeRepoID)
+	}
+}
+
+func TestOverviewScopesEndWithGeneral(t *testing.T) {
+	model := &Model{repos: []RepoRecord{{ID: "repo-1", Label: "Repo One"}}}
+
+	scopes := model.overviewScopes()
+
+	if len(scopes) != 2 {
+		t.Fatalf("scope count = %d, want 2", len(scopes))
+	}
+	if scopes[1].ID != GeneralScopeID || scopes[1].Label != "General" {
+		t.Fatalf("last scope = %+v, want the general scope", scopes[1])
+	}
+}
+
+func TestOverviewScopesEmptyWithoutReposOrGeneralTasks(t *testing.T) {
+	if scopes := (&Model{}).overviewScopes(); len(scopes) != 0 {
+		t.Fatalf("scopes = %+v, want none", scopes)
+	}
+}
+
+func TestOverviewScopesKeepGeneralWithoutRepos(t *testing.T) {
+	model := &Model{tasks: []TaskRecord{{ID: "task-1", Kind: TaskKindGeneral}}}
+
+	scopes := model.overviewScopes()
+
+	if len(scopes) != 1 || scopes[0].ID != GeneralScopeID {
+		t.Fatalf("scopes = %+v, want only the general scope", scopes)
+	}
+}
+
+func TestOpenCreateTaskModalDefaultsToGeneralInGeneralScope(t *testing.T) {
+	model := &Model{
+		repos:        []RepoRecord{{ID: "repo-1", Label: "Repo One"}},
+		activeRepoID: GeneralScopeID,
+	}
+
+	model.openCreateTaskModal()
+
+	if got := model.createTaskRepoOptionAt(model.createTaskModal.RepoIndex); !got.IsGeneral {
+		t.Fatalf("preselected repo option = %+v, want the general option", got)
 	}
 }

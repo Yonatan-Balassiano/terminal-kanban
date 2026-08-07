@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS repos (
   ide_command TEXT,
   worktree_mode TEXT NOT NULL DEFAULT 'auto',
   worktree_root TEXT,
+  remote_path TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -44,7 +45,10 @@ CREATE TABLE IF NOT EXISTS tracks (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
-  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  -- 'repo' tasks own a branch and a worktree in repo_id; 'general' tasks carry
+  -- none of that, so repo_id is NULL for them.
+  kind TEXT NOT NULL DEFAULT 'repo',
+  repo_id TEXT REFERENCES repos(id) ON DELETE CASCADE,
   track_id TEXT NOT NULL,
   pillar_id TEXT REFERENCES pillars(id) ON DELETE SET NULL,
   branch_name TEXT,
@@ -80,6 +84,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   session_attention_needed INTEGER NOT NULL DEFAULT 0,
   session_attention_updated_at INTEGER,
   agent_cli TEXT NOT NULL DEFAULT 'claude',
+  location TEXT NOT NULL DEFAULT 'local',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

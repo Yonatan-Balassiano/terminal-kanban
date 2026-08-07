@@ -11,8 +11,18 @@ export type ReviewState = 'none' | 'approved' | 'changes_requested' | 'commented
 export type GitHubSyncStatus = 'idle' | 'syncing' | 'ok' | 'error';
 export type SessionStatus = 'active' | 'idle' | 'orphaned' | 'terminated';
 export type SessionSlot = 'primary' | 'secondary';
-export type SessionBackendType = 'tmux' | 'pty';
-export type RepoHealth = 'ok' | 'missing' | 'not-git';
+export type SessionBackendType = 'tmux' | 'pty' | 'ssh';
+export type RepoHealth = 'ok' | 'missing' | 'not-git' | 'unreachable';
+/** Which machine a task's worktree and agent session live on. */
+export type TaskLocation = 'local' | 'remote';
+/**
+ * What a card is attached to.
+ *
+ * `repo` is the normal card: a repo, a branch, a worktree, GitHub sync.
+ * `general` is a standalone card — a title and an agent session in the user's
+ * home directory, with no repo, branch, worktree, or GitHub state.
+ */
+export type TaskKind = 'repo' | 'general';
 export type ThemeMode = 'truecolor' | '256color' | 'monochrome';
 export type WorktreeMode = 'off' | 'auto' | 'always';
 export type PreferredIDE = 'system' | 'webstorm' | 'idea' | 'cursor' | 'vscode';
@@ -20,6 +30,14 @@ export type GitState = 'unknown' | 'clean' | 'dirty' | 'untracked' | 'conflicted
 export type TerminalLayoutMode = 'side-by-side' | 'top-bottom';
 export type SessionActivityKind = 'agent' | 'process';
 export type AgentCLI = 'claude' | 'codex';
+/**
+ * How much the agent CLI is allowed to do without asking.
+ *
+ * 'bypass' skips the agent's own permission prompts — appropriate for a session
+ * already isolated in its own worktree, and required for an unattended remote
+ * session where nobody is watching to approve each step.
+ */
+export type AgentPermissionMode = 'default' | 'bypass';
 export type MissionTaskStatus = 'backlog' | 'in-progress' | 'pr' | 'merged';
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -57,6 +75,8 @@ export interface RepoRecord {
   ideCommand?: string;
   worktreeMode: WorktreeMode;
   worktreeRoot?: string;
+  /** Path to this repo's checkout on the configured remote host. Absent = local only. */
+  remotePath?: string;
   health: RepoHealth;
   createdAt: number;
   updatedAt: number;
@@ -85,8 +105,11 @@ export interface TaskRecord {
   id: string;
   title: string;
   description?: string;
-  repoId: string;
+  kind: TaskKind;
+  /** Absent on general tasks, which belong to no repo. */
+  repoId?: string;
   agentCli: AgentCLI;
+  location: TaskLocation;
   trackId: string;
   pillarId?: string;
   /** Resolved label IDs (joined from task_labels) */
@@ -248,13 +271,25 @@ export interface SessionBackend {
   inspect(backendSessionId: string): Promise<BackendSessionInfo | null>;
   terminate(backendSessionId: string): Promise<void>;
   healthCheck(): Promise<BackendHealth>;
+  /**
+   * Discard the local plumbing that fronts a session on another machine, so the
+   * next attach rebuilds it. Never touches the session itself.
+   *
+   * Only backends that have such plumbing implement this — a local tmux or PTY
+   * session is its own front end and has nothing to reset.
+   */
+  resetAttachment?(backendSessionId: string): Promise<void>;
 }
 
 export interface CreateSessionOpts {
   taskId: string;
   taskTitle: string;
   slot: SessionSlot;
+  /** Defaults to 'repo'. A 'general' session skips all branch checkout. */
+  taskKind?: TaskKind;
+  /** Empty for general tasks. */
   repoPath: string;
+  /** Empty for general tasks. */
   branch: string;
   agentCli: AgentCLI;
   cwd?: string;
@@ -262,6 +297,8 @@ export interface CreateSessionOpts {
   usesWorktree?: boolean;
   bootstrapNotice?: string;
   sessionBootstrapScript: string;
+  agentPermissionMode?: AgentPermissionMode;
+  agentArgs?: Partial<Record<AgentCLI, string[]>>;
 }
 
 export interface AttachMetadata {
@@ -350,6 +387,7 @@ export type RPCMethod =
   | 'deleteSavedView'
   | 'openSession'
   | 'recreateSession'
+  | 'reconnectSession'
   | 'setDualSessionMode'
   | 'acknowledgeSessionAttention'
   | 'sendInput'
@@ -368,6 +406,9 @@ export type RPCMethod =
   | 'shutdownManagedOllama'
   | 'daemonStatus'
   | 'doctor'
+  | 'getArtifacts'
+  | 'refreshArtifacts'
+  | 'rolloutArtifact'
   | 'subscribe';
 
 // --------------- RPC param/result types ---------------------
@@ -415,10 +456,15 @@ export interface ReleaseMissionTaskToBoardParams {
 
 export interface CreateTaskParams {
   title: string;
-  repoId: string;
+  /** Defaults to 'repo'. A 'general' task takes no repoId. */
+  kind?: TaskKind;
+  /** Required for 'repo' tasks, ignored for 'general' ones. */
+  repoId?: string;
   agentCli?: AgentCLI;
   trackId?: string;
   pillarId?: string;
+  /** Defaults to 'local'. 'remote' requires the repo to have a remotePath. */
+  location?: TaskLocation;
 }
 export type CreateTaskResult = TaskRecord;
 
@@ -494,6 +540,7 @@ export interface UpdateRepoParams {
   ideCommand?: string;
   worktreeMode?: WorktreeMode;
   worktreeRoot?: string;
+  remotePath?: string | null;
 }
 export type UpdateRepoResult = RepoRecord;
 
@@ -516,6 +563,29 @@ export interface OpenSessionParams {
   slot?: SessionSlot;
 }
 export type OpenSessionResult = SessionRecord;
+
+export interface ReconnectSessionParams {
+  taskId: string;
+  slot?: SessionSlot;
+}
+
+/**
+ * What reconnect managed to do.
+ *
+ * 'attached'    — the remote session was still alive and is linked again.
+ * 'recreated'   — the host is up but its session was gone (a workspace stop
+ *                 kills the tmux server), so a fresh one was started.
+ * 'starting'    — the workspace was off; the build runs in the background and
+ *                 the board is patched once it lands.
+ * 'unreachable' — the host could not be reached and could not be started.
+ */
+export type ReconnectSessionState = 'attached' | 'recreated' | 'starting' | 'unreachable';
+
+export interface ReconnectSessionResult {
+  state: ReconnectSessionState;
+  message: string;
+  session?: SessionRecord;
+}
 
 export interface SetDualSessionModeParams {
   taskId: string;
@@ -705,6 +775,7 @@ export interface RepoConfig {
   ideCommand?: string;
   worktreeMode?: WorktreeMode;
   worktreeRoot?: string;
+  remotePath?: string;
 }
 
 export interface SavedViewConfig {
@@ -729,12 +800,127 @@ export interface TmuxConfig {
   layoutSessionName: string;
 }
 
+/** Where an artifact stands between production and its newest release candidate. */
+export type ArtifactStatus = 'in-sync' | 'drift' | 'no-ga' | 'unknown';
+
+export interface ArtifactRecord {
+  /** Full project id, e.g. com.wixpress.web5.ecom-integrations */
+  name: string;
+  /** Group prefix stripped, for the narrow rail. */
+  shortName: string;
+  /** Deployment mode reported by devex: LIVE, DEV, MAINTENANCE. */
+  mode?: string;
+  isArchived?: boolean;
+  /** Version currently in production. Absent for libraries and proto packages. */
+  gaVersion?: string;
+  latestRcVersion?: string;
+  /** How many versions the newest RC is ahead of GA. */
+  drift?: number;
+  status: ArtifactStatus;
+  repoUrl?: string;
+  pathInRepo?: string;
+  /** Release candidates built since the current GA. */
+  pendingRcCount?: number;
+  /**
+   * How many of those RCs were built from a commit you authored — the signal for
+   * "this one is waiting on me to roll it out". Undefined when ownership could
+   * not be determined, which is distinct from a confident zero.
+   */
+  myPendingCount?: number;
+}
+
+/** Exposure strategy for a production rollout. There is deliberately no immediate option. */
+export type RolloutGraduality = 'gradual_safer' | 'gradual_quicker';
+
+export interface RolloutArtifactParams {
+  /** Full project id. */
+  name: string;
+  /**
+   * Version to roll out. Sent explicitly rather than re-read server-side so the
+   * rollout is always the one the user actually saw and confirmed, even if a
+   * newer RC landed in between.
+   */
+  targetVersion: string;
+  graduality?: RolloutGraduality;
+}
+
+export interface RolloutArtifactResult {
+  ok: boolean;
+  transactionId?: string;
+  status?: string;
+  /** Human-readable outcome for the status bar. */
+  message: string;
+}
+
+export interface ArtifactsSnapshot {
+  artifacts: ArtifactRecord[];
+  /** Epoch ms of the last successful refresh; 0 before the first one. */
+  refreshedAt: number;
+  /** True when these rows could not be refreshed and may be out of date. */
+  stale: boolean;
+  /** True when the failure was an expired or missing MCP login. */
+  needsAuth?: boolean;
+  error?: string;
+}
+
+/** Artifacts rail configuration. */
+export interface ArtifactsConfig {
+  /** Full project ids to track. An empty list hides the rail. */
+  list: string[];
+  refreshIntervalMs?: number;
+  /** MCP endpoint serving the devex tools. */
+  mcpServerUrl?: string;
+  /**
+   * GitHub login used to decide which pending RCs are yours.
+   *
+   * Deliberately a GitHub login rather than a git email: commits here are
+   * authored under `<id>+<login>@users.noreply.github.com`, so matching on the
+   * local git email finds nothing at all. Resolved from `gh api user` when unset.
+   */
+  githubLogin?: string;
+}
+
+/** Connection details for the machine that hosts remote tasks. */
+export interface RemoteConfig {
+  sshHost: string;
+  connectTimeoutMs?: number;
+  commandTimeoutMs?: number;
+  /**
+   * Who can power the host on again. Absent means AgentBoard can reach the host
+   * or not, but can never start it — reconnect then requires a running host.
+   */
+  provider?: RemoteProviderKind;
+  /** Coder workspace as `owner/name`, e.g. `alice/dev-box`. Required for 'coder'. */
+  workspace?: string;
+  /** Path to the `coder` binary. Defaults to `coder` on PATH. */
+  coderBin?: string;
+  /** How long to wait for a workspace build to reach 'running'. */
+  startTimeoutMs?: number;
+}
+
+export type RemoteProviderKind = 'coder';
+
+/**
+ * Power state of the machine that hosts remote tasks.
+ *
+ * 'unknown' means the provider could not answer — a missing CLI, a hung control
+ * plane, an unparseable response. It is never treated as a failure: callers fall
+ * through to a plain SSH reachability probe, which is the authoritative signal.
+ */
+export type RemoteWorkspaceStatus = 'running' | 'stopped' | 'starting' | 'failed' | 'unknown';
+
 export interface AppConfig {
   sessionBackend: SessionBackendType;
   tmux: TmuxConfig;
   sessionBootstrapScript: string;
   pollIntervalMs: number;
   githubTokenEnvVar?: string;
+  remote?: RemoteConfig;
+  artifacts?: ArtifactsConfig;
+  /** Defaults to 'default'. 'bypass' skips the agent CLI's permission prompts. */
+  agentPermissionMode?: AgentPermissionMode;
+  /** Extra CLI arguments per agent, appended after any permission-mode flags. */
+  agentArgs?: Partial<Record<AgentCLI, string[]>>;
   aiChat: AIChatConfig;
   tracks: TrackConfig[];
   pillars: PillarConfig[];
@@ -752,5 +938,6 @@ export interface RepoOverlayConfig {
   ideCommand?: string;
   worktreeMode?: WorktreeMode;
   worktreeRoot?: string;
+  remotePath?: string;
   agentMacros?: AgentMacro[];
 }

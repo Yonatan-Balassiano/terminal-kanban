@@ -22,11 +22,61 @@ export interface ServiceContainer {
   view: import('../services/view.js').ViewService;
   events: import('../services/events.js').EventLogService;
   doctor: import('../services/doctor.js').DoctorService;
+  /** Absent when no artifacts are configured. */
+  artifacts?: import('../services/artifacts.js').ArtifactsService;
   aiChat: import('../services/ai-chat.js').AIChatService;
   ollama?: import('../services/ollama.js').ManagedOllamaService;
   db: import('../db/index.js').Db;
   dbPath: string;
   logError?: (message: string, error?: unknown) => void;
+}
+
+// --------------- Artifacts rail ------------------------------
+
+/** Default MCP endpoint serving the devex tools the rail reads. */
+const DEFAULT_MCP_SERVER_URL = 'https://mcp-s.wewix.net/mcp';
+
+/**
+ * Builds the artifacts service, or returns undefined when the rail is not
+ * configured.
+ *
+ * Constructing it never performs a login: the OAuth client only reads its cached
+ * token, and a missing one surfaces on the snapshot as `needsAuth` so the daemon
+ * starts normally whether or not the user has signed in.
+ */
+async function createArtifactsService(
+  cfg: import('../types/index.js').AppConfig,
+  dbPath: string
+): Promise<import('../services/artifacts.js').ArtifactsService | undefined> {
+  const list = cfg.artifacts?.list ?? [];
+  if (list.length === 0) {
+    return undefined;
+  }
+
+  const { McpOAuthClient } = await import('../services/mcp/oauth.js');
+  const { McpClient } = await import('../services/mcp/client.js');
+  const { ArtifactsService } = await import('../services/artifacts.js');
+
+  const { CommitOwnership, resolveGithubLogin } = await import('../services/commit-ownership.js');
+
+  // Ownership is optional: without a resolvable GitHub login the footer simply
+  // does not claim to know which pending RCs are yours.
+  const login = cfg.artifacts?.githubLogin ?? (await resolveGithubLogin());
+  const ownership = login ? new CommitOwnership({ login }) : undefined;
+
+  const serverUrl = cfg.artifacts?.mcpServerUrl ?? DEFAULT_MCP_SERVER_URL;
+  const auth = new McpOAuthClient({
+    serverUrl,
+    // Sits beside the database, which is already per-user state.
+    credentialsPath: path.join(path.dirname(dbPath), 'mcp-auth.json'),
+  });
+
+  return new ArtifactsService({
+    client: new McpClient({ serverUrl, auth }),
+    artifactNames: list,
+    refreshIntervalMs: cfg.artifacts?.refreshIntervalMs,
+    ownership,
+  });
 }
 
 // --------------- PID file helpers ---------------------------
@@ -366,6 +416,18 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     // Fall back to defaults when config loading fails.
   }
 
+  const { TransportRegistry } = await import('../services/transport/index.js');
+
+  const { createRemoteProvider } = await import('../services/remote/index.js');
+
+  // One registry for the whole daemon: the remote connection is created lazily,
+  // so a board with no remote tasks never opens an SSH connection.
+  const transports = new TransportRegistry(cfg.remote);
+
+  // Null unless a provider is configured; reconnect then works against a host
+  // that is already up, but cannot power one on.
+  const remoteProvider = createRemoteProvider(cfg.remote);
+
   const board = new BoardService(db);
   const missions = new MissionService(db, board);
   const workspace = new WorkspaceService(db);
@@ -373,9 +435,13 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const git = new GitService();
   const github = new GitHubService();
   const events = new EventLogService(db);
-  const doctor = new DoctorService(db, opts.socketPath);
+  const doctor = new DoctorService(db, opts.socketPath, cfg.remote);
+
+  // The artifacts rail is optional: with no configured list there is nothing to
+  // show, so no MCP client and no OAuth are created at all.
+  const artifacts = await createArtifactsService(cfg, opts.dbPath);
   const buffers = new TerminalBufferService();
-  const worktrees = new WorktreeService(db, board, git);
+  const worktrees = new WorktreeService(db, board, git, transports);
   const session = new SessionManager(
     db,
     board,
@@ -392,9 +458,22 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     },
     cfg.sessionBootstrapScript,
     cfg.sessionBackend,
+    transports,
+    cfg.agentPermissionMode,
+    cfg.agentArgs,
+    remoteProvider,
   );
-  const taskLifecycle = new TaskLifecycleService(db, board, git, session);
+  // A remote host can take minutes to wake, long after the reconnect RPC has
+  // answered. This is how the finished result reaches the board.
+  session.onSessionsChanged = () => {
+    serverEvents.emit('event', {
+      type: 'board_patch',
+      payload: view.getBoardSnapshot(),
+    });
+  };
+  const taskLifecycle = new TaskLifecycleService(db, board, git, session, transports);
   const sync = new SyncService(board, missions, github, git, db);
+  sync.transports = transports;
   sync.onTaskMergedOrClosed = (taskId) => taskLifecycle.cleanupTaskResources(taskId);
   const ollama = new ManagedOllamaService(cfg.aiChat);
   const aiChat = new AIChatService({
@@ -432,7 +511,16 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     board.moveTask({ id: task.id, trackId: 'pr' });
   }
   board.deleteTrack('review');
+
+  // Sessions outlive the daemon, but ones that died while it was down would
+  // otherwise keep status 'active' forever and block worktree cleanup on
+  // archive. Reconciling here settles them once, off the startup path.
+  void session.reconcile().catch(() => {
+    // A backend that cannot answer right now is retried on the next start.
+  });
+
   sync.start(pollIntervalMs);
+  artifacts?.start();
 
   // ---- Fan sync events to server subscribers -----------------
   sync.syncEvent.on('sync', (event: unknown) => {
@@ -475,6 +563,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     view,
     events,
     doctor,
+    artifacts,
     aiChat,
     ollama,
   };

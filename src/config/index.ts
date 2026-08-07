@@ -20,7 +20,7 @@ import type {
 // Zod schemas
 // ============================================================
 
-const SessionBackendTypeSchema = z.enum(['tmux', 'pty'] as const);
+const SessionBackendTypeSchema = z.enum(['tmux', 'pty', 'ssh'] as const);
 const ThemeModeSchema = z.enum(['truecolor', '256color', 'monochrome'] as const);
 const themeModes = new Set(['truecolor', '256color', 'monochrome']);
 const WorktreeModeSchema = z.enum(['off', 'auto', 'always'] as const);
@@ -64,7 +64,34 @@ const RepoConfigSchema = z.object({
   ideCommand: z.string().optional(),
   worktreeMode: WorktreeModeSchema.optional(),
   worktreeRoot: z.string().optional(),
+  remotePath: z.string().optional(),
 });
+
+/** Artifacts rail: which projects to track and how often to refresh them. */
+const ArtifactsConfigSchema = z.object({
+  list: z.array(z.string().min(1)),
+  refreshIntervalMs: z.number().int().positive().optional(),
+  mcpServerUrl: z.string().url().optional(),
+  githubLogin: z.string().min(1).optional(),
+});
+
+/** Connection details for the machine that hosts remote tasks. */
+const RemoteConfigSchema = z
+  .object({
+    sshHost: z.string().min(1),
+    connectTimeoutMs: z.number().int().positive().optional(),
+    commandTimeoutMs: z.number().int().positive().optional(),
+    provider: z.literal('coder').optional(),
+    workspace: z.string().min(1).optional(),
+    coderBin: z.string().min(1).optional(),
+    startTimeoutMs: z.number().int().positive().optional(),
+  })
+  // A provider with no workspace can never name what to start, and the failure
+  // would only surface on the first reconnect. Reject it at load time instead.
+  .refine((remote) => remote.provider !== 'coder' || Boolean(remote.workspace), {
+    message: 'remote.workspace is required when remote.provider is "coder" (e.g. "owner/name")',
+    path: ['workspace'],
+  });
 
 const SavedViewConfigSchema = z.object({
   id: z.string(),
@@ -109,6 +136,15 @@ export const AppConfigSchema = z
     sessionBootstrapScript: z.string(),
     pollIntervalMs: z.number().int().positive(),
     githubTokenEnvVar: z.string().optional(),
+    remote: RemoteConfigSchema.optional(),
+    artifacts: ArtifactsConfigSchema.optional(),
+    agentPermissionMode: z.enum(['default', 'bypass'] as const).optional(),
+    agentArgs: z
+      .object({
+        claude: z.array(z.string()).optional(),
+        codex: z.array(z.string()).optional(),
+      })
+      .optional(),
     aiChat: AIChatConfigSchema,
     tracks: z.array(TrackConfigSchema),
     pillars: z.array(PillarConfigSchema),
@@ -137,6 +173,7 @@ export const RepoOverlayConfigSchema = z
     ideCommand: z.string().optional(),
     worktreeMode: WorktreeModeSchema.optional(),
     worktreeRoot: z.string().optional(),
+    remotePath: z.string().optional(),
     agentMacros: z.array(AgentMacroSchema).optional(),
   })
   .strict()
@@ -207,6 +244,8 @@ export interface ConfigPaths {
   dbFile: string;
   logFile: string;
   socketPath: string;
+  /** OAuth tokens for the MCP server backing the artifacts rail. */
+  mcpCredentialsFile: string;
 }
 
 export function configPaths(): ConfigPaths {
@@ -240,6 +279,7 @@ export function configPaths(): ConfigPaths {
     dbFile: path.join(stateDir, 'agentboard.db'),
     logFile: path.join(stateDir, 'agentboard.log'),
     socketPath,
+    mcpCredentialsFile: path.join(stateDir, 'mcp-auth.json'),
   };
 }
 

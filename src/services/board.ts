@@ -16,6 +16,8 @@ import type {
   GitHubSyncStatus,
   ThemeMode,
   GitState,
+  TaskKind,
+  TaskLocation,
   TaskSyncPatch,
 } from '../types/index.js';
 import { createTaskBranchName, renameTaskBranchName } from './branch-name.js';
@@ -27,8 +29,10 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     id: row['id'] as string,
     title: row['title'] as string,
     description: (row['description'] as string | null) ?? undefined,
-    repoId: row['repo_id'] as string,
+    kind: (row['kind'] as TaskKind | null) ?? 'repo',
+    repoId: (row['repo_id'] as string | null) ?? undefined,
     agentCli: (row['agent_cli'] as 'claude' | 'codex' | null) ?? 'claude',
+    location: (row['location'] as TaskLocation | null) ?? 'local',
     trackId: row['track_id'] as string,
     pillarId: (row['pillar_id'] as string | null) ?? undefined,
     labels: [],
@@ -164,8 +168,16 @@ export class BoardService {
     const id = generateId();
     const now = Date.now();
     const trackId = params.trackId ?? 'backlog';
-    const branchName = createTaskBranchName(params.title);
+    // Normalized rather than trusted: this runs on whatever the RPC layer hands over.
+    const kind: TaskKind = params.kind === 'general' ? 'general' : 'repo';
+    const isGeneral = kind === 'general';
+    if (!isGeneral && !params.repoId) {
+      throw new Error('createTask requires a repoId for repo tasks');
+    }
+    // A general task has nothing to branch from and nowhere to run remotely.
+    const branchName = isGeneral ? null : createTaskBranchName(params.title);
     const agentCli = params.agentCli ?? 'claude';
+    const location = isGeneral ? 'local' : (params.location ?? 'local');
 
     // Compute next sortKey = max existing + 1000 (or 1000 if track is empty)
     const maxRow = this.db
@@ -178,17 +190,19 @@ export class BoardService {
     this.db
       .prepare<unknown[], void>(
         `INSERT INTO tasks
-           (id, title, repo_id, agent_cli, track_id, pillar_id, branch_name, sort_key,
+           (id, title, kind, repo_id, agent_cli, location, track_id, pillar_id, branch_name, sort_key,
             pr_state, pr_draft, ci_state, review_state, unresolved_thread_count,
             github_sync_status, ci_required_total, ci_required_passed, ci_required_failed,
             ci_required_pending, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
       )
       .run(
         id,
         params.title,
-        params.repoId,
+        kind,
+        isGeneral ? null : params.repoId!,
         agentCli,
+        location,
         trackId,
         params.pillarId ?? null,
         branchName,
@@ -204,13 +218,24 @@ export class BoardService {
     const current = this.db
       .prepare<
         [string],
-        { branch_name: string | null; session_id: string | null; secondary_session_id: string | null }
+        {
+          kind: string | null;
+          branch_name: string | null;
+          session_id: string | null;
+          secondary_session_id: string | null;
+        }
       >(
-        'SELECT branch_name, session_id, secondary_session_id FROM tasks WHERE id = ?',
+        'SELECT kind, branch_name, session_id, secondary_session_id FROM tasks WHERE id = ?',
       )
       .get(id);
 
-    if (current && current.session_id == null && current.secondary_session_id == null) {
+    // A general task has no branch to follow the rename.
+    if (
+      current &&
+      current.kind !== 'general' &&
+      current.session_id == null &&
+      current.secondary_session_id == null
+    ) {
       this.db
         .prepare<[string, string, number, string], void>(
           'UPDATE tasks SET title = ?, branch_name = ?, updated_at = ? WHERE id = ?',
