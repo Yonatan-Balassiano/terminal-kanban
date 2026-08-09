@@ -11,6 +11,7 @@ import type {
   TaskLocation,
   GetBufferResult,
   ReconnectSessionResult,
+  CreateSessionOpts,
 } from '../types/index.js';
 import type { Db } from '../db/index.js';
 import type { BoardService } from './board.js';
@@ -29,6 +30,7 @@ import type { TerminalBufferService } from './terminal-buffer.js';
 import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
 import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
+import type { SessionWorkspaceEntry } from './session-bootstrap.js';
 import {
   deriveFallbackSessionActivity,
   deriveSessionActivity,
@@ -83,6 +85,29 @@ function isGeneralTaskRow(task: Pick<TaskRow, 'kind'>): boolean {
 
 interface PreparedSessionWorkspace extends TaskWorkspaceInfo {
   bootstrapNotice?: string;
+}
+
+/**
+ * The checkout map handed to the agent, or undefined when there is nothing worth
+ * showing.
+ *
+ * A card with a single checkout already starts the session inside it, so a
+ * one-row banner would be noise; undefined also covers the case where the
+ * workspace could not be resolved at all.
+ */
+function sessionWorkspaceEntries(
+  workspace: PreparedSessionWorkspace
+): SessionWorkspaceEntry[] | undefined {
+  const resolved = workspace.workspaces ?? [];
+  if (resolved.length < 2) {
+    return undefined;
+  }
+
+  return resolved.map((plan) => ({
+    label: plan.repoLabel,
+    branch: plan.branch,
+    path: plan.worktreePath ?? plan.repoPath,
+  }));
 }
 
 export interface InspectSessionStateResult {
@@ -321,6 +346,18 @@ export class SessionManager {
     await this.board.setTaskBranch?.(session.taskId, branch);
   }
 
+  /** How many repo + branch pairs the card spans. */
+  private taskBranchCount(taskId: string): number {
+    return (
+      this.db
+        .prepare<
+          [string],
+          { count: number }
+        >('SELECT COUNT(*) AS count FROM task_branches WHERE task_id = ?')
+        .get(taskId)?.count ?? 0
+    );
+  }
+
   private persistSessionBranch(sessionId: string, branch: string): void {
     this.db
       .prepare<
@@ -447,10 +484,17 @@ export class SessionManager {
                 : existing.branch && existing.branch !== currentBranch
                   ? existing.branch
                   : undefined;
+            // A worktree's branch is fixed when the worktree is created, so the
+            // checkout ensureSessionBranch runs is at best a no-op there. On a
+            // card that spans several branches it is actively harmful: each
+            // branch has its own worktree, and the checkout would drag whichever
+            // one the session sits in onto another branch's name.
+            const spansSeveralBranches = this.taskBranchCount(taskId) > 1;
             const shouldResetBranch =
-              previousBranch !== undefined ||
-              existing.branch == null ||
-              existing.branch !== currentBranch;
+              !spansSeveralBranches &&
+              (previousBranch !== undefined ||
+                existing.branch == null ||
+                existing.branch !== currentBranch);
             if (shouldResetBranch) {
               await this.ensureSessionBranch(
                 existing,
@@ -492,7 +536,10 @@ export class SessionManager {
     const taskRepoPath = this.repoPathForTask(taskRow, repoRow);
     const workspace = await this.prepareWorkspaceForSession(taskId, taskRepoPath);
 
-    const createdSession = await backend.create({
+    // `workspaces` rides alongside the shared CreateSessionOpts rather than in
+    // it: the backends forward the map to the bootstrap builder, and the shared
+    // contract gains the field in the same change that teaches them to.
+    const createOpts: CreateSessionOpts & { workspaces?: SessionWorkspaceEntry[] } = {
       taskId,
       taskTitle: taskRow.title,
       slot,
@@ -507,7 +554,9 @@ export class SessionManager {
       sessionBootstrapScript: this.sessionBootstrapScript,
       agentPermissionMode: this.agentPermissionMode,
       agentArgs: this.agentArgs,
-    });
+      workspaces: sessionWorkspaceEntries(workspace),
+    };
+    const createdSession = await backend.create(createOpts);
     const sessionRecord: SessionRecord = {
       ...createdSession,
       taskId,

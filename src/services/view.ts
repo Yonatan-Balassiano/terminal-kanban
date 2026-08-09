@@ -1,9 +1,24 @@
-import type { BoardSnapshot, FilterModel, TaskRecord } from '../types/index.js';
+import type {
+  BoardSnapshot,
+  FilterModel,
+  TaskRecord,
+  TaskReleaseSummary,
+} from '../types/index.js';
 import type { BoardService } from './board.js';
 import type { MissionService } from './missions.js';
 import { rowToRepo } from './workspace.js';
 
 export class ViewService {
+  /**
+   * Where each card's merged work has got to on its way to production.
+   *
+   * Assigned after construction because release tracking depends on the
+   * artifacts rail, which is optional and built later. Absent means the daemon
+   * cannot answer the question at all, which is different from a card having
+   * nothing to report.
+   */
+  releaseSummaryFor?: (taskId: string) => TaskReleaseSummary | null;
+
   constructor(
     private board: BoardService,
     private missions: MissionService,
@@ -79,6 +94,18 @@ export class ViewService {
     let tasks = this.board.getTasks({ repoId, includeArchived: filter?.includeArchived });
     if (filter) {
       tasks = this.applyFilter(tasks, filter);
+    }
+
+    const releaseSummaryFor = this.releaseSummaryFor;
+    if (releaseSummaryFor) {
+      // Only merged work can have shipped, so nothing else is worth a lookup.
+      tasks = tasks.map((task) => {
+        if (task.prState !== 'merged') {
+          return task;
+        }
+        const release = releaseSummaryFor(task.id);
+        return release ? { ...task, release } : task;
+      });
     }
 
     // Tracks come from the DB via a separate query — build directly here

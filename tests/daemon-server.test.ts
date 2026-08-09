@@ -1,13 +1,50 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatch, serverEvents, shouldForwardEventToSubscriber } from '../src/daemon/server.js';
-import type { RepoRecord, TaskRecord } from '../src/types/index.js';
+import type { RepoRecord, TaskBranchRecord, TaskRecord } from '../src/types/index.js';
+
+/**
+ * A branch that is ready to merge: open PR, green build, approved.
+ *
+ * Tests that care about a guard override exactly the field under test, so a
+ * failure names the guard rather than a missing fixture field.
+ */
+function makeBranch(patch: Partial<TaskBranchRecord> = {}): TaskBranchRecord {
+  return {
+    id: 'branch-1',
+    taskId: 'task-1',
+    repoId: 'repo-1',
+    branchName: 'ab/task-1',
+    sortKey: 0,
+    prNumber: 42,
+    prState: 'open',
+    prDraft: false,
+    ciState: 'passed',
+    ciRequiredTotal: 1,
+    ciRequiredPassed: 1,
+    ciRequiredFailed: 0,
+    ciRequiredPending: 0,
+    reviewState: 'approved',
+    unresolvedThreadCount: 0,
+    gitState: 'clean',
+    gitAheadCount: 0,
+    gitBehindCount: 0,
+    hasUntracked: false,
+    hasConflicts: false,
+    githubSyncStatus: 'ok',
+    createdAt: 1,
+    updatedAt: 1,
+    ...patch,
+  };
+}
 
 function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
   return {
     id: 'task-1',
     title: 'My task',
+    kind: 'repo',
     repoId: 'repo-1',
     agentCli: 'claude',
+    location: 'local',
     trackId: 'in-progress',
     labels: [],
     branchName: 'ab/task-1',
@@ -16,14 +53,26 @@ function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
     prState: 'open',
     prDraft: false,
     ciState: 'passed',
+    ciRequiredTotal: 1,
+    ciRequiredPassed: 1,
+    ciRequiredFailed: 0,
+    ciRequiredPending: 0,
     gitState: 'clean',
     gitAheadCount: 0,
     gitBehindCount: 0,
     hasUntracked: false,
     hasConflicts: false,
+    githubSyncStatus: 'ok',
     sessionAttentionNeeded: false,
     reviewState: 'approved',
     unresolvedThreadCount: 0,
+    // A card always has at least the branch createTask seeded it with; the
+    // card-scoped handlers resolve their pull request out of this list.
+    branches: [makeBranch()],
+    activeBranchId: 'branch-1',
+    prCount: 1,
+    prOpenCount: 1,
+    prMergedCount: 0,
     createdAt: 1,
     updatedAt: 1,
     ...patch,
@@ -303,7 +352,7 @@ describe('daemon mergeTaskPR dispatch', () => {
       resolveTrigger = resolve;
     });
 
-    const updateTaskSync = vi.fn();
+    const updateTaskBranchSync = vi.fn();
     const moveTask = vi.fn();
     const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
     const mergePR = vi.fn().mockResolvedValue(undefined);
@@ -322,7 +371,7 @@ describe('daemon mergeTaskPR dispatch', () => {
       {
         board: {
           getTask: vi.fn().mockReturnValue(makeTask()),
-          updateTaskSync,
+          updateTaskBranchSync,
           moveTask,
         },
         workspace: {
@@ -348,7 +397,7 @@ describe('daemon mergeTaskPR dispatch', () => {
       githubRepo: 'org/proj',
       prNumber: 42,
     });
-    expect(updateTaskSync).toHaveBeenCalledWith('task-1', {
+    expect(updateTaskBranchSync).toHaveBeenCalledWith('branch-1', {
       prState: 'merged',
       prDraft: false,
     });
@@ -617,5 +666,583 @@ describe('daemon acknowledgeSessionAttention dispatch', () => {
       type: 'board_patch',
       payload: { tasks: [{ id: 'task-1', sessionAttentionNeeded: false }] },
     });
+  });
+});
+
+describe('daemon addTaskBranch dispatch', () => {
+  it('defaults the branch name to the one the card already works under', async () => {
+    // Arrange
+    const addTaskBranch = vi.fn().mockReturnValue(makeBranch({ id: 'branch-2', repoId: 'repo-2' }));
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+    const trigger = vi.fn().mockResolvedValue(undefined);
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-add-branch',
+        method: 'addTaskBranch',
+        params: { taskId: 'task-1', repoId: 'repo-2' },
+      },
+      {
+        board: { getTask: vi.fn().mockReturnValue(makeTask()), addTaskBranch },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo({ id: 'repo-2' })) },
+        view: { getBoardSnapshot },
+        sync: { trigger },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(addTaskBranch).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      repoId: 'repo-2',
+      branchName: 'ab/task-1',
+    });
+    expect(response).toEqual({ id: 'req-add-branch', result: { tasks: [] } });
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a repo the workspace does not know', async () => {
+    // Arrange
+    const addTaskBranch = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-add-unknown-repo',
+        method: 'addTaskBranch',
+        params: { taskId: 'task-1', repoId: 'repo-ghost' },
+      },
+      {
+        board: { getTask: vi.fn().mockReturnValue(makeTask()), addTaskBranch },
+        workspace: { getRepo: vi.fn().mockReturnValue(undefined) },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(addTaskBranch).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe('Repo not found: repo-ghost');
+  });
+});
+
+describe('daemon removeTaskBranch dispatch', () => {
+  it('refuses to remove a branch whose PR is merged, so the card cannot look complete while losing shipped work', async () => {
+    // Arrange
+    const merged = makeBranch({ id: 'branch-2', prState: 'merged', worktreePath: '/wt/2' });
+    const removeTaskBranch = vi.fn();
+    const removeWorktreeAsync = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-remove-merged',
+        method: 'removeTaskBranch',
+        params: { taskId: 'task-1', branchId: 'branch-2' },
+      },
+      {
+        board: { getTaskBranch: vi.fn().mockReturnValue(merged), removeTaskBranch },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo()) },
+        git: { removeWorktreeAsync },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(removeTaskBranch).not.toHaveBeenCalled();
+    expect(removeWorktreeAsync).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe(
+      'Branch ab/task-1 has a merged pull request and cannot be removed',
+    );
+  });
+
+  it('releases the worktree before dropping an unmerged branch', async () => {
+    // Arrange
+    const branch = makeBranch({ id: 'branch-2', prState: 'open', worktreePath: '/wt/2' });
+    const removeTaskBranch = vi.fn();
+    // Removal goes through the lifecycle service because only that path runs on
+    // the card's own host; doing it locally would leak every remote worktree.
+    const removeBranchWorktree = vi.fn().mockResolvedValue(true);
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-remove-branch',
+        method: 'removeTaskBranch',
+        params: { taskId: 'task-1', branchId: 'branch-2' },
+      },
+      {
+        board: {
+          getTaskBranch: vi.fn().mockReturnValue(branch),
+          getTaskBranches: vi.fn().mockReturnValue([makeBranch(), branch]),
+          removeTaskBranch,
+        },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo()) },
+        taskLifecycle: { removeBranchWorktree },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(removeBranchWorktree).toHaveBeenCalledWith('branch-2');
+    expect(removeTaskBranch).toHaveBeenCalledWith('branch-2');
+    expect(response).toEqual({ id: 'req-remove-branch', result: { tasks: [] } });
+  });
+
+  it('refuses to remove a card\u2019s only branch, which would freeze its state', async () => {
+    // Arrange — with no branches left there is nothing to derive the card from,
+    // so its PR and check columns would keep painting work that is gone.
+    const branch = makeBranch({ id: 'branch-1', prState: 'open', worktreePath: '/wt/1' });
+    const removeTaskBranch = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-remove-last',
+        method: 'removeTaskBranch',
+        params: { taskId: 'task-1', branchId: 'branch-1' },
+      },
+      {
+        board: {
+          getTaskBranch: vi.fn().mockReturnValue(branch),
+          getTaskBranches: vi.fn().mockReturnValue([branch]),
+          removeTaskBranch,
+        },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(removeTaskBranch).not.toHaveBeenCalled();
+    expect(response.error?.message).toContain('only branch');
+  });
+
+  it('keeps the branch when its worktree could not be removed, rather than orphaning it', async () => {
+    // Arrange — the row is the only record of where the worktree is. Dropping
+    // it after a failed removal leaves a directory nobody can find again, and
+    // reports that as success.
+    const branch = makeBranch({ id: 'branch-2', prState: 'open', worktreePath: '/wt/2' });
+    const removeTaskBranch = vi.fn();
+    const removeBranchWorktree = vi.fn().mockResolvedValue(false);
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-remove-broken',
+        method: 'removeTaskBranch',
+        params: { taskId: 'task-1', branchId: 'branch-2' },
+      },
+      {
+        board: {
+          getTaskBranch: vi.fn().mockReturnValue(branch),
+          getTaskBranches: vi.fn().mockReturnValue([makeBranch(), branch]),
+          removeTaskBranch,
+        },
+        taskLifecycle: { removeBranchWorktree },
+        view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [] }) },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(removeTaskBranch).not.toHaveBeenCalled();
+    expect(response.error?.message).toContain('/wt/2');
+  });
+
+  it('refuses a branch id belonging to another card', async () => {
+    // Arrange
+    const foreign = makeBranch({ id: 'branch-9', taskId: 'task-other' });
+    const removeTaskBranch = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-remove-foreign',
+        method: 'removeTaskBranch',
+        params: { taskId: 'task-1', branchId: 'branch-9' },
+      },
+      {
+        board: { getTaskBranch: vi.fn().mockReturnValue(foreign), removeTaskBranch },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(removeTaskBranch).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe('Branch branch-9 does not belong to task task-1');
+  });
+});
+
+describe('daemon setActiveTaskBranch dispatch', () => {
+  it('hands the mirroring to the board so the card cannot pair one repo with another\u2019s branch', async () => {
+    // Arrange — repo, branch name and worktree have to move together. Writing
+    // them separately is how a cross-repo card ended up with repo-1's id and
+    // repo-2's branch, and a session built from the wrong base branch.
+    const branch = makeBranch({
+      id: 'branch-2',
+      branchName: 'ab/task-1-api',
+      worktreePath: '/wt/api',
+    });
+    const setActiveTaskBranch = vi.fn();
+    const setTaskBranch = vi.fn();
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-set-active',
+        method: 'setActiveTaskBranch',
+        params: { taskId: 'task-1', branchId: 'branch-2' },
+      },
+      {
+        board: {
+          getTaskBranch: vi.fn().mockReturnValue(branch),
+          setActiveTaskBranch,
+          setTaskBranch,
+        },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(setActiveTaskBranch).toHaveBeenCalledWith('task-1', 'branch-2');
+    expect(setTaskBranch).not.toHaveBeenCalled();
+    expect(response).toEqual({ id: 'req-set-active', result: { tasks: [] } });
+  });
+
+  it('works from a branch id alone, which is all the caller has', async () => {
+    // Arrange — a branch id identifies a branch on its own. Requiring taskId
+    // made every branch-scoped action fail against the real client, which sends
+    // only the branch it acted on; the tests missed it by always passing both.
+    const branch = makeBranch({ id: 'branch-2', branchName: 'ab/task-1-api' });
+    const setActiveTaskBranch = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-set-active-no-task',
+        method: 'setActiveTaskBranch',
+        params: { branchId: 'branch-2' },
+      },
+      {
+        board: {
+          getTaskBranch: vi.fn().mockReturnValue(branch),
+          setActiveTaskBranch,
+        },
+        view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [] }) },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(response.error).toBeUndefined();
+    expect(setActiveTaskBranch).toHaveBeenCalledWith('task-1', 'branch-2');
+  });
+});
+
+describe('daemon mergeTaskBranchPR dispatch', () => {
+  it('merges only the named branch of a three-branch card and leaves the card off the done track', async () => {
+    // Arrange
+    const branches = [
+      makeBranch({ id: 'branch-1', branchName: 'ab/api', prNumber: 1 }),
+      makeBranch({ id: 'branch-2', branchName: 'ab/web', prNumber: 2, repoId: 'repo-2' }),
+      makeBranch({ id: 'branch-3', branchName: 'ab/docs', prNumber: 3, repoId: 'repo-3' }),
+    ];
+    const task = makeTask({ branches, prCount: 3, prOpenCount: 3 });
+    const updateTaskBranchSync = vi.fn();
+    const updateTaskSync = vi.fn();
+    const moveTask = vi.fn();
+    const mergePR = vi.fn().mockResolvedValue(undefined);
+    const reconcileTaskCompletion = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-merge-branch',
+        method: 'mergeTaskBranchPR',
+        params: { taskId: 'task-1', branchId: 'branch-2' },
+      },
+      {
+        board: {
+          getTask: vi.fn().mockReturnValue(task),
+          getTaskBranch: vi.fn().mockReturnValue(branches[1]),
+          updateTaskBranchSync,
+          updateTaskSync,
+          moveTask,
+        },
+        workspace: {
+          getRepo: vi.fn().mockReturnValue(
+            makeRepo({ id: 'repo-2', path: '/repo2', githubOwner: 'org', githubRepo: 'web' }),
+          ),
+        },
+        github: { mergePR },
+        missions: { reconcileTaskCompletion },
+        sync: { trigger: vi.fn().mockResolvedValue(undefined) },
+        view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [task] }) },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(response).toEqual({ id: 'req-merge-branch', result: { merged: true } });
+    expect(mergePR).toHaveBeenCalledWith('/repo2', { githubRepo: 'org/web', prNumber: 2 });
+    expect(updateTaskBranchSync).toHaveBeenCalledWith('branch-2', {
+      prState: 'merged',
+      prDraft: false,
+    });
+    // The card still has two open pull requests, so it is not done.
+    expect(moveTask).not.toHaveBeenCalled();
+    expect(updateTaskSync).not.toHaveBeenCalled();
+    expect(reconcileTaskCompletion).not.toHaveBeenCalled();
+  });
+
+  it('reads the merge guards from the branch, not the card rollup', async () => {
+    // Arrange — the card rolls up as green, but this branch's build is failing.
+    const failing = makeBranch({ id: 'branch-2', branchName: 'ab/web', ciState: 'failed' });
+    const mergePR = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-merge-red-branch',
+        method: 'mergeTaskBranchPR',
+        params: { taskId: 'task-1', branchId: 'branch-2' },
+      },
+      {
+        board: {
+          getTask: vi.fn().mockReturnValue(makeTask()),
+          getTaskBranch: vi.fn().mockReturnValue(failing),
+        },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo()) },
+        github: { mergePR },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(mergePR).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe('Branch ab/web build has not passed');
+  });
+});
+
+describe('daemon commentTaskBranchPR dispatch', () => {
+  it('comments on the named branch of a multi-branch card', async () => {
+    // Arrange
+    const branch = makeBranch({ id: 'branch-2', branchName: 'ab/web', prNumber: 2, repoId: 'repo-2' });
+    const commentPR = vi.fn().mockResolvedValue(undefined);
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-comment-branch',
+        method: 'commentTaskBranchPR',
+        params: { taskId: 'task-1', branchId: 'branch-2', body: 'ship it' },
+      },
+      {
+        board: { getTaskBranch: vi.fn().mockReturnValue(branch) },
+        workspace: {
+          getRepo: vi.fn().mockReturnValue(
+            makeRepo({ id: 'repo-2', path: '/repo2', githubOwner: 'org', githubRepo: 'web' }),
+          ),
+        },
+        github: { commentPR },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(commentPR).toHaveBeenCalledWith('/repo2', {
+      githubRepo: 'org/web',
+      prNumber: 2,
+      body: 'ship it',
+    });
+    expect(response).toEqual({ id: 'req-comment-branch', result: { commented: true } });
+  });
+
+  it('rejects an empty comment body', async () => {
+    // Arrange
+    const commentPR = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-comment-empty',
+        method: 'commentTaskBranchPR',
+        params: { taskId: 'task-1', branchId: 'branch-1', body: '   ' },
+      },
+      {
+        board: { getTaskBranch: vi.fn().mockReturnValue(makeBranch()) },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo()) },
+        github: { commentPR },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(commentPR).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe('PR comment body cannot be empty');
+  });
+});
+
+describe('legacy card-scoped PR shims', () => {
+  it('mergeTaskPR refuses a multi-branch card instead of merging an arbitrary PR', async () => {
+    // Arrange
+    const task = makeTask({
+      branches: [
+        makeBranch({ id: 'branch-1', branchName: 'ab/api', prNumber: 1 }),
+        makeBranch({ id: 'branch-2', branchName: 'ab/web', prNumber: 2 }),
+      ],
+      // Mirrors the real rollup: no honest single PR once there are several.
+      prNumber: undefined,
+      prCount: 2,
+      prOpenCount: 2,
+    });
+    const mergePR = vi.fn();
+    const moveTask = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-merge-ambiguous',
+        method: 'mergeTaskPR',
+        params: { taskId: 'task-1' },
+      },
+      {
+        board: { getTask: vi.fn().mockReturnValue(task), moveTask },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo()) },
+        github: { mergePR },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(mergePR).not.toHaveBeenCalled();
+    expect(moveTask).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe(
+      'This card has 2 pull requests — choose one: #1 (ab/api), #2 (ab/web)',
+    );
+  });
+
+  it('commentTaskPR refuses a multi-branch card instead of commenting on an arbitrary PR', async () => {
+    // Arrange
+    const task = makeTask({
+      branches: [
+        makeBranch({ id: 'branch-1', branchName: 'ab/api', prNumber: 1 }),
+        makeBranch({ id: 'branch-2', branchName: 'ab/web', prNumber: 2 }),
+      ],
+      prNumber: undefined,
+      prCount: 2,
+    });
+    const commentPR = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-comment-ambiguous',
+        method: 'commentTaskPR',
+        params: { taskId: 'task-1', body: 'which one?' },
+      },
+      {
+        board: { getTask: vi.fn().mockReturnValue(task) },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo()) },
+        github: { commentPR },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(commentPR).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe(
+      'This card has 2 pull requests — choose one: #1 (ab/api), #2 (ab/web)',
+    );
+  });
+
+  it('mergeTaskPR still closes a single-branch card', async () => {
+    // Arrange
+    const updateTaskBranchSync = vi.fn();
+    const moveTask = vi.fn();
+    const reconcileTaskCompletion = vi.fn();
+    const mergePR = vi.fn().mockResolvedValue(undefined);
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-merge-single',
+        method: 'mergeTaskPR',
+        params: { taskId: 'task-1' },
+      },
+      {
+        board: {
+          getTask: vi.fn().mockReturnValue(makeTask()),
+          updateTaskBranchSync,
+          moveTask,
+        },
+        workspace: {
+          getRepo: vi.fn().mockReturnValue(
+            makeRepo({ githubOwner: 'org', githubRepo: 'proj' }),
+          ),
+        },
+        github: { mergePR },
+        missions: { reconcileTaskCompletion },
+        sync: { trigger: vi.fn().mockResolvedValue(undefined) },
+        view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [] }) },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(response).toEqual({ id: 'req-merge-single', result: { merged: true } });
+    expect(mergePR).toHaveBeenCalledWith('/repo', { githubRepo: 'org/proj', prNumber: 42 });
+    expect(updateTaskBranchSync).toHaveBeenCalledWith('branch-1', {
+      prState: 'merged',
+      prDraft: false,
+    });
+    expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
+    expect(reconcileTaskCompletion).toHaveBeenCalledWith('task-1');
+  });
+
+  it('mergeTaskPR merges the only PR on a card whose other branches carry none', async () => {
+    // Arrange — extra branches without pull requests leave "the card's PR"
+    // unambiguous, so the shim must not refuse.
+    const task = makeTask({
+      branches: [
+        makeBranch({ id: 'branch-1', branchName: 'ab/api', prNumber: 7 }),
+        makeBranch({ id: 'branch-2', branchName: 'ab/web', prNumber: undefined, prState: 'none' }),
+      ],
+      prNumber: undefined,
+      prCount: 1,
+    });
+    const mergePR = vi.fn().mockResolvedValue(undefined);
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-merge-one-pr',
+        method: 'mergeTaskPR',
+        params: { taskId: 'task-1' },
+      },
+      {
+        board: {
+          getTask: vi.fn().mockReturnValue(task),
+          updateTaskBranchSync: vi.fn(),
+          moveTask: vi.fn(),
+        },
+        workspace: {
+          getRepo: vi.fn().mockReturnValue(makeRepo({ githubOwner: 'org', githubRepo: 'proj' })),
+        },
+        github: { mergePR },
+        missions: { reconcileTaskCompletion: vi.fn() },
+        sync: { trigger: vi.fn().mockResolvedValue(undefined) },
+        view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [] }) },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(mergePR).toHaveBeenCalledWith('/repo', { githubRepo: 'org/proj', prNumber: 7 });
+    expect(response).toEqual({ id: 'req-merge-one-pr', result: { merged: true } });
   });
 });

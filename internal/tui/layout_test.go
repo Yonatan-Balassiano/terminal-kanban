@@ -1537,3 +1537,163 @@ func TestRenderOverviewBoardWithoutReposOrGeneralTasksAsksForARepo(t *testing.T)
 		t.Fatalf("overview = %q, want the register-a-repo hint", plain)
 	}
 }
+
+// taskCardHeightForWidth is a hand-maintained mirror of renderTaskCardWithWidth
+// and feeds visibleWindow. When the two disagree, column scrolling drifts with
+// no error anywhere — so the mirror is pinned at every branch count that changes
+// the card's shape.
+func TestTaskCardHeightMatchesRenderedCardForEveryBranchCount(t *testing.T) {
+	branchesFor := func(count int) []TaskBranchRecord {
+		branches := []TaskBranchRecord{}
+		for index := 0; index < count; index++ {
+			branches = append(branches, TaskBranchRecord{
+				ID:         string(rune('a' + index)),
+				RepoID:     "repo-1",
+				BranchName: "feat/part-" + string(rune('a'+index)),
+				PRNumber:   intPtr(index + 1),
+				PRState:    "open",
+			})
+		}
+		return branches
+	}
+
+	// Every field that adds a line to the card, in the combinations that
+	// actually change its shape. A single fixture would pin one arithmetic path
+	// and leave the others free to drift.
+	shapes := []struct {
+		name        string
+		title       string
+		description string
+		attention   bool
+		prState     PRState
+	}{
+		{name: "short title, no description", title: "Ship it"},
+		{name: "wrapping title", title: "Split the assistant across every repository it touches"},
+		{name: "with description", title: "Ship it", description: "Three services and a proto package"},
+		{
+			name:        "wrapping title and wrapping description",
+			title:       "Split the assistant across every repository it touches",
+			description: "Three services, a proto package, and the back office page that reads them",
+		},
+		{name: "attention needed", title: "Ship it", attention: true},
+		{name: "merged card", title: "Ship it", prState: "merged"},
+		{name: "no pull request yet", title: "Ship it", prState: "none"},
+	}
+
+	for _, branchCount := range []int{1, 2, 3, 5, 7} {
+		for _, shape := range shapes {
+			prState := shape.prState
+			if prState == "" {
+				prState = "open"
+			}
+			task := TaskRecord{
+				ID:                     "task-1",
+				Title:                  shape.title,
+				Description:            shape.description,
+				RepoID:                 "repo-1",
+				BranchName:             "feat/part-a",
+				PRNumber:               intPtr(1),
+				PRState:                prState,
+				SessionAttentionNeeded: shape.attention,
+				UpdatedAt:              1,
+				Branches:               branchesFor(branchCount),
+			}
+
+			model := &Model{}
+			want := lipgloss.Height(renderTaskCard(model, task, false, false, nil, "web5-poc"))
+			got := taskCardHeightForWidth(model, task, taskCardContentWidth, false)
+			if got != want {
+				t.Fatalf(
+					"%d branches / %s: taskCardHeightForWidth() = %d, rendered card is %d lines",
+					branchCount, shape.name, got, want,
+				)
+			}
+		}
+	}
+}
+
+// One branch is the old card. Adding the branch table must not have moved a
+// single pixel of it, or every existing board looks subtly different.
+func TestSingleBranchCardRendersExactlyAsACardWithNoBranchTable(t *testing.T) {
+	task := TaskRecord{
+		ID:         "task-1",
+		Title:      "Ship follow-up",
+		RepoID:     "repo-1",
+		BranchName: "feat/ship-follow-up",
+		PRNumber:   intPtr(4),
+		PRState:    "open",
+		UpdatedAt:  1,
+	}
+	withBranch := task
+	withBranch.Branches = []TaskBranchRecord{{
+		ID:         "branch-1",
+		RepoID:     "repo-1",
+		BranchName: "feat/ship-follow-up",
+		PRNumber:   intPtr(4),
+		PRState:    "open",
+	}}
+
+	model := &Model{}
+	before := renderTaskCard(model, task, false, false, nil, "web5-poc")
+	after := renderTaskCard(model, withBranch, false, false, nil, "web5-poc")
+
+	if before != after {
+		t.Fatalf("single-branch card changed:\n%q\nwant\n%q", after, before)
+	}
+	if got, want := taskCardHeight(model, withBranch), taskCardHeight(model, task); got != want {
+		t.Fatalf("single-branch card height = %d, want %d", got, want)
+	}
+}
+
+func TestMultiBranchCardShowsTheRollupAndTheGlyphStrip(t *testing.T) {
+	task := TaskRecord{
+		ID:         "task-1",
+		Title:      "Cross-repo feature",
+		RepoID:     "repo-1",
+		BranchName: "feat/a",
+		UpdatedAt:  1,
+		Release:    &TaskReleaseSummary{Stage: "ga", GaCount: 1},
+		Branches: []TaskBranchRecord{
+			{ID: "a", RepoID: "repo-1", BranchName: "feat/a", PRNumber: intPtr(1), PRState: "merged"},
+			{ID: "b", RepoID: "repo-2", BranchName: "feat/b", PRNumber: intPtr(2), PRState: "open"},
+			{ID: "c", RepoID: "repo-3", BranchName: "feat/c", PRNumber: intPtr(3), PRState: "open", CIState: "failed"},
+		},
+	}
+
+	plain := ansiPattern.ReplaceAllString(renderTaskCard(&Model{}, task, false, false, nil, "web5-poc"), "")
+
+	if !strings.Contains(plain, "1/3 merged") {
+		t.Fatalf("card = %q, want the merged rollup", plain)
+	}
+	if !strings.Contains(plain, "1 GA") {
+		t.Fatalf("card = %q, want the GA count", plain)
+	}
+	if !strings.Contains(plain, branchGlyphShipped) {
+		t.Fatalf("card = %q, want a shipped glyph in the strip", plain)
+	}
+}
+
+// The card is 28 columns of content and the strip is the widest line on it.
+func TestMultiBranchCardStaysWithinTheTrackColumn(t *testing.T) {
+	branches := []TaskBranchRecord{}
+	for index := 0; index < 5; index++ {
+		branches = append(branches, TaskBranchRecord{
+			ID:         string(rune('a' + index)),
+			RepoID:     "repo-1",
+			BranchName: "feat/part-" + string(rune('a'+index)),
+			PRNumber:   intPtr(index + 1),
+			PRState:    "open",
+		})
+	}
+	card := renderTaskCard(&Model{}, TaskRecord{
+		ID:        "task-1",
+		Title:     "Cross-repo feature",
+		RepoID:    "repo-1",
+		UpdatedAt: 1,
+		Branches:  branches,
+	}, false, false, nil, "web5-poc")
+
+	if got := lipgloss.Width(card); got != trackColumnStyleWidth {
+		t.Fatalf("task card width = %d, want %d", got, trackColumnStyleWidth)
+	}
+}

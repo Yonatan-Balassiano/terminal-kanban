@@ -1092,3 +1092,149 @@ func TestOpenCreateTaskModalDefaultsToGeneralInGeneralScope(t *testing.T) {
 		t.Fatalf("preselected repo option = %+v, want the general option", got)
 	}
 }
+
+func branchPRModel(branches []TaskBranchRecord) *Model {
+	return &Model{
+		width:              200,
+		height:             40,
+		focus:              FocusBoard,
+		modal:              ModalNone,
+		repos:              []RepoRecord{{ID: "repo-a", Label: "web5-poc"}, {ID: "repo-b", Label: "assistant"}},
+		tracks:             []TrackRecord{{ID: "in-progress", SortOrder: 1}},
+		selectedTrackIndex: 0,
+		selectedTaskIndex:  0,
+		tasks: []TaskRecord{{
+			ID:       "task-1",
+			Title:    "Cross-repo feature",
+			TrackID:  "in-progress",
+			SortKey:  1,
+			RepoID:   "repo-a",
+			Branches: branches,
+		}},
+	}
+}
+
+func twoOpenBranches() []TaskBranchRecord {
+	return []TaskBranchRecord{
+		{ID: "branch-a", RepoID: "repo-a", BranchName: "feat/a", PRNumber: intPtr(11), PRState: "open", CIState: "passed", ReviewState: "approved"},
+		{ID: "branch-b", RepoID: "repo-b", BranchName: "feat/b", PRNumber: intPtr(22), PRState: "open", CIState: "pending"},
+	}
+}
+
+func TestShiftEOpensThePRPicker(t *testing.T) {
+	model := branchPRModel(twoOpenBranches())
+
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
+
+	if model.modal != ModalBranchPRList {
+		t.Fatalf("modal = %q, want %q", model.modal, ModalBranchPRList)
+	}
+	if model.branchPRListModal == nil || model.branchPRListModal.TaskID != "task-1" {
+		t.Fatalf("branchPRListModal = %+v, want it aimed at task-1", model.branchPRListModal)
+	}
+	if model.focus != FocusModal {
+		t.Fatalf("focus = %q, want %q", model.focus, FocusModal)
+	}
+}
+
+func TestPRPickerRefusesACardWithNoTrackedBranch(t *testing.T) {
+	model := branchPRModel(nil)
+
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
+
+	if model.modal != ModalNone {
+		t.Fatalf("modal = %q, want no modal", model.modal)
+	}
+	if model.statusMessage == "" {
+		t.Fatal("statusMessage is empty; the refusal must say why")
+	}
+}
+
+func TestPRPickerListsEveryBranchWithItsRepoAndPR(t *testing.T) {
+	model := branchPRModel(twoOpenBranches())
+	model.openBranchPRListModal(&model.tasks[0])
+
+	plain := ansiPattern.ReplaceAllString(renderBranchPRListModal(model), "")
+
+	for _, want := range []string{"WEB5-POC", "ASSISTANT", "#11 open", "#22 open"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("PR picker = %q, want it to contain %q", plain, want)
+		}
+	}
+}
+
+func TestPRPickerMovesBetweenPRsAndClamps(t *testing.T) {
+	model := branchPRModel(twoOpenBranches())
+	model.openBranchPRListModal(&model.tasks[0])
+
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyDown})
+	if model.branchPRListModal.Index != 1 {
+		t.Fatalf("index = %d, want 1", model.branchPRListModal.Index)
+	}
+
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyDown})
+	if model.branchPRListModal.Index != 1 {
+		t.Fatalf("index = %d, want it clamped to the last PR", model.branchPRListModal.Index)
+	}
+
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if model.branchPRListModal.Index != 0 {
+		t.Fatalf("index = %d, want 0", model.branchPRListModal.Index)
+	}
+}
+
+// A refused merge must leave the list up with the reason attached, so the user
+// can pick another PR instead of guessing why nothing happened.
+func TestPRPickerMergeRefusalKeepsTheListOpen(t *testing.T) {
+	model := branchPRModel(twoOpenBranches())
+	model.openBranchPRListModal(&model.tasks[0])
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	cmd := model.handleModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+
+	if cmd != nil {
+		t.Fatal("merge command returned for a PR with pending checks")
+	}
+	if model.modal != ModalBranchPRList {
+		t.Fatalf("modal = %q, want the picker to stay open", model.modal)
+	}
+	if !strings.Contains(model.statusMessage, "#22") {
+		t.Fatalf("statusMessage = %q, want it to name the refused PR", model.statusMessage)
+	}
+}
+
+// The composer must remember which PR it was opened for; the card-level comment
+// path has no PR to fall back on once there are several.
+func TestPRPickerCommentComposerRemembersItsBranch(t *testing.T) {
+	model := branchPRModel(twoOpenBranches())
+	model.openBranchPRListModal(&model.tasks[0])
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+
+	if model.modal != ModalPRComment {
+		t.Fatalf("modal = %q, want the PR comment composer", model.modal)
+	}
+	if model.prCommentModal == nil || model.prCommentModal.BranchID != "branch-b" {
+		t.Fatalf("prCommentModal = %+v, want it aimed at branch-b", model.prCommentModal)
+	}
+}
+
+// Card-level PR commands cannot pick between several PRs, so the palette has to
+// send the user to the picker rather than claim there is no PR.
+func TestPaletteSendsMultiPRCardsToThePicker(t *testing.T) {
+	model := branchPRModel(twoOpenBranches())
+
+	for _, id := range []string{"merge-pr", "comment-pr", "open-pr"} {
+		command := findPaletteCommand(model.commandPaletteCommands(), id)
+		if command == nil {
+			t.Fatalf("palette command %q is missing", id)
+		}
+		if !command.Disabled {
+			t.Fatalf("palette command %q is enabled on a card with two PRs", id)
+		}
+		if !strings.Contains(command.DisabledReason, "choose a PR") {
+			t.Fatalf("palette command %q reason = %q, want it to point at the picker", id, command.DisabledReason)
+		}
+	}
+}

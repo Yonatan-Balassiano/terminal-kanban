@@ -37,6 +37,11 @@ const (
 	artifactsPollInterval     = 60 * time.Second
 )
 
+// FocusDetail lives here rather than beside the other AppFocus values because
+// types.go is a shared contract with the daemon and is frozen; the pane is
+// TUI-local state that never crosses the socket.
+const FocusDetail AppFocus = "detail"
+
 type boardLoadedMsg struct {
 	board BoardSnapshot
 	err   error
@@ -210,6 +215,8 @@ type Model struct {
 	terminalBoardNavSlot          SessionSlot
 	terminalBoardNavConsumed      bool
 	terminalBoardNavVersion       int
+	detailPaneVisible             bool
+	detailBranchIndex             int
 
 	createTaskModal           *createTaskModalState
 	createMissionModal        *createMissionModalState
@@ -229,6 +236,7 @@ type Model struct {
 	aiChatModal               *aiChatModalState
 	missionDependenciesModal  *missionDependenciesModalState
 	artifactRolloutModal      *artifactRolloutModalState
+	branchPRListModal         *branchPRListModalState
 }
 
 func NewModel(socketPath string) (*Model, error) {
@@ -589,6 +597,14 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleMissionKey(key)
 	}
 
+	// Only branch navigation and closing are claimed here; everything else falls
+	// through to the board so the pane can be read while moving between cards.
+	if m.focus == FocusDetail {
+		if cmd, handled := m.handleDetailPaneKey(key); handled {
+			return cmd
+		}
+	}
+
 	if key.Type == tea.KeyCtrlC {
 		return tea.Quit
 	}
@@ -682,6 +698,12 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		if task != nil {
 			return m.moveContextTaskCmd(task, 1)
 		}
+	case "e":
+		m.toggleDetailPane()
+		return nil
+	case "E":
+		m.openBranchPRListModal(m.selectedTask())
+		return nil
 	case "?":
 		m.openHelpModal()
 	case "q":
@@ -716,7 +738,7 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		idx := int(key.String()[0]-'1')
+		idx := int(key.String()[0] - '1')
 		if idx < len(m.repos) {
 			if m.activeRepoID == m.repos[idx].ID {
 				m.activeRepoID = ""
@@ -796,6 +818,25 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	}
 
 	return nil
+}
+
+// handleDetailPaneKey claims the keys that mean something to the PR pane and
+// reports whether it consumed the press. Only the arrows are taken: 'k' still
+// moves the board and 'j' still opens a comment, so every board key a user knows
+// keeps working while the pane is open — which is the point of a pane.
+func (m *Model) handleDetailPaneKey(key tea.KeyMsg) (tea.Cmd, bool) {
+	switch key.String() {
+	case "up":
+		m.moveDetailBranchSelection(-1)
+		return nil, true
+	case "down":
+		m.moveDetailBranchSelection(1)
+		return nil, true
+	case "esc", "e":
+		m.toggleDetailPane()
+		return nil, true
+	}
+	return nil, false
 }
 
 func (m *Model) handleOverviewKey(key tea.KeyMsg) tea.Cmd {
@@ -1661,6 +1702,38 @@ func (m *Model) commentTaskPRCmd(task *TaskRecord, body string) tea.Cmd {
 	}
 }
 
+// commentTaskBranchPRCmd posts to one branch's PR. The card-level command cannot
+// stand in for it: on a multi-PR card the card has no single PR to post to.
+func (m *Model) commentTaskBranchPRCmd(branch TaskBranchRecord, body string) tea.Cmd {
+	if blocker := getBranchPRCommentBlockerReason(branch); blocker != "" {
+		m.statusMessage = blocker
+		return nil
+	}
+
+	body = strings.TrimSpace(body)
+	if body == "" {
+		m.statusMessage = "PR comment cannot be empty."
+		return nil
+	}
+
+	branchID := branch.ID
+	prNumber := derefInt(branch.PRNumber)
+
+	m.statusMessage = "Posting PR comment..."
+	return func() tea.Msg {
+		if err := m.client.Call("commentTaskBranchPR", map[string]string{
+			"branchId": branchID,
+			"body":     body,
+		}, nil); err != nil {
+			return boardActionMsg{err: err}
+		}
+		if prNumber > 0 {
+			return boardActionMsg{status: fmt.Sprintf("Commented on PR #%d.", prNumber)}
+		}
+		return boardActionMsg{status: "Commented on PR."}
+	}
+}
+
 func (m *Model) retryPushedBranchPRCreationCmd(task *TaskRecord) tea.Cmd {
 	if task == nil {
 		return nil
@@ -1687,6 +1760,41 @@ func (m *Model) mergeTaskPRCmd(task *TaskRecord) tea.Cmd {
 		map[string]string{"taskId": task.ID},
 		fmt.Sprintf("Merged PR #%d", derefInt(task.PRNumber)),
 	)
+}
+
+// mergeTaskBranchPRCmd merges exactly the PR the user picked. It takes the whole
+// branch record rather than an ID so the guard runs against the state that was on
+// screen when they chose it.
+func (m *Model) mergeTaskBranchPRCmd(branch TaskBranchRecord) tea.Cmd {
+	if blocker := getBranchMergeBlockerReason(branch); blocker != "" {
+		m.statusMessage = blocker
+		return nil
+	}
+	m.statusMessage = "Merge in progress..."
+	return m.boardActionCmd(
+		"mergeTaskBranchPR",
+		map[string]string{"branchId": branch.ID},
+		fmt.Sprintf("Merged PR #%d", derefInt(branch.PRNumber)),
+	)
+}
+
+// openBranchPRCmd opens one branch's PR, resolved through that branch's own repo
+// — on a cross-repo card the card's repo is the wrong project.
+func (m *Model) openBranchPRCmd(branch TaskBranchRecord, checks bool) tea.Cmd {
+	url := getBranchPRURL(branch, m.repoByID(branch.RepoID))
+	if url == "" {
+		m.statusMessage = "PR link is not available for the selected branch."
+		return nil
+	}
+	if checks {
+		url += "/checks"
+	}
+	return func() tea.Msg {
+		if err := openExternal(url); err != nil {
+			return asyncErrorMsg{err: err}
+		}
+		return boardActionMsg{status: "Opened browser."}
+	}
 }
 
 func (m *Model) schedulePostPushSyncCmd(taskID string) tea.Cmd {
@@ -1734,7 +1842,8 @@ func (m *Model) setUIStateCmd(patch map[string]interface{}) tea.Cmd {
 }
 
 func (m *Model) resizeTerminalPaneCmd(delta int) tea.Cmd {
-	if !m.terminalPaneShouldRender() {
+	// Both panes occupy the same split, so the width applies to whichever is up.
+	if !m.sidePaneShouldRender() {
 		m.statusMessage = "Open a task shell before resizing the terminal pane."
 		return nil
 	}
@@ -2538,6 +2647,63 @@ func (m *Model) loadVisibleTerminalStateCmd() tea.Cmd {
 
 func (m *Model) terminalPaneShouldRender() bool {
 	return m.terminalPaneVisible && m.activeTaskID != "" && !m.terminalBackendTypeForSlot(m.focusedTerminalSlot).attachesInTmuxPane()
+}
+
+// detailPaneShouldRender gates on a selected card, not on branches: a card with
+// one PR still has a PR worth reading, and refusing to open would make the key
+// feel broken.
+func (m *Model) detailPaneShouldRender() bool {
+	return m.detailPaneVisible && m.selectedTask() != nil
+}
+
+// sidePaneShouldRender is whether the board gives up half its width. Both panes
+// share that one slot, so the split maths stays in one place and 'z' and
+// Shift+←/→ keep behaving the same whichever pane is showing.
+func (m *Model) sidePaneShouldRender() bool {
+	return m.detailPaneShouldRender() || m.terminalPaneShouldRender()
+}
+
+// toggleDetailPane opens the PR pane on the selected card, or closes it. Closing
+// hands focus back to the board rather than to the terminal, because the board
+// is where the user was.
+func (m *Model) toggleDetailPane() {
+	if m.detailPaneVisible {
+		m.detailPaneVisible = false
+		m.detailBranchIndex = 0
+		if m.focus == FocusDetail {
+			m.focus = FocusBoard
+		}
+		return
+	}
+
+	task := m.selectedTask()
+	if task == nil {
+		m.statusMessage = "Select a card to inspect its PRs."
+		return
+	}
+	m.detailPaneVisible = true
+	m.detailBranchIndex = 0
+	m.focus = FocusDetail
+}
+
+// moveDetailBranchSelection walks the selected card's branches. It clamps rather
+// than wraps so the ends of a five-repo feature stay findable by feel.
+func (m *Model) moveDetailBranchSelection(delta int) {
+	task := m.selectedTask()
+	if task == nil || len(task.Branches) == 0 {
+		m.detailBranchIndex = 0
+		return
+	}
+	m.detailBranchIndex = clamp(m.detailBranchIndex+delta, 0, len(task.Branches)-1)
+}
+
+// taskBranchRepoLabel names the repo a branch lives in, falling back to the raw
+// repo ID: an unfamiliar ID is still identifiable, a blank is not.
+func (m *Model) taskBranchRepoLabel(branch TaskBranchRecord) string {
+	if repo := m.repoByID(branch.RepoID); repo != nil && repo.Label != "" {
+		return repo.Label
+	}
+	return branch.RepoID
 }
 
 func (m *Model) boardRenderWidth() int {

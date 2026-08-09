@@ -7,6 +7,8 @@ import type {
 import { McpAuthRequiredError } from './mcp/oauth.js';
 import type { McpClient } from './mcp/client.js';
 import type { CommitOwnership } from './commit-ownership.js';
+import { repoSlug } from './commit-ownership.js';
+import { MAX_CONCURRENT_LOOKUPS, mapWithLimit } from './concurrency.js';
 
 /**
  * Rollout status for the artifacts rail: what is in production versus the
@@ -20,13 +22,14 @@ import type { CommitOwnership } from './commit-ownership.js';
 const GET_PROJECT_TOOL = 'devex__get_project';
 const ROLLOUT_VERSION_TOOL = 'rollout__rollout_version';
 const AVAILABLE_RCS_TOOL = 'devex__available_rcs';
+const ROLLOUT_HISTORY_TOOL = 'devex__get_rollout_history';
+/** Only the newest entries can still be running. */
+const ROLLOUT_HISTORY_LIMIT = 3;
 /** Pending windows are small in practice; this bounds a pathological one. */
 const MAX_PENDING_RCS = 50;
 /** Rube Goldberg rejects comments outside this range. */
 const MIN_COMMENT_LENGTH = 10;
 const DEFAULT_REFRESH_INTERVAL_MS = 300_000;
-/** Per-artifact concurrency; the list is small and the server is shared. */
-const MAX_CONCURRENT_LOOKUPS = 4;
 
 interface DevexProject {
   projectName: string;
@@ -54,6 +57,20 @@ export interface ArtifactsServiceOptions {
 interface PendingRelease {
   commitHash?: string;
   repoUrl?: string;
+}
+
+interface RolloutHistoryEntry {
+  status?: string;
+  toVersion?: string;
+  createdAt?: string;
+}
+
+/**
+ * The tool returns a bare array; the wrapper shape is tolerated so an upstream
+ * change to an enveloped response degrades rather than throws.
+ */
+interface RolloutHistoryResponse {
+  history?: RolloutHistoryEntry[];
 }
 
 interface AvailableRcsResponse {
@@ -115,27 +132,6 @@ function toRecord(name: string, project: DevexProject | undefined): ArtifactReco
   };
 }
 
-/** Runs tasks with a small concurrency cap, preserving input order. */
-async function mapWithLimit<T, R>(
-  items: readonly T[],
-  limit: number,
-  task: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await task(items[index]!);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
-}
-
 /**
  * Audit-trail comment for a rollout.
  *
@@ -181,6 +177,17 @@ export class ArtifactsService {
    */
   getSnapshot(): ArtifactsSnapshot {
     return this.snapshot;
+  }
+
+  /**
+   * Configured artifacts built from one GitHub repository.
+   *
+   * An empty result means the repo is not tracked, which is a different fact
+   * from "tracked, but this change touched none of its artifacts" — callers
+   * must keep the two apart or an untracked repo reads as nothing to ship.
+   */
+  artifactsForRepo(slug: string): ArtifactRecord[] {
+    return this.snapshot.artifacts.filter((record) => repoSlug(record.repoUrl) === slug);
   }
 
   /** Refreshes on an interval; concurrent callers share one in-flight refresh. */
@@ -295,6 +302,55 @@ export class ArtifactsService {
     }
   }
 
+  /**
+   * Annotate a drifting artifact with the rollout currently moving it.
+   *
+   * Carried on the artifact rather than fetched per pull request: "is this
+   * mid-rollout" is a property of the artifact, and every card asking the
+   * question independently would multiply the same call.
+   *
+   * Best-effort like {@link withOwnership} — an unexpected payload shape leaves
+   * the field unset, which reads as "no rollout seen" rather than breaking the
+   * rail.
+   */
+  private async withRollout(record: ArtifactRecord): Promise<ArtifactRecord> {
+    try {
+      const split = record.name.lastIndexOf('.');
+      if (split <= 0) {
+        return record;
+      }
+
+      const response = await this.client.callTool<RolloutHistoryResponse>(
+        ROLLOUT_HISTORY_TOOL,
+        {
+          // devex wants the project id split at its last dot.
+          groupId: record.name.slice(0, split),
+          artifactId: record.name.slice(split + 1),
+          limit: ROLLOUT_HISTORY_LIMIT,
+        },
+      );
+
+      const entries = Array.isArray(response) ? response : (response?.history ?? []);
+      const active = entries.find(
+        (entry) => entry.status === 'PENDING' || entry.status === 'IN_PROGRESS',
+      );
+      if (!active) {
+        return record;
+      }
+
+      return {
+        ...record,
+        rolloutInFlight: {
+          status: active.status ?? 'IN_PROGRESS',
+          ...(active.toVersion ? { toVersion: active.toVersion } : {}),
+          ...(active.createdAt ? { startedAt: active.createdAt } : {}),
+        },
+      };
+    } catch {
+      return record;
+    }
+  }
+
   async refresh(): Promise<ArtifactsSnapshot> {
     this.refreshInFlight ??= this.refreshInner().finally(() => {
       this.refreshInFlight = null;
@@ -309,6 +365,7 @@ export class ArtifactsService {
     }
 
     try {
+      const failures: Error[] = [];
       const artifacts = await mapWithLimit(
         this.artifactNames,
         MAX_CONCURRENT_LOOKUPS,
@@ -318,16 +375,30 @@ export class ArtifactsService {
               projectName: name,
             });
             const record = toRecord(name, response?.project);
-            return record.status === 'drift' ? await this.withOwnership(record) : record;
+            // Only a drifting artifact has anything pending or in flight, so an
+            // in-sync one costs exactly one call.
+            if (record.status !== 'drift') {
+              return record;
+            }
+            return this.withRollout(await this.withOwnership(record));
           } catch (error) {
             // One bad artifact must not blank the whole rail.
             if (error instanceof McpAuthRequiredError) {
               throw error;
             }
+            failures.push(error instanceof Error ? error : new Error(String(error)));
             return toRecord(name, undefined);
           }
         }
       );
+
+      // Every lookup failing is an outage, not six artifacts that happen to be
+      // unknown. Reporting it as a fresh snapshot is how an unreachable server
+      // came to read as "6 artifacts, refreshed 32s ago" while the rail knew
+      // nothing at all — so it degrades exactly like the auth failure below.
+      if (failures.length === this.artifactNames.length) {
+        throw failures[0]!;
+      }
 
       this.snapshot = { artifacts, refreshedAt: this.now(), stale: false };
       return this.snapshot;

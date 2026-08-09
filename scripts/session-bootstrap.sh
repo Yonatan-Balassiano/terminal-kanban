@@ -11,6 +11,26 @@ agent="${AGENTBOARD_AGENT:-claude}"
 uses_worktree="${AGENTBOARD_USES_WORKTREE:-0}"
 bootstrap_notice="${AGENTBOARD_BOOTSTRAP_NOTICE:-}"
 agent_args="${AGENTBOARD_AGENT_ARGS:-}"
+workspaces="${AGENTBOARD_WORKSPACES:-}"
+
+# The card's checkouts, one "label<TAB>branch<TAB>path" row per line.
+#
+# The daemon ships them JSON-escaped so the separators survive the shell's
+# double-quote parsing; printf %b turns "\t" and "\n" back into real ones.
+print_workspace_banner() {
+  [[ -n "$workspaces" ]] || return 0
+
+  local label branch path
+  printf 'Workspaces for this card:\n'
+  while IFS=$'\t' read -r label branch path; do
+    [[ -n "$path" ]] || continue
+    printf '  %-24s %-36s %s\n' "$label" "$branch" "$path"
+  done < <(printf '%b\n' "$workspaces")
+  printf '\n'
+
+  # Deliberately no cd between them: this is the one shell the agent runs in, and
+  # the agent moves itself once it picks the checkout it wants to work in.
+}
 
 if [[ -n "$session_cwd" ]]; then
   cd "$session_cwd"
@@ -29,6 +49,10 @@ if [[ "$task_kind" != "general" && "$uses_worktree" != "1" ]]; then
 fi
 
 clear
+
+# After the clear, not before it, or the screen wipe would eat the map the agent
+# is meant to open on.
+print_workspace_banner
 
 case "$agent" in
   claude)

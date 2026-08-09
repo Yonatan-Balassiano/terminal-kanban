@@ -7,12 +7,16 @@ describe('defaultConfig', () => {
     expect(defaultConfig().pollIntervalMs).toBe(60000);
   });
 
-  it('uses backlog, in-progress, pr, and done as the default board tracks', () => {
+  it('separates merged work from shipped work in the default board tracks', () => {
+    // Shipping sits between review and done because merging stopped being the
+    // end of the story: a card whose pull requests have landed but whose change
+    // is not in production yet is neither in review nor finished.
     expect(defaultConfig().tracks).toEqual([
       { id: 'backlog', label: 'Backlog', sortOrder: 0 },
       { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
       { id: 'pr', label: 'PR', sortOrder: 2 },
-      { id: 'done', label: 'Done', sortOrder: 3 },
+      { id: 'shipping', label: 'Shipping', sortOrder: 3 },
+      { id: 'done', label: 'Done', sortOrder: 4 },
     ]);
   });
 

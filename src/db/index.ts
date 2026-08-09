@@ -14,6 +14,8 @@ const BetterSqlite3 = require('better-sqlite3') as {
 };
 
 const SCHEMA_VERSION_KEY = 'schema_version';
+/** Marks the one-time seeding of task_branches from the pre-multi-branch columns. */
+const TASK_BRANCHES_BACKFILL_KEY = 'task_branches_backfill';
 export const CURRENT_SCHEMA_VERSION = '2026-04-19-dual-session';
 
 // --------------- ID generator --------------------------------
@@ -127,6 +129,32 @@ function ensureColumn(db: Db, table: string, column: string, ddl: string): void 
   db.exec(`ALTER TABLE ${quoteIdentifier(table)} ADD COLUMN ${column} ${ddl}`);
 }
 
+/**
+ * Create a table, and its indexes, if the database predates it.
+ *
+ * Bumping CURRENT_SCHEMA_VERSION drops and recreates everything, so a table
+ * added later has to be created in place instead. Only the named table is
+ * touched — replaying the whole of schema.sql would try to index columns that
+ * the additive column migrations below have not added yet.
+ */
+function ensureTableFromSchema(db: Db, table: string): void {
+  if (tableExists(db, table)) {
+    return;
+  }
+
+  const schemaSql = readFileSync(schemaPath(), 'utf8');
+  const indexes = schemaSql.match(
+    new RegExp(`CREATE (?:UNIQUE )?INDEX IF NOT EXISTS \\w+ ON ${table}\\([^)]*\\);`, 'g'),
+  );
+
+  db.transaction(() => {
+    db.exec(schemaCreateStatement(table));
+    for (const statement of indexes ?? []) {
+      db.exec(statement);
+    }
+  })();
+}
+
 function columnIsNotNull(db: Db, table: string, column: string): boolean {
   const columns = db
     .prepare<[], { name: string; notnull: number }>(`PRAGMA table_info(${quoteIdentifier(table)})`)
@@ -211,6 +239,82 @@ function applyAdditiveMigrations(db: Db): void {
   if (tableExists(db, 'tasks') && columnIsNotNull(db, 'tasks', 'repo_id')) {
     rebuildTableFromSchema(db, 'tasks');
   }
+
+  ensureColumn(db, 'tasks', 'active_branch_id', 'TEXT');
+  ensureColumn(db, 'tasks', 'pr_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'tasks', 'pr_open_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'tasks', 'pr_merged_count', 'INTEGER NOT NULL DEFAULT 0');
+
+  // Run after the column migrations: both tables have foreign keys into tasks,
+  // which the rebuild above may have just replaced.
+  ensureTableFromSchema(db, 'task_branches');
+  ensureTableFromSchema(db, 'pr_release_status');
+  backfillTaskBranches(db);
+}
+
+/**
+ * Give every existing card the branch row it always implicitly had.
+ *
+ * Cards predating the multi-branch model keep their state in columns on `tasks`;
+ * copying it across once means the rollup that now feeds those same columns
+ * starts from exactly what was already there, so nothing on the board moves.
+ *
+ * Guarded by a marker as well as the unique index: without it, a branch the user
+ * deliberately removed would reappear on the next start.
+ */
+function backfillTaskBranches(db: Db): void {
+  const done = db
+    .prepare<[string], { value: string }>('SELECT value FROM _schema_meta WHERE key = ?')
+    .get(TASK_BRANCHES_BACKFILL_KEY);
+  if (done) {
+    return;
+  }
+
+  db.transaction(() => {
+    db.exec(`
+      INSERT OR IGNORE INTO task_branches (
+        id, task_id, repo_id, branch_name, base_branch, worktree_path, sort_key,
+        pr_number, pr_url, pr_state, pr_draft,
+        ci_state, ci_summary, failing_check_name,
+        ci_required_total, ci_required_passed, ci_required_failed, ci_required_pending,
+        review_state, review_summary, unresolved_thread_count,
+        git_state, git_ahead_count, git_behind_count, has_untracked, has_conflicts,
+        github_sync_status, github_sync_error, github_last_synced_at,
+        created_at, updated_at)
+      SELECT
+        -- Matches generateId()'s shape, so migrated ids are indistinguishable
+        -- from ones the application minted.
+        lower(hex(randomblob(4))), t.id, t.repo_id, t.branch_name,
+        r.default_base_branch, t.worktree_path, 0,
+        t.pr_number, t.pr_url, t.pr_state, t.pr_draft,
+        t.ci_state, t.ci_summary, t.failing_check_name,
+        t.ci_required_total, t.ci_required_passed, t.ci_required_failed, t.ci_required_pending,
+        t.review_state, t.review_summary, t.unresolved_thread_count,
+        t.git_state, t.git_ahead_count, t.git_behind_count, t.has_untracked, t.has_conflicts,
+        t.github_sync_status, t.github_sync_error, t.github_last_synced_at,
+        t.created_at, t.updated_at
+      FROM tasks t
+      JOIN repos r ON r.id = t.repo_id
+      WHERE t.repo_id IS NOT NULL
+        AND t.branch_name IS NOT NULL
+        AND COALESCE(t.kind, 'repo') <> 'general';
+
+      UPDATE tasks SET
+        active_branch_id =
+          (SELECT b.id FROM task_branches b WHERE b.task_id = tasks.id ORDER BY b.sort_key LIMIT 1),
+        pr_count =
+          (SELECT COUNT(*) FROM task_branches b WHERE b.task_id = tasks.id AND b.pr_number IS NOT NULL),
+        pr_open_count =
+          (SELECT COUNT(*) FROM task_branches b WHERE b.task_id = tasks.id AND b.pr_state IN ('open','draft')),
+        pr_merged_count =
+          (SELECT COUNT(*) FROM task_branches b WHERE b.task_id = tasks.id AND b.pr_state = 'merged');
+    `);
+
+    db.prepare<[string, string, number], void>(
+      `INSERT INTO _schema_meta (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).run(TASK_BRANCHES_BACKFILL_KEY, '1', Date.now());
+  })();
 }
 
 // --------------- openDb --------------------------------------

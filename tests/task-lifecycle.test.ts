@@ -212,4 +212,83 @@ describe('TaskLifecycleService', () => {
     // Assert
     expect(board.getTask(task.id)).toBeNull();
   });
+  it('removes every repo\u2019s worktree when a multi-repo card is cleaned up', async () => {
+    // Arrange — a feature spanning two repositories. Removing only one would
+    // orphan the other, which is exactly what the old single-worktree cleanup did.
+    const secondRepoPath = mkdtempSync(join(tmpdir(), 'agentboard-repo2-'));
+    const secondWorktree = mkdtempSync(join(tmpdir(), 'agentboard-worktree2-'));
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, default_base_branch, health, created_at, updated_at)
+       VALUES ('repo-2', 'Other', ?, 'main', 'ok', 1, 1)`,
+    ).run(secondRepoPath);
+
+    const task = board.createTask({ title: 'Cross-repo feature', repoId: 'repo-1' });
+    board.setTaskBranchWorktree(task.branches[0]!.id, worktreePath);
+    const second = board.addTaskBranch({
+      taskId: task.id,
+      repoId: 'repo-2',
+      branchName: task.branchName!,
+      worktreePath: secondWorktree,
+    });
+
+    const git = { removeWorktreeAsync: vi.fn() };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateTaskSessions: vi.fn(),
+      terminateSession: vi.fn(),
+    } as never);
+
+    // Act
+    await lifecycle.cleanupTaskResources(task.id);
+
+    // Assert
+    expect(git.removeWorktreeAsync).toHaveBeenCalledWith(repoPath, worktreePath);
+    expect(git.removeWorktreeAsync).toHaveBeenCalledWith(secondRepoPath, secondWorktree);
+    expect(board.getTaskBranch(second.id)?.worktreePath).toBeUndefined();
+
+    rmSync(secondRepoPath, { recursive: true, force: true });
+    rmSync(secondWorktree, { recursive: true, force: true });
+  });
+
+  it('still removes the reachable worktrees when one host is unreachable', async () => {
+    // Arrange — one dead remote must not strand the local worktrees beside it.
+    const secondRepoPath = mkdtempSync(join(tmpdir(), 'agentboard-repo2-'));
+    const secondWorktree = mkdtempSync(join(tmpdir(), 'agentboard-worktree2-'));
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, default_base_branch, health, created_at, updated_at)
+       VALUES ('repo-2', 'Other', ?, 'main', 'ok', 1, 1)`,
+    ).run(secondRepoPath);
+
+    const task = board.createTask({ title: 'Cross-repo feature', repoId: 'repo-1' });
+    board.setTaskBranchWorktree(task.branches[0]!.id, worktreePath);
+    board.addTaskBranch({
+      taskId: task.id,
+      repoId: 'repo-2',
+      branchName: task.branchName!,
+      worktreePath: secondWorktree,
+    });
+
+    const git = {
+      removeWorktreeAsync: vi.fn().mockImplementation((repo: string) => {
+        if (repo === secondRepoPath) {
+          throw new TransportUnreachableError('host is asleep');
+        }
+      }),
+    };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateTaskSessions: vi.fn(),
+      terminateSession: vi.fn(),
+    } as never);
+
+    // Act / Assert
+    await expect(lifecycle.cleanupTaskResources(task.id)).rejects.toThrow(
+      TransportUnreachableError,
+    );
+    // The reachable one was still attempted and removed.
+    expect(git.removeWorktreeAsync).toHaveBeenCalledWith(repoPath, worktreePath);
+
+    rmSync(secondRepoPath, { recursive: true, force: true });
+    rmSync(secondWorktree, { recursive: true, force: true });
+  });
 });

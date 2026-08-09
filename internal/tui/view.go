@@ -99,7 +99,7 @@ func renderContent(m *Model) string {
 		return renderTerminalPane(m, contentHeight, true)
 	}
 
-	showSplitTerminal := m.terminalPaneShouldRender()
+	showSplitTerminal := m.sidePaneShouldRender()
 	stacked := showSplitTerminal && m.terminalLayoutMode == TerminalLayoutMode("top-bottom")
 
 	if !showSplitTerminal {
@@ -126,7 +126,7 @@ func renderContent(m *Model) string {
 		if dividerHeight > 0 {
 			chunks = append(chunks, fitHeight(lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render(strings.Repeat("─", max(1, m.width))), 1))
 		}
-		chunks = append(chunks, fitHeight(renderTerminalPane(m, terminalHeight, true), terminalHeight))
+		chunks = append(chunks, fitHeight(renderSidePane(m, terminalHeight, true), terminalHeight))
 		return lipgloss.JoinVertical(lipgloss.Left, chunks...)
 	}
 
@@ -136,7 +136,7 @@ func renderContent(m *Model) string {
 		boardRenderFn = renderOverviewBoard
 	}
 	boardView := fitSize(boardRenderFn(m, contentHeight, boardWidth), boardWidth, contentHeight)
-	terminalView := fitHeight(renderTerminalPane(m, contentHeight, false), contentHeight)
+	terminalView := fitHeight(renderSidePane(m, contentHeight, false), contentHeight)
 	divider := renderVerticalDivider(contentHeight)
 	return lipgloss.JoinHorizontal(lipgloss.Top, boardView, divider, terminalView)
 }
@@ -1093,6 +1093,14 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 			true,
 		))
 	}
+	// A card with one branch is the old card and must stay byte-identical, so
+	// the rollup only appears once there is genuinely more than one PR to sum up.
+	if hasMultipleBranches(task) {
+		lines = append(lines,
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Render(truncateText(taskBranchRollupLine(task), contentWidth)),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(taskBranchGlyphStrip(task), contentWidth)),
+		)
+	}
 	for _, dl := range descriptionLines {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(dl))
 	}
@@ -1326,6 +1334,126 @@ func renderTaskRow(m *Model, task TaskRecord, isSelected, isActiveSession bool, 
 	return lipgloss.NewStyle().Width(contentWidth).Render(line)
 }
 
+// renderSidePane fills the one slot the board shares with something else. The
+// detail pane wins while it is open — it was opened deliberately, and the
+// terminal is still running underneath it, one key away.
+func renderSidePane(m *Model, height int, fullWidth bool) string {
+	// Focusing the terminal is an explicit request for it, so it takes the slot
+	// back for as long as it holds focus; the detail pane returns on Esc.
+	if m.focus == FocusTerminal && m.terminalPaneShouldRender() {
+		return renderTerminalPane(m, height, fullWidth)
+	}
+	if m.detailPaneShouldRender() {
+		return renderDetailPane(m, height, fullWidth)
+	}
+	return renderTerminalPane(m, height, fullWidth)
+}
+
+// renderDetailPane lists every branch of the selected card so a multi-repo
+// feature can be watched without leaving the board. It follows the board
+// selection rather than pinning a card, which is the whole reason it is a pane
+// and not a modal.
+func renderDetailPane(m *Model, height int, fullWidth bool) string {
+	width := m.width
+	if !fullWidth {
+		width = m.sideBySideTerminalOuterWidth()
+	}
+	contentWidth := max(1, width-terminalPaneFrameWidth)
+	contentHeight := terminalPaneContentHeight(height)
+
+	task := m.selectedTask()
+	body := ""
+	if task == nil {
+		body = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+			Render(truncateText("Select a card to inspect its PRs.", contentWidth))
+	} else {
+		body = strings.Join(detailPaneLines(m, *task, contentHeight, contentWidth), "\n")
+	}
+
+	border := lipgloss.NormalBorder()
+	borderColor := uiChrome.Line
+	if m.focus == FocusDetail {
+		border = lipgloss.RoundedBorder()
+		borderColor = uiChrome.Accent
+	}
+
+	return fitSize(
+		lipgloss.NewStyle().
+			Width(contentWidth).
+			Height(contentHeight).
+			Border(border).
+			BorderForeground(lipgloss.Color(borderColor)).
+			Render(fitHeight(body, contentHeight)),
+		width,
+		height,
+	)
+}
+
+func detailPaneLines(m *Model, task TaskRecord, contentHeight, contentWidth int) []string {
+	branches := task.Branches
+	lines := []string{
+		joinSpaceBetween(
+			strings.Join([]string{
+				badge("PRS", "accent", "", false),
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(task.Title, max(1, contentWidth/2))),
+			}, " "),
+			badge(fmt.Sprintf("%d BRANCH", len(branches)), "muted", "", false),
+			contentWidth,
+		),
+	}
+
+	// The release line describes the card, never a single branch, so it is
+	// stated once and labelled as the card's.
+	releaseNote := "release " + releaseStageLabel(task.Release)
+	if task.Release != nil && task.Release.Reason != "" {
+		releaseNote += " · " + task.Release.Reason
+	}
+	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(toneColor(releaseStageTone(task.Release)))).
+		Render(truncateText(releaseNote, contentWidth)))
+
+	if len(branches) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+			Render(truncateText("This card has no tracked branch yet.", contentWidth)))
+		return lines
+	}
+
+	// Two header lines, a footer hint, and two rows per branch.
+	visibleRows := max(1, (contentHeight-3)/2)
+	selected := clamp(m.detailBranchIndex, 0, len(branches)-1)
+	windowStart := commandWindowStart(selected, len(branches), visibleRows)
+	for offset := windowStart; offset < min(len(branches), windowStart+visibleRows); offset++ {
+		lines = append(lines, detailBranchRowLines(m, task, branches[offset], offset == selected, contentWidth)...)
+	}
+
+	lines = append(lines, joinSpaceBetween(
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(fmt.Sprintf("%d/%d", selected+1, len(branches))),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑↓ branch  E actions  Esc close"),
+		contentWidth,
+	))
+	return lines
+}
+
+func detailBranchRowLines(m *Model, task TaskRecord, branch TaskBranchRecord, selected bool, contentWidth int) []string {
+	marker := " "
+	titleColor := uiChrome.Text
+	if selected {
+		marker = "▸"
+		titleColor = uiChrome.Accent
+	}
+
+	head := joinSpaceBetween(
+		lipgloss.NewStyle().Foreground(lipgloss.Color(titleColor)).Render(
+			truncateText(marker+" "+m.taskBranchRepoLabel(branch)+" ⎇ "+compactBranchLabel(branch.BranchName), max(1, contentWidth-16)),
+		),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(taskBranchGlyph(branch, task.Release)),
+		contentWidth,
+	)
+	detail := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(
+		truncateText("   "+taskBranchPRLabel(branch)+"  "+taskBranchChecksLabel(branch), contentWidth),
+	)
+	return []string{head, detail}
+}
+
 func renderTerminalPane(m *Model, height int, fullWidth bool) string {
 	width := m.width
 	if !fullWidth {
@@ -1546,7 +1674,12 @@ func renderStatusBar(m *Model) string {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Ready"))
 	}
 
-	return joinSpaceBetween(strings.Join(leftParts, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(kbdHints(m.focus)), m.width)
+	// The hint line is longer than any terminal, so it yields first: losing the
+	// tail of a reminder costs less than losing the status message or the
+	// attention badge, which are the parts that are actually news.
+	left := strings.Join(leftParts, " ")
+	hints := truncateText(kbdHints(m.focus), max(1, m.width-plainWidth(left)-1))
+	return joinSpaceBetween(left, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(hints), m.width)
 }
 
 func renderHelpModal() string {
@@ -1556,6 +1689,7 @@ func renderHelpModal() string {
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar, D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"Remote", "Remote tasks run their agent in tmux on another machine", "Ctrl+R reconnects the selected remote card to that machine", "It keeps the running agent when the remote session survived, and starts the host first when it is switched off", "R recreates instead: it always throws the running agent away"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
+		{"Multi-PR cards", "A card can span several repos and PRs; its badge sums them up", "e opens the PR pane beside the board and stays open while you move", "E opens the PR picker: o open, v checks, j comment, m merge that PR", "c/j/m on the card itself stand down once there are several PRs"},
 		{"Artifacts", "The footer strip tracks GA versus latest RC for every artifact", "S refreshes it now, ▲N marks how far the latest RC is ahead of GA", "; moves the footer selection, G rolls the selected drifting artifact out to production", "Chips dim when the data is stale; run agentboard mcp login if it asks for auth"},
 		{"Views", "f opens filters, g changes board / terminal layout", "Shift+Left/Right resizes the side-by-side terminal split", ", and . switch active repo, ? toggles this help"},
 		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Shift+Left/Right resizes the split, Esc returns focus to the board"},
@@ -1754,9 +1888,15 @@ func taskCardHeightForWidth(m *Model, task TaskRecord, contentWidth int, compact
 	if githubStatusBadgeModel(task) != nil {
 		height++
 	}
-	if descriptionLine(task.Description) != "" {
-		height++
+	// Mirrors the rollup badge line and the per-branch glyph strip in
+	// renderTaskCardWithWidth. Disagreeing with the renderer here desynchronises
+	// visibleWindow's scrolling silently, so the two must change together.
+	if hasMultipleBranches(task) {
+		height += 2
 	}
+	// Counted, not tested for emptiness: a description wraps to two lines at this
+	// width, and assuming one silently desynchronised the scroll window.
+	height += len(descriptionLinesForWidth(task.Description, contentWidth))
 	if taskMissionLine(m, task.ID) != "" {
 		height++
 	}
@@ -1835,10 +1975,6 @@ func normalizeSingleLine(value string) string {
 		}
 	}
 	return ""
-}
-
-func descriptionLine(description string) string {
-	return normalizeSingleLine(description)
 }
 
 func descriptionLinesForWidth(description string, width int) []string {
@@ -1983,13 +2119,159 @@ type githubStatusBadge struct {
 	Tone  string
 }
 
+const (
+	// A card is 28 columns wide, so the strip names the first few branches and
+	// counts the rest rather than wrapping the card out of shape.
+	taskBranchStripLimit = 5
+
+	branchGlyphShipped  = "✓ga"
+	branchGlyphBuilt    = "↻rc"
+	branchGlyphBuilding = "⏳"
+	branchGlyphMerged   = "✓"
+	branchGlyphOpen     = "●open"
+	branchGlyphDraft    = "◐"
+	branchGlyphCIFailed = "✗ci"
+	branchGlyphChanges  = "✎"
+	branchGlyphNoPR     = "○"
+)
+
+// hasMultipleBranches is the switch for every multi-PR affordance. A card with
+// one branch must keep rendering and behaving exactly as it did before cards
+// could span repos.
+func hasMultipleBranches(task TaskRecord) bool {
+	return len(task.Branches) > 1
+}
+
+// taskBranchGlyph condenses one branch to the smallest mark that still says what
+// the user has to do about it.
+//
+// Release stage is only ever resolved for the card as a whole, so a merged
+// branch borrows the card's stage; with no release summary it stays a bare ✓ —
+// merged, where it got to unknown — rather than claiming a build or a ship that
+// nobody checked.
+func taskBranchGlyph(branch TaskBranchRecord, release *TaskReleaseSummary) string {
+	switch {
+	case branch.PRState == "merged":
+		return mergedBranchGlyph(release)
+	case branch.CIState == "failed":
+		return branchGlyphCIFailed
+	case branch.ReviewState == "changes_requested":
+		return branchGlyphChanges
+	case branch.PRDraft || branch.PRState == "draft":
+		return branchGlyphDraft
+	case branch.PRState == "open":
+		return branchGlyphOpen
+	default:
+		return branchGlyphNoPR
+	}
+}
+
+func mergedBranchGlyph(release *TaskReleaseSummary) string {
+	if release == nil {
+		return branchGlyphMerged
+	}
+	switch release.Stage {
+	case "ga":
+		return branchGlyphShipped
+	case "rolling-out", "rc-built":
+		return branchGlyphBuilt
+	case "awaiting-build":
+		return branchGlyphBuilding
+	default:
+		return branchGlyphMerged
+	}
+}
+
+// taskBranchGlyphStrip is one glyph per branch, capped so the line still fits a
+// card. The overflow count is shown rather than dropped: a hidden PR is a PR
+// nobody chases.
+func taskBranchGlyphStrip(task TaskRecord) string {
+	shown := min(len(task.Branches), taskBranchStripLimit)
+	glyphs := make([]string, 0, shown+1)
+	for _, branch := range task.Branches[:shown] {
+		glyphs = append(glyphs, taskBranchGlyph(branch, task.Release))
+	}
+	if hidden := len(task.Branches) - shown; hidden > 0 {
+		glyphs = append(glyphs, fmt.Sprintf("+%d", hidden))
+	}
+	return strings.Join(glyphs, " ")
+}
+
+// taskBranchRollupLine sums the card's branches the way the user reads them: how
+// much has landed, how much of that has shipped, and what is broken.
+//
+// The landed and broken counts come from the same branches the glyph strip
+// draws, so the two lines can never contradict each other. GA comes from the
+// card's release summary because a branch on its own cannot know it, and is
+// omitted entirely when the daemon has not resolved a release.
+func taskBranchRollupLine(task TaskRecord) string {
+	merged, failing, changesRequested := 0, 0, 0
+	for _, branch := range task.Branches {
+		switch {
+		case branch.PRState == "merged":
+			merged++
+		case branch.CIState == "failed":
+			failing++
+		case branch.ReviewState == "changes_requested":
+			changesRequested++
+		}
+	}
+
+	parts := []string{fmt.Sprintf("%d/%d merged", merged, len(task.Branches))}
+	if task.Release != nil && task.Release.GaCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d GA", task.Release.GaCount))
+	}
+	if failing > 0 {
+		parts = append(parts, fmt.Sprintf("%d ✗", failing))
+	}
+	if changesRequested > 0 {
+		parts = append(parts, fmt.Sprintf("%d ✎", changesRequested))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// taskBranchPRLabel is the branch's pull request in one phrase, or why there is
+// nothing to point at.
+func taskBranchPRLabel(branch TaskBranchRecord) string {
+	if branch.PRNumber == nil {
+		return "no PR"
+	}
+	state := string(branch.PRState)
+	if branch.PRDraft {
+		state = "draft"
+	}
+	if state == "" || state == "none" {
+		state = "unknown"
+	}
+	return fmt.Sprintf("#%d %s", *branch.PRNumber, state)
+}
+
+// taskBranchChecksLabel reports CI and review side by side, and says "?" where
+// the daemon has no answer rather than letting a blank read as a pass.
+func taskBranchChecksLabel(branch TaskBranchRecord) string {
+	ci := string(branch.CIState)
+	if ci == "" || ci == "none" {
+		ci = "?"
+	}
+	if branch.CIRequiredTotal > 0 {
+		ci = fmt.Sprintf("%s %d/%d", ci, branch.CIRequiredPassed, branch.CIRequiredTotal)
+	}
+	review := string(branch.ReviewState)
+	if review == "" || review == "none" {
+		review = "?"
+	}
+	return "ci " + ci + "  review " + review
+}
+
 func githubStatusBadgeModel(task TaskRecord) *githubStatusBadge {
 	segments := []string{}
 	syncStatus := githubSyncStatusLabel(task)
 
 	switch {
 	case task.PRState == "merged":
-		segments = append(segments, "merged")
+		// Merging is no longer the end of the story, so a merged card reports
+		// how far its change has actually got instead of just "merged".
+		segments = append(segments, releaseStageLabel(task.Release))
 	case task.PRState == "closed":
 		segments = append(segments, "closed")
 	default:
@@ -2018,6 +2300,59 @@ func githubStatusBadgeModel(task TaskRecord) *githubStatusBadge {
 	return &githubStatusBadge{
 		Label: strings.Join(segments, "·"),
 		Tone:  githubStatusTone(task),
+	}
+}
+
+// releaseStageLabel describes a merged card's progress towards production.
+//
+// Falls back to "merged" whenever the stage is unknown or absent: the card must
+// never imply a change has shipped, nor that it has stalled, on the strength of
+// an answer the daemon could not get.
+func releaseStageLabel(release *TaskReleaseSummary) string {
+	if release == nil {
+		return "merged"
+	}
+
+	switch release.Stage {
+	case "ga":
+		if release.BlockingGaVersion != "" {
+			return "GA " + release.BlockingGaVersion
+		}
+		return "GA"
+	case "rolling-out":
+		if release.BlockingRcVersion != "" {
+			return "rollout " + release.BlockingRcVersion
+		}
+		return "rolling out"
+	case "rc-built":
+		if release.BlockingRcVersion != "" {
+			return "rc " + release.BlockingRcVersion
+		}
+		return "rc built"
+	case "awaiting-build":
+		return "merged·building"
+	case "no-artifact":
+		return "merged"
+	default:
+		return "merged"
+	}
+}
+
+// releaseStageTone colours the badge by how far production is.
+func releaseStageTone(release *TaskReleaseSummary) string {
+	if release == nil {
+		return "purple"
+	}
+
+	switch release.Stage {
+	case "ga":
+		return "purple"
+	case "rolling-out":
+		return "accent"
+	case "rc-built", "awaiting-build":
+		return "warning"
+	default:
+		return "purple"
 	}
 }
 
@@ -2081,7 +2416,7 @@ func githubStatusTone(task TaskRecord) string {
 	case task.GitHubSyncStatus == "error" && (task.PRState == "" || task.PRState == "none"):
 		return "danger"
 	case task.PRState == "merged":
-		return "purple"
+		return releaseStageTone(task.Release)
 	case task.CIState == "failed" || task.ReviewState == "changes_requested" || task.PRState == "closed":
 		return "danger"
 	case task.GitHubSyncStatus == "syncing":
@@ -2223,66 +2558,165 @@ func getTaskPRURL(task *TaskRecord, repo *RepoRecord) string {
 	return fmt.Sprintf("%s/pull/%d", repoURL, *task.PRNumber)
 }
 
-func canMergeTask(task TaskRecord) bool {
-	return task.PRState == "open" && !task.PRDraft && task.CIState == "passed" && task.ReviewState == "approved"
+// getBranchPRURL resolves one branch's PR link. A branch names its own repo, so
+// the link never has to be guessed from the card's repo — which on a cross-repo
+// card would open the wrong project.
+func getBranchPRURL(branch TaskBranchRecord, repo *RepoRecord) string {
+	if branch.PRURL != "" {
+		return branch.PRURL
+	}
+	if branch.PRNumber == nil || repo == nil {
+		return ""
+	}
+	repoURL := repo.GitHubURL
+	if repoURL == "" && repo.GitHubOwner != "" && repo.GitHubRepo != "" {
+		repoURL = "https://github.com/" + repo.GitHubOwner + "/" + repo.GitHubRepo
+	}
+	if repoURL == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/pull/%d", repoURL, *branch.PRNumber)
 }
 
-func getPRCommentBlockerReason(task TaskRecord) string {
-	prRef := "The PR"
-	if task.PRNumber != nil {
-		prRef = fmt.Sprintf("PR #%d", *task.PRNumber)
+// prStatus is the slice of pull-request state the merge and comment guards read.
+// A card and a single branch both reduce to it, so the rules are written once
+// and cannot drift apart between the card-level keys and the per-PR modal.
+type prStatus struct {
+	Number *int
+	State  PRState
+	Draft  bool
+	CI     CIState
+	Review ReviewState
+}
+
+func taskPRStatus(task TaskRecord) prStatus {
+	return prStatus{
+		Number: task.PRNumber,
+		State:  task.PRState,
+		Draft:  task.PRDraft,
+		CI:     task.CIState,
+		Review: task.ReviewState,
 	}
-	if task.PRNumber == nil || task.PRState == "none" {
+}
+
+func branchPRStatus(branch TaskBranchRecord) prStatus {
+	return prStatus{
+		Number: branch.PRNumber,
+		State:  branch.PRState,
+		Draft:  branch.PRDraft,
+		CI:     branch.CIState,
+		Review: branch.ReviewState,
+	}
+}
+
+func (s prStatus) isOpen() bool {
+	return s.State == "open" || s.State == "draft"
+}
+
+func (s prStatus) canMerge() bool {
+	return s.State == "open" && !s.Draft && s.CI == "passed" && s.Review == "approved"
+}
+
+func (s prStatus) ref() string {
+	if s.Number == nil {
+		return "The PR"
+	}
+	return fmt.Sprintf("PR #%d", *s.Number)
+}
+
+func (s prStatus) commentBlockerReason() string {
+	prRef := s.ref()
+	if s.Number == nil || s.State == "none" {
 		return "Selected task has no pull request."
 	}
-	if task.PRState == "merged" {
+	if s.State == "merged" {
 		return prRef + " is already merged."
 	}
-	if task.PRState == "closed" {
+	if s.State == "closed" {
 		return prRef + " is closed."
 	}
-	if !hasOpenPR(task) {
+	if !s.isOpen() {
 		return prRef + " is not open."
 	}
 	return ""
 }
 
-func getMergeBlockerReason(task TaskRecord) string {
-	prRef := "The PR"
-	if task.PRNumber != nil {
-		prRef = fmt.Sprintf("PR #%d", *task.PRNumber)
-	}
-	if task.PRNumber == nil || task.PRState == "none" {
+func (s prStatus) mergeBlockerReason() string {
+	prRef := s.ref()
+	if s.Number == nil || s.State == "none" {
 		return "Selected task has no pull request."
 	}
-	if task.PRDraft || task.PRState == "draft" {
+	if s.Draft || s.State == "draft" {
 		return prRef + " is still draft."
 	}
-	if task.PRState == "merged" {
+	if s.State == "merged" {
 		return prRef + " is already merged."
 	}
-	if task.PRState == "closed" {
+	if s.State == "closed" {
 		return prRef + " is closed."
 	}
-	if task.PRState != "open" {
+	if s.State != "open" {
 		return prRef + " is not open."
 	}
-	if task.ReviewState == "changes_requested" {
+	if s.Review == "changes_requested" {
 		return prRef + " still has requested changes."
 	}
-	if task.ReviewState != "approved" {
+	if s.Review != "approved" {
 		return prRef + " is not approved yet."
 	}
-	if task.CIState == "failed" {
+	if s.CI == "failed" {
 		return prRef + " has failing checks."
 	}
-	if task.CIState == "pending" {
+	if s.CI == "pending" {
 		return prRef + " checks are still pending."
 	}
-	if task.CIState != "passed" {
+	if s.CI != "passed" {
 		return prRef + " does not have a passing build yet."
 	}
 	return ""
+}
+
+// multiBranchChoiceReason is why a card-level PR action must refuse. Once a card
+// carries several PRs the daemon leaves tasks.PRNumber nil on purpose, so acting
+// "on the card's PR" would mean merging or commenting on an arbitrary one.
+func multiBranchChoiceReason(task TaskRecord) string {
+	if !hasMultipleBranches(task) {
+		return ""
+	}
+	return fmt.Sprintf("This card has %d PRs — press E to choose a PR.", len(task.Branches))
+}
+
+func canMergeTask(task TaskRecord) bool {
+	if hasMultipleBranches(task) {
+		return false
+	}
+	return taskPRStatus(task).canMerge()
+}
+
+func canMergeBranchPR(branch TaskBranchRecord) bool {
+	return branchPRStatus(branch).canMerge()
+}
+
+func getPRCommentBlockerReason(task TaskRecord) string {
+	if reason := multiBranchChoiceReason(task); reason != "" {
+		return reason
+	}
+	return taskPRStatus(task).commentBlockerReason()
+}
+
+func getBranchPRCommentBlockerReason(branch TaskBranchRecord) string {
+	return branchPRStatus(branch).commentBlockerReason()
+}
+
+func getMergeBlockerReason(task TaskRecord) string {
+	if reason := multiBranchChoiceReason(task); reason != "" {
+		return reason
+	}
+	return taskPRStatus(task).mergeBlockerReason()
+}
+
+func getBranchMergeBlockerReason(branch TaskBranchRecord) string {
+	return branchPRStatus(branch).mergeBlockerReason()
 }
 
 func taskLocationMarker(task TaskRecord) string {
@@ -2380,7 +2814,11 @@ func headerText(icon, value, color string) string {
 func kbdHints(focus AppFocus) string {
 	switch focus {
 	case FocusBoard:
-		return "↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G rollout  1-9 repo  ? help"
+		// e/E lead: this string already overflows a narrow terminal, and the PR
+		// pane and picker are the only way to act on a card with several PRs.
+		return "e PRs pane  E PR actions  ↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G rollout  1-9 repo  ? help"
+	case FocusDetail:
+		return "↑↓ branch  ←→ card  E PR actions  e/Esc close"
 	case FocusMissions:
 		return "j/k move  a/A ai chat  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
 	case FocusTerminal:
