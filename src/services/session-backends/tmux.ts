@@ -193,6 +193,7 @@ export class TmuxBackend implements SessionBackend {
         sessionBootstrapScript: opts.sessionBootstrapScript,
         agentPermissionMode: opts.agentPermissionMode,
         agentArgs: opts.agentArgs,
+        agentSessionId: opts.agentSessionId,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
     }
