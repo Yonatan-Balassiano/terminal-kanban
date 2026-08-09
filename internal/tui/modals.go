@@ -172,6 +172,9 @@ type artifactRolloutModalState struct {
 	MyPendingCount  *int
 	GradualityIndex int
 	Confirm         string
+	// Set when the rollout was opened from a card, naming what it ships so the
+	// confirmation is about the user's own change rather than a bare version.
+	ShippingCard string
 }
 
 type missionDependenciesModalState struct {
@@ -636,7 +639,21 @@ func (m *Model) handleArtifactListModalKey(key tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// openArtifactRolloutModal ships the selected card's change if it has one to
+// ship, and otherwise falls back to the artifact selected in the footer.
+//
+// A card in `rc-built` already knows the exact artifact and version that carry
+// its change; making the user find that artifact in the footer and work out the
+// version by hand was the missing half of answering "has it shipped yet".
 func (m *Model) openArtifactRolloutModal() {
+	if state := m.cardRolloutState(); state != nil {
+		m.closeModal()
+		m.modal = ModalArtifactRollout
+		m.focus = FocusModal
+		m.artifactRolloutModal = state
+		return
+	}
+
 	artifact := m.selectedArtifact()
 	if artifact == nil {
 		m.statusMessage = "No artifact to roll out."
@@ -656,6 +673,51 @@ func (m *Model) openArtifactRolloutModal() {
 		PendingRcCount: artifact.PendingRcCount,
 		MyPendingCount: artifact.MyPendingCount,
 	}
+}
+
+// cardRolloutState describes the rollout that would ship the selected card.
+//
+// Returns nil whenever the card has nothing to ship, so `G` keeps its original
+// meaning everywhere else rather than becoming context-dependent guesswork.
+//
+// The target is the release candidate that carries this card's change, not the
+// newest one: rolling out further would ship work the user never looked at.
+func (m *Model) cardRolloutState() *artifactRolloutModalState {
+	task := m.selectedTask()
+	if task == nil || task.Release == nil {
+		return nil
+	}
+
+	release := task.Release
+	// Only a built-but-unshipped candidate can be promoted. `rolling-out` is
+	// already on its way, and the earlier stages have no version yet.
+	if release.Stage != "rc-built" {
+		return nil
+	}
+	if release.BlockingArtifactName == "" || release.BlockingRcVersion == "" {
+		return nil
+	}
+
+	state := &artifactRolloutModalState{
+		Name: release.BlockingArtifactName,
+		// Snapshotted, like the footer path: the version shipped is the one the
+		// user read, even if a newer candidate lands while the modal is open.
+		CurrentVersion: release.BlockingGaVersion,
+		TargetVersion:  release.BlockingRcVersion,
+		ShippingCard:   task.Title,
+	}
+
+	// Ownership counts come from the catalog, which the card summary does not
+	// carry; showing them keeps the modal identical either way it was opened.
+	for _, artifact := range m.artifacts.Artifacts {
+		if artifact.Name == release.BlockingArtifactName {
+			state.PendingRcCount = artifact.PendingRcCount
+			state.MyPendingCount = artifact.MyPendingCount
+			break
+		}
+	}
+
+	return state
 }
 
 // Only a drifting artifact has an RC ahead of GA to promote; anything else would

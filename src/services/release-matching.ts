@@ -193,7 +193,14 @@ export function summarizeRelease(
     gaCount: gating.filter((status) => status.stage === 'ga' || status.stage === 'no-artifact')
       .length,
     gatingCount: gating.length,
-    ...(blocker?.artifactName ? { blockingArtifact: blocker.shortName } : {}),
+    ...(blocker?.artifactName
+      ? {
+          blockingArtifact: blocker.shortName,
+          // The full project id as well, because rolling the card's change out
+          // needs to name the artifact to devex, and the short name cannot.
+          blockingArtifactName: blocker.artifactName,
+        }
+      : {}),
     ...(blocker?.containingRcVersion ? { blockingRcVersion: blocker.containingRcVersion } : {}),
     ...(blocker?.gaVersion ? { blockingGaVersion: blocker.gaVersion } : {}),
     checkedAt: Math.max(...gating.map((status) => status.checkedAt)),
