@@ -135,6 +135,101 @@ export class TaskLifecycleService {
     }
   }
 
+  /**
+   * Remove every worktree a card owns, across every repo it touched.
+   *
+   * All of them are attempted before any unreachable host is reported, so one
+   * dead remote cannot strand the local worktrees alongside it.
+   */
+  private async removeAllTaskWorktrees(task: TaskCleanupContext): Promise<void> {
+    const branches = this.board.getTaskBranches?.(task.id) ?? [];
+    let unreachable: unknown;
+
+    for (const branch of branches) {
+      if (!branch.worktreePath) {
+        continue;
+      }
+
+      const repoPath = this.repoPathForBranch(branch.repoId, task.location);
+      if (!repoPath) {
+        continue;
+      }
+
+      try {
+        if (!(await this.transportFor(task.location).exists(branch.worktreePath))) {
+          continue;
+        }
+        await this.gitFor(task.location).removeWorktreeAsync(repoPath, branch.worktreePath);
+        this.board.setTaskBranchWorktree?.(branch.id, null);
+      } catch (error) {
+        if (error instanceof TransportUnreachableError) {
+          unreachable ??= error;
+          continue;
+        }
+        // A corrupt worktree must never make a card impossible to delete.
+      }
+    }
+
+    // The card's own recorded path mirrors the active branch; clear it too so a
+    // card that predates branches is still cleaned up.
+    await this.removeTaskWorktree(task);
+
+    if (unreachable) {
+      throw unreachable;
+    }
+  }
+
+  /**
+   * Release one branch's worktree, on whichever host the card lives on.
+   *
+   * Exposed so branch-scoped callers do not reimplement it against the local
+   * transport — doing that silently leaks every remote worktree, because the
+   * probe and the removal both have to run on the card's own host.
+   *
+   * Returns whether the worktree is gone, so a caller can decide whether it is
+   * safe to forget where it was.
+   */
+  async removeBranchWorktree(branchId: string): Promise<boolean> {
+    const branch = this.board.getTaskBranch(branchId);
+    if (!branch?.worktreePath) {
+      return true;
+    }
+
+    const task = this.loadTaskCleanupContext(branch.taskId);
+    const repoPath = this.repoPathForBranch(branch.repoId, task.location);
+    if (!repoPath) {
+      return false;
+    }
+
+    try {
+      if (!(await this.transportFor(task.location).exists(branch.worktreePath))) {
+        return true;
+      }
+      await this.gitFor(task.location).removeWorktreeAsync(repoPath, branch.worktreePath);
+      this.board.setTaskBranchWorktree?.(branchId, null);
+      return true;
+    } catch (error) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      // A corrupt worktree must not make the branch impossible to remove, but
+      // the caller has to know the directory is still there.
+      return false;
+    }
+  }
+
+  private repoPathForBranch(repoId: string, location: TaskLocation): string | undefined {
+    const row = this.db
+      .prepare<[string], { path: string; remote_path: string | null }>(
+        'SELECT path, remote_path FROM repos WHERE id = ?',
+      )
+      .get(repoId);
+    if (!row) {
+      return undefined;
+    }
+    return location === 'remote' ? (row.remote_path ?? row.path) : row.path;
+  }
+
   async archiveTask(taskId: string): Promise<void> {
     const task = this.loadTaskCleanupContext(taskId);
     this.board.archiveTask(taskId);
@@ -143,7 +238,7 @@ export class TaskLifecycleService {
       return;
     }
 
-    await this.removeTaskWorktree(task);
+    await this.removeAllTaskWorktrees(task);
   }
 
   async cleanupTaskResources(taskId: string): Promise<void> {
@@ -160,7 +255,7 @@ export class TaskLifecycleService {
       }
     }
 
-    await this.removeTaskWorktree(task);
+    await this.removeAllTaskWorktrees(task);
   }
 
   async deleteTask(taskId: string): Promise<void> {

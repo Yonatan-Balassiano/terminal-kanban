@@ -159,6 +159,82 @@ CREATE TABLE IF NOT EXISTS mission_dependencies (
   PRIMARY KEY (mission_id, blocker_task_id, blocked_task_id)
 );
 
+-- One repo + branch a card is working in, with the pull request that branch
+-- carries. A feature spanning several repositories has one row per repository,
+-- and stacked work in one repository has one row per branch — hence the
+-- identity below being (task, repo, branch) rather than (task, repo).
+--
+-- The matching columns on tasks are a rollup of these rows, kept so everything
+-- that only wants "how is this card doing?" reads one row as it always has.
+CREATE TABLE IF NOT EXISTS task_branches (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  branch_name TEXT NOT NULL,
+  base_branch TEXT,
+  worktree_path TEXT,
+  sort_key REAL NOT NULL DEFAULT 0,
+  pr_number INTEGER,
+  pr_url TEXT,
+  pr_state TEXT NOT NULL DEFAULT 'none',
+  pr_draft INTEGER NOT NULL DEFAULT 0,
+  merge_commit_sha TEXT,
+  merged_at INTEGER,
+  ci_state TEXT NOT NULL DEFAULT 'none',
+  ci_summary TEXT,
+  failing_check_name TEXT,
+  ci_required_total INTEGER NOT NULL DEFAULT 0,
+  ci_required_passed INTEGER NOT NULL DEFAULT 0,
+  ci_required_failed INTEGER NOT NULL DEFAULT 0,
+  ci_required_pending INTEGER NOT NULL DEFAULT 0,
+  review_state TEXT NOT NULL DEFAULT 'none',
+  review_summary TEXT,
+  unresolved_thread_count INTEGER NOT NULL DEFAULT 0,
+  git_state TEXT NOT NULL DEFAULT 'unknown',
+  git_ahead_count INTEGER NOT NULL DEFAULT 0,
+  git_behind_count INTEGER NOT NULL DEFAULT 0,
+  has_untracked INTEGER NOT NULL DEFAULT 0,
+  has_conflicts INTEGER NOT NULL DEFAULT 0,
+  github_sync_status TEXT NOT NULL DEFAULT 'idle',
+  github_sync_error TEXT,
+  github_last_synced_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_branches_identity
+  ON task_branches(task_id, repo_id, branch_name);
+CREATE INDEX IF NOT EXISTS idx_task_branches_task ON task_branches(task_id, sort_key);
+CREATE INDEX IF NOT EXISTS idx_task_branches_lookup ON task_branches(repo_id, branch_name);
+
+-- How far each merged pull request has travelled towards production, per
+-- artifact it touched. Keyed by the pull request rather than by any task-side
+-- row so it survives the card's own branch bookkeeping changing shape.
+--
+-- artifact_name is '' for a verdict that belongs to the pull request as a whole
+-- (nothing tracked to ship, or the repository is not tracked at all).
+CREATE TABLE IF NOT EXISTS pr_release_status (
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  repo_slug TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  artifact_name TEXT NOT NULL,
+  stage TEXT NOT NULL DEFAULT 'unknown',
+  confidence TEXT NOT NULL DEFAULT 'unknown',
+  evidence TEXT NOT NULL DEFAULT 'none',
+  reason TEXT,
+  gates INTEGER NOT NULL DEFAULT 1,
+  containing_rc_version TEXT,
+  containing_rc_commit TEXT,
+  ga_version_at_check TEXT,
+  rollout_to_version TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  checked_at INTEGER NOT NULL,
+  next_check_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (task_id, repo_slug, pr_number, artifact_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_release_next_check ON pr_release_status(next_check_at);
+CREATE INDEX IF NOT EXISTS idx_pr_release_task ON pr_release_status(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_repo ON tasks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_track ON tasks(track_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_pillar ON tasks(pillar_id);

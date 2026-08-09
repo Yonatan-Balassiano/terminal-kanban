@@ -11,6 +11,8 @@ import (
 const (
 	commandPaletteWidth = 86
 	commandVisibleRows  = 8
+	branchPRListWidth   = 86
+	branchPRVisibleRows = 6
 	filterColumnWidth   = 28
 	filterVisibleRows   = 8
 	aiChatModalWidth    = 96
@@ -57,6 +59,8 @@ func renderModal(m *Model) string {
 		return renderMissionDependenciesModal(m)
 	case ModalArtifactRollout:
 		return renderArtifactRolloutModal(m)
+	case ModalBranchPRList:
+		return renderBranchPRListModal(m)
 	default:
 		return lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
@@ -602,6 +606,92 @@ func renderCommandPaletteModal(m *Model) string {
 	))
 
 	return modalBox(lipgloss.DoubleBorder(), strings.Join(lines, "\n"))
+}
+
+// renderBranchPRListModal is the acting counterpart of the detail pane: the same
+// rows, but over the board, where a keypress lands on the PR under the cursor
+// rather than on whichever one the card's rollup happened to pick.
+func renderBranchPRListModal(m *Model) string {
+	state := m.branchPRListModal
+	if state == nil {
+		return ""
+	}
+	task := m.taskByID(state.TaskID)
+	if task == nil {
+		return ""
+	}
+	branches := task.Branches
+
+	lines := []string{
+		joinSpaceBetween(strings.Join([]string{
+			badge("PULL REQUESTS", "accent", "", false),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(task.Title, 40)),
+		}, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Esc close"), branchPRListWidth-4),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(toneColor(releaseStageTone(task.Release)))).
+			Render(truncateText("release "+releaseStageLabel(task.Release), branchPRListWidth-4)),
+		"",
+	}
+
+	if len(branches) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+			Render("This card has no tracked branch yet."))
+		return modalBox(lipgloss.DoubleBorder(), strings.Join(lines, "\n"))
+	}
+
+	selected := clamp(state.Index, 0, len(branches)-1)
+	windowStart := commandWindowStart(selected, len(branches), branchPRVisibleRows)
+	visible := branches[windowStart:min(len(branches), windowStart+branchPRVisibleRows)]
+	for offset, branch := range visible {
+		lines = append(lines, renderBranchPRRow(m, *task, branch, windowStart+offset == selected))
+		if offset < len(visible)-1 {
+			lines = append(lines, "")
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, joinSpaceBetween(
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑/k ↓ move  o open  v checks  j comment  m merge"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(fmt.Sprintf("%d/%d", selected+1, len(branches))),
+		branchPRListWidth-4,
+	))
+
+	return modalBox(lipgloss.DoubleBorder(), strings.Join(lines, "\n"))
+}
+
+func renderBranchPRRow(m *Model, task TaskRecord, branch TaskBranchRecord, selected bool) string {
+	borderColor := uiChrome.Line
+	if selected {
+		borderColor = uiChrome.Accent
+	}
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
+	if selected {
+		titleStyle = titleStyle.Bold(true)
+	}
+
+	// The reason a merge would be refused is shown on the row itself, so the
+	// answer to "why can't I merge this one" never needs a second keypress.
+	detail := taskBranchChecksLabel(branch)
+	detailColor := uiChrome.Muted
+	if blocker := getBranchMergeBlockerReason(branch); blocker != "" && branch.PRState != "merged" {
+		detail = detail + "  ·  " + blocker
+		detailColor = uiChrome.Warning
+	}
+
+	return lipgloss.NewStyle().
+		Width(branchPRListWidth-4).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Padding(0, 1).
+		Render(
+			joinSpaceBetween(strings.Join([]string{
+				lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(selected, uiChrome.Accent, uiChrome.Muted))).Render(ternaryString(selected, "▸", " ")),
+				badge(strings.ToUpper(truncateText(m.taskBranchRepoLabel(branch), 16)), "muted", "", false),
+				titleStyle.Render(truncateText(compactBranchLabel(branch.BranchName), 32)),
+			}, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(
+				taskBranchGlyph(branch, task.Release)+"  "+taskBranchPRLabel(branch),
+			), branchPRListWidth-8) + "\n" +
+				lipgloss.NewStyle().Foreground(lipgloss.Color(detailColor)).Render(truncateText(detail, branchPRListWidth-8)),
+		)
 }
 
 func renderMissionDependenciesModal(m *Model) string {

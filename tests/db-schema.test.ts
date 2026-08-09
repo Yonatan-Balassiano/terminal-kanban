@@ -110,4 +110,51 @@ describe('database schema bootstrap', () => {
       db.close();
     }
   });
+
+  it('adds a table missing from an existing database without dropping the board', () => {
+    // Arrange — a database at the current version, holding real rows, that
+    // predates a table added later. Dropping and recreating would destroy it,
+    // so the additive path has to create the table in place.
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-db-'));
+    const dbPath = join(dir, 'agentboard.db');
+    tempDirs.push(dir);
+
+    let db: Db = openDb(dbPath);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, default_base_branch, health, worktree_mode, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('repo-1', 'Repo', '/tmp/repo-1', 'main', 'ok', 'auto', 1, 1);
+    db.exec('DROP TABLE pr_release_status');
+    db.close();
+
+    // Act
+    db = openDb(dbPath);
+
+    // Assert
+    try {
+      const table = db
+        .prepare<[], { name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pr_release_status'",
+        )
+        .get();
+      expect(table).toBeDefined();
+
+      // The table's indexes come from the same schema file and are easy to
+      // silently miss, since a missing index costs correctness nothing.
+      const indexes = db
+        .prepare<[], { name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'pr_release_status'",
+        )
+        .all()
+        .map((row) => row.name);
+      expect(indexes).toContain('idx_pr_release_next_check');
+      expect(indexes).toContain('idx_pr_release_task');
+
+      const repos = db.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM repos').get();
+      expect(repos.count).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
 });

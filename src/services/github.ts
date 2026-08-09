@@ -28,6 +28,42 @@ export interface RequiredCheckSummary {
   ciRequiredPending: number;
 }
 
+/**
+ * The immutable half of a pull request.
+ *
+ * Deliberately separate from {@link PRInfo}: once a PR is merged these fields
+ * never change, so they are fetched once and cached forever, while PRInfo's
+ * CI and review fields churn on every sync. Folding `files` into the snapshot
+ * would refetch the whole changed-file list every fifteen seconds.
+ */
+export interface PRMergeInfo {
+  number: number;
+  merged: boolean;
+  mergeCommitSha?: string;
+  /**
+   * Verbatim from `gh`, e.g. `2026-07-29T10:02:52Z`. Never reformat it — the
+   * devex release query filters on this string, and round-tripping through
+   * `Date#toISOString` injects a `.000` that changes the filter.
+   */
+  mergedAt?: string;
+  files: string[];
+}
+
+/** How two commits relate. `null` means the comparison could not be made. */
+export interface CommitComparison {
+  status: 'ahead' | 'behind' | 'identical' | 'diverged';
+  aheadBy: number;
+}
+
+/** One pull request discovered by a cross-repo branch search. */
+export interface DiscoveredPR {
+  number: number;
+  repoSlug: string;
+  prState: PRState;
+  url: string;
+  mergedAt?: string;
+}
+
 export type GitHubServiceErrorKind =
   | 'not_found'
   | 'auth'
@@ -77,6 +113,44 @@ interface GhPRCheck {
   name?: string | null;
   state?: string | null;
   workflow?: string | null;
+}
+
+interface GhPRMergeJson {
+  number: number;
+  state: string;
+  mergedAt?: string | null;
+  mergeCommit?: { oid?: string | null } | null;
+  files?: Array<{ path?: string | null }> | null;
+}
+
+interface GhCompareJson {
+  status?: string | null;
+  ahead_by?: number | null;
+}
+
+interface GhSearchIssuesJson {
+  items?: Array<{
+    number?: number | null;
+    html_url?: string | null;
+    state?: string | null;
+    draft?: boolean | null;
+    repository_url?: string | null;
+    pull_request?: { merged_at?: string | null } | null;
+  }> | null;
+}
+
+/** `https://api.github.com/repos/wix-private/web5` -> `wix-private/web5`. */
+function slugFromRepositoryUrl(url: string | null | undefined): string | null {
+  if (!url) {
+    return null;
+  }
+
+  const parts = url.split('/').filter((part) => part.length > 0);
+  if (parts.length < 2) {
+    return null;
+  }
+
+  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
 }
 
 function normalizeCheckField(value: string | null | undefined): string {
@@ -463,6 +537,153 @@ export class GitHubService {
       reviewSummary,
       unresolvedThreadCount: 0,
     };
+  }
+
+  /**
+   * The merge commit, merge time and changed paths of a pull request.
+   *
+   * Everything here is immutable once the PR is merged, so callers cache the
+   * result indefinitely rather than refetching it on the sync loop.
+   */
+  async getMergeInfo(
+    repoPath: string,
+    prNumber: number,
+    githubRepo: string,
+  ): Promise<PRMergeInfo | null> {
+    const fields = 'number,state,mergedAt,mergeCommit,files';
+    let raw: string;
+    try {
+      raw = await this.ghAsync(
+        ['pr', 'view', String(prNumber), '--repo', githubRepo, '--json', fields],
+        repoPath,
+      );
+    } catch (error: unknown) {
+      if (error instanceof GitHubServiceError && error.kind === 'not_found') {
+        return null;
+      }
+      throw error;
+    }
+
+    const data = JSON.parse(raw) as GhPRMergeJson;
+    const mergeCommitSha = data.mergeCommit?.oid ?? undefined;
+    const mergedAt = data.mergedAt ?? undefined;
+
+    return {
+      number: data.number,
+      merged: normalizeCheckField(data.state) === 'MERGED',
+      ...(mergeCommitSha ? { mergeCommitSha } : {}),
+      ...(mergedAt ? { mergedAt } : {}),
+      files: (data.files ?? [])
+        .map((file) => file.path ?? '')
+        .filter((path) => path.length > 0),
+    };
+  }
+
+  /**
+   * How `head` relates to `base`.
+   *
+   * `ahead` or `identical` means head contains base — which is how a release
+   * candidate is proven to carry a given merge commit. Returns null when the
+   * comparison cannot be made (either commit unknown to this repo).
+   */
+  async compareCommits(
+    repoPath: string,
+    githubRepo: string,
+    base: string,
+    head: string,
+  ): Promise<CommitComparison | null> {
+    let raw: string;
+    try {
+      raw = await this.ghAsync(
+        [
+          'api',
+          `repos/${githubRepo}/compare/${base}...${head}`,
+          // The compare payload embeds up to 250 commits; only the verdict is
+          // needed, and asking for it keeps the response tiny.
+          '--jq',
+          '{status: .status, ahead_by: .ahead_by}',
+        ],
+        repoPath,
+      );
+    } catch (error: unknown) {
+      if (error instanceof GitHubServiceError && error.kind === 'not_found') {
+        return null;
+      }
+      throw error;
+    }
+
+    if (raw.length === 0) {
+      return null;
+    }
+
+    const data = JSON.parse(raw) as GhCompareJson;
+    const status = data.status ?? '';
+    if (
+      status !== 'ahead' &&
+      status !== 'behind' &&
+      status !== 'identical' &&
+      status !== 'diverged'
+    ) {
+      return null;
+    }
+
+    return { status, aheadBy: data.ahead_by ?? 0 };
+  }
+
+  /**
+   * Every pull request in an org whose head branch has this name.
+   *
+   * One call regardless of how many repositories the org holds, which is what
+   * makes discovering a feature's sibling PRs affordable on the sync loop.
+   * Note `org:` and `repo:` do not compose in GitHub's search syntax — this
+   * deliberately passes only `org:`.
+   */
+  async findPRsByHeadBranch(
+    repoPath: string,
+    org: string,
+    branch: string,
+  ): Promise<DiscoveredPR[]> {
+    const raw = await this.ghAsync(
+      [
+        'api',
+        '-X',
+        'GET',
+        'search/issues',
+        '-f',
+        `q=type:pr org:${org} head:${branch}`,
+        '-f',
+        'per_page=20',
+      ],
+      repoPath,
+    );
+
+    if (raw.length === 0) {
+      return [];
+    }
+
+    const data = JSON.parse(raw) as GhSearchIssuesJson;
+    const found: DiscoveredPR[] = [];
+
+    for (const item of data.items ?? []) {
+      const repoSlug = slugFromRepositoryUrl(item.repository_url);
+      if (repoSlug === null || typeof item.number !== 'number') {
+        continue;
+      }
+
+      const mergedAt = item.pull_request?.merged_at ?? undefined;
+      // Search reports merged PRs as `closed`; only merged_at separates them.
+      const state = mergedAt ? 'MERGED' : (item.state ?? '');
+
+      found.push({
+        number: item.number,
+        repoSlug,
+        prState: normalizePRState(state, item.draft ?? false),
+        url: item.html_url ?? '',
+        ...(mergedAt ? { mergedAt } : {}),
+      });
+    }
+
+    return found;
   }
 
   async getChecks(

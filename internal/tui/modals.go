@@ -31,6 +31,11 @@ const (
 	artifactRolloutConfirmWord = "GA"
 )
 
+// ModalBranchPRList is declared here rather than with the other ModalType values
+// because types.go is a frozen contract shared with the daemon; a modal is TUI
+// state that never crosses the socket.
+const ModalBranchPRList ModalType = "branch-pr-list"
+
 // gradual_safer leads because it is the slower, more reversible rollout.
 var artifactGradualityOptions = []string{"gradual_safer", "gradual_quicker"}
 
@@ -91,7 +96,17 @@ type taskDescriptionModalState struct {
 
 type prCommentModalState struct {
 	TaskID string
-	Value  string
+	// Set when the composer was opened from the PR picker. Empty means the old
+	// card-level path, which only a single-branch card can still take.
+	BranchID string
+	Value    string
+}
+
+// branchPRListModalState is the PR picker: which card's PRs, and which one the
+// next action lands on.
+type branchPRListModalState struct {
+	TaskID string
+	Index  int
 }
 
 type deleteMissionConfirmModalState struct {
@@ -287,6 +302,7 @@ func (m *Model) closeModal() {
 	m.aiChatModal = nil
 	m.missionDependenciesModal = nil
 	m.artifactRolloutModal = nil
+	m.branchPRListModal = nil
 }
 
 func (m *Model) openHelpModal() {
@@ -471,6 +487,37 @@ func (m *Model) openPRCommentModal(task *TaskRecord) {
 	m.modal = ModalPRComment
 	m.focus = FocusModal
 	m.prCommentModal = &prCommentModalState{TaskID: task.ID}
+}
+
+// openBranchPRCommentModal composes a comment aimed at one branch's PR, so the
+// picker can offer 'j' on a card whose card-level PR is deliberately nil.
+func (m *Model) openBranchPRCommentModal(taskID string, branch TaskBranchRecord) {
+	if blocker := getBranchPRCommentBlockerReason(branch); blocker != "" {
+		m.statusMessage = blocker
+		return
+	}
+	m.closeModal()
+	m.modal = ModalPRComment
+	m.focus = FocusModal
+	m.prCommentModal = &prCommentModalState{TaskID: taskID, BranchID: branch.ID}
+}
+
+// openBranchPRListModal opens the PR picker. It opens for a single-branch card
+// too: the point is one place that always answers "which PRs does this card
+// have", not a screen that only appears once things are complicated.
+func (m *Model) openBranchPRListModal(task *TaskRecord) {
+	if task == nil {
+		m.statusMessage = "Select a card to list its PRs."
+		return
+	}
+	if len(task.Branches) == 0 {
+		m.statusMessage = "This card has no tracked branch yet."
+		return
+	}
+	m.closeModal()
+	m.modal = ModalBranchPRList
+	m.focus = FocusModal
+	m.branchPRListModal = &branchPRListModalState{TaskID: task.ID}
 }
 
 func (m *Model) openArtifactRolloutModal() {
@@ -704,6 +751,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleMissionDependenciesModalKey(key)
 	case ModalArtifactRollout:
 		return m.handleArtifactRolloutModalKey(key)
+	case ModalBranchPRList:
+		return m.handleBranchPRListModalKey(key)
 	default:
 		if key.Type == tea.KeyEsc {
 			m.closeModal()
@@ -1171,12 +1220,23 @@ func (m *Model) handlePRCommentModalKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	case tea.KeyEnter:
 		taskID := state.TaskID
+		branchID := state.BranchID
 		body := strings.TrimSpace(state.Value)
 		if body == "" {
 			return nil
 		}
 		task := m.taskByID(taskID)
+		branch := m.taskBranchByID(taskID, branchID)
 		m.closeModal()
+		// A composer opened from the picker keeps its aim even if the board has
+		// been resynced underneath it.
+		if branchID != "" {
+			if branch == nil {
+				m.statusMessage = "That PR is no longer on this card."
+				return nil
+			}
+			return m.commentTaskBranchPRCmd(*branch, body)
+		}
 		return m.commentTaskPRCmd(task, body)
 	case tea.KeyBackspace, tea.KeyDelete:
 		state.Value = trimLastRune(state.Value)
@@ -1184,6 +1244,85 @@ func (m *Model) handlePRCommentModalKey(key tea.KeyMsg) tea.Cmd {
 	}
 	if next, changed := appendPrintableInput(state.Value, key); changed {
 		state.Value = next
+	}
+	return nil
+}
+
+// handleBranchPRListModalKey drives the PR picker. The action keys are the board's
+// own — o open, v checks, j comment, m merge — so the picker adds a target rather
+// than a new vocabulary.
+func (m *Model) handleBranchPRListModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.branchPRListModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+	branches := m.branchPRListBranches()
+	if len(branches) == 0 {
+		m.closeModal()
+		m.statusMessage = "This card has no tracked branch yet."
+		return nil
+	}
+
+	state.Index = clamp(state.Index, 0, len(branches)-1)
+	selected := branches[state.Index]
+
+	switch key.String() {
+	case "esc", "E", "q":
+		m.closeModal()
+		return nil
+	// 'k'/'j' rather than only the arrows: this list is read and acted on in one
+	// pass, and 'j' means comment on the board, not "down".
+	case "up", "k":
+		state.Index = clamp(state.Index-1, 0, len(branches)-1)
+		return nil
+	case "down":
+		state.Index = clamp(state.Index+1, 0, len(branches)-1)
+		return nil
+	case "o", "enter":
+		m.closeModal()
+		return m.openBranchPRCmd(selected, false)
+	case "v":
+		m.closeModal()
+		return m.openBranchPRCmd(selected, true)
+	case "j":
+		m.openBranchPRCommentModal(state.TaskID, selected)
+		return nil
+	case "m":
+		// Stay open when the merge is refused, so the reason can be read against
+		// the row it belongs to and another PR picked without reopening.
+		if blocker := getBranchMergeBlockerReason(selected); blocker != "" {
+			m.statusMessage = blocker
+			return nil
+		}
+		m.closeModal()
+		return m.mergeTaskBranchPRCmd(selected)
+	}
+	return nil
+}
+
+// branchPRListBranches re-reads the card's branches on every keypress, so a board
+// refresh that drops a branch cannot leave the picker acting on a stale row.
+func (m *Model) branchPRListBranches() []TaskBranchRecord {
+	if m.branchPRListModal == nil {
+		return nil
+	}
+	task := m.taskByID(m.branchPRListModal.TaskID)
+	if task == nil {
+		return nil
+	}
+	return task.Branches
+}
+
+func (m *Model) taskBranchByID(taskID, branchID string) *TaskBranchRecord {
+	task := m.taskByID(taskID)
+	if task == nil || branchID == "" {
+		return nil
+	}
+	for index := range task.Branches {
+		if task.Branches[index].ID == branchID {
+			return &task.Branches[index]
+		}
 	}
 	return nil
 }
@@ -1837,10 +1976,10 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "open-workspace", Title: "Reveal workspace", Section: "Workspace", Detail: "Open the current task workspace in Finder or Explorer.", Shortcut: "x", Keywords: []string{"finder", "explorer", "folder"}, Disabled: contextTask == nil, DisabledReason: "Select a task to reveal its workspace."},
 		{ID: "create-pr", Title: "Create or ensure pull request", Section: "GitHub", Detail: "Create the PR immediately for the current task branch.", Shortcut: "c", Keywords: []string{"github", "pull request"}, Disabled: contextTask == nil || contextTask.IsGeneral(), DisabledReason: "Select a repo task to create a pull request."},
 		{ID: "retry-pushed-pr-creation", Title: "Retry pushed-branch PR creation", Section: "GitHub", Detail: "Restart the background PR creation watcher after a branch push.", Shortcut: "C", Keywords: []string{"github", "pull request", "push", "retry"}, Disabled: contextTask == nil || contextTask.BranchName == "", DisabledReason: "Select a task with a branch to watch for PR creation."},
-		{ID: "comment-pr", Title: "Comment on pull request", Section: "GitHub", Detail: "Open a composer and post a comment with gh CLI.", Shortcut: "j", Keywords: []string{"github", "pull request", "comment"}, Disabled: contextTask == nil || !canCommentOnTaskPR(*contextTask), DisabledReason: "The current task does not have an open or draft pull request."},
-		{ID: "open-pr", Title: "Open pull request", Section: "GitHub", Detail: "Open the current task PR in the browser.", Shortcut: "o", Keywords: []string{"github", "browser", "pr"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: "The current task does not have an open pull request."},
-		{ID: "open-checks", Title: "Open pull request checks", Section: "GitHub", Detail: "Open CI checks for the current task PR.", Shortcut: "v", Keywords: []string{"github", "checks", "ci"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: "The current task does not have an open pull request."},
-		{ID: "merge-pr", Title: "Merge pull request", Section: "GitHub", Detail: "Squash merge the current task PR when it is ready.", Shortcut: "m", Keywords: []string{"github", "merge"}, Disabled: contextTask == nil || !canMergeTask(*contextTask), DisabledReason: "Open PR, approved review, and passing build are required."},
+		{ID: "comment-pr", Title: "Comment on pull request", Section: "GitHub", Detail: "Open a composer and post a comment with gh CLI.", Shortcut: "j", Keywords: []string{"github", "pull request", "comment"}, Disabled: contextTask == nil || !canCommentOnTaskPR(*contextTask), DisabledReason: prActionDisabledReason(contextTask, "The current task does not have an open or draft pull request.")},
+		{ID: "open-pr", Title: "Open pull request", Section: "GitHub", Detail: "Open the current task PR in the browser.", Shortcut: "o", Keywords: []string{"github", "browser", "pr"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: prActionDisabledReason(contextTask, "The current task does not have an open pull request.")},
+		{ID: "open-checks", Title: "Open pull request checks", Section: "GitHub", Detail: "Open CI checks for the current task PR.", Shortcut: "v", Keywords: []string{"github", "checks", "ci"}, Disabled: contextTask == nil || !hasOpenPR(*contextTask), DisabledReason: prActionDisabledReason(contextTask, "The current task does not have an open pull request.")},
+		{ID: "merge-pr", Title: "Merge pull request", Section: "GitHub", Detail: "Squash merge the current task PR when it is ready.", Shortcut: "m", Keywords: []string{"github", "merge"}, Disabled: contextTask == nil || !canMergeTask(*contextTask), DisabledReason: prActionDisabledReason(contextTask, "Open PR, approved review, and passing build are required.")},
 		{ID: "filters", Title: "Open filters", Section: "View", Detail: "Change repo and pillar filters.", Shortcut: "f", Keywords: []string{"filter", "repo", "pillar"}},
 		{ID: "layout", Title: "Change layout", Section: "View", Detail: "Choose the board and terminal layout.", Shortcut: "g", Keywords: []string{"view", "split", "terminal"}},
 		{ID: "repo-prev", Title: "Previous repo", Section: "View", Detail: "Switch to the previous repo filter.", Shortcut: ",", Keywords: []string{"repo", "left"}, Disabled: len(m.repos) == 0, DisabledReason: "Add a repo before switching repo scope."},
@@ -2185,8 +2324,27 @@ func (m *Model) pillarByID(pillarID string) *PillarRecord {
 	return nil
 }
 
+// prActionDisabledReason explains why a card-level PR command is greyed out. A
+// multi-PR card is not missing a PR — it has too many for one command to guess
+// between — so it gets sent to the picker instead of a misleading "no PR".
+func prActionDisabledReason(task *TaskRecord, fallback string) string {
+	if task == nil {
+		return fallback
+	}
+	if reason := multiBranchChoiceReason(*task); reason != "" {
+		return reason
+	}
+	return fallback
+}
+
+// hasOpenPR answers for the card as a whole, which only means something while
+// the card has one branch. With several, the rolled-up state names no PR anyone
+// can open, so the card-level actions must stand down and let the picker choose.
 func hasOpenPR(task TaskRecord) bool {
-	return task.PRState == "open" || task.PRState == "draft"
+	if hasMultipleBranches(task) {
+		return false
+	}
+	return taskPRStatus(task).isOpen()
 }
 
 func canCommentOnTaskPR(task TaskRecord) bool {

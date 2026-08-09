@@ -1,7 +1,13 @@
 import { EventEmitter } from 'events';
 import type { Db } from '../db/index.js';
-import type { SyncResult, TaskRecord, TaskSyncPatch } from '../types/index.js';
+import type {
+  SyncResult,
+  TaskBranchRecord,
+  TaskBranchSyncPatch,
+  TaskRecord,
+} from '../types/index.js';
 import type { BoardService } from './board.js';
+import { allBranchesResolved } from './task-branches.js';
 import { GitHubServiceError, type GitHubService, type PRInfo } from './github.js';
 import { GitService } from './git.js';
 import { TransportRegistry } from './transport/index.js';
@@ -64,10 +70,6 @@ function mergeSyncResults(results: SyncResult[]): SyncResult {
   );
 }
 
-function sameValue(left: unknown, right: unknown): boolean {
-  return left === right;
-}
-
 function normalizeBaseBranch(value: string | null | undefined): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -81,6 +83,15 @@ export class SyncService {
   private board: BoardService;
   private missions?: Pick<MissionService, 'reconcileTaskCompletion'>;
   onTaskMergedOrClosed?: (taskId: string) => Promise<void>;
+  /**
+   * Whether every merged pull request on a card has actually reached production.
+   *
+   * Supplied by the daemon when release tracking is configured. Absent means the
+   * question cannot be asked, and a card that has merged everything then goes
+   * straight to done — the gate is opt-in, so nothing changes for anyone not
+   * tracking artifacts.
+   */
+  isFullyReleased?: (taskId: string) => boolean;
   private github: GitHubService;
   private git: GitService;
   private db: Db;
@@ -389,59 +400,6 @@ export class SyncService {
     }
   }
 
-  private applyTaskSyncPatch(task: TaskRecord, patch: TaskSyncPatch): boolean {
-    const nextPatch: TaskSyncPatch = {};
-    let changed = false;
-
-    const maybeAssign = <K extends keyof TaskSyncPatch>(key: K): void => {
-      if (!Object.prototype.hasOwnProperty.call(patch, key)) {
-        return;
-      }
-
-      const nextValue = patch[key];
-      const normalizedNext = nextValue === null ? undefined : nextValue;
-      const currentValue = (task as unknown as Record<string, unknown>)[key as string];
-
-      if (sameValue(currentValue, normalizedNext)) {
-        return;
-      }
-
-      changed = true;
-      (nextPatch as Record<string, unknown>)[key as string] = nextValue as unknown;
-      (task as unknown as Record<string, unknown>)[key as string] = normalizedNext as unknown;
-    };
-
-    maybeAssign('prNumber');
-    maybeAssign('prState');
-    maybeAssign('prDraft');
-    maybeAssign('prUrl');
-    maybeAssign('ciState');
-    maybeAssign('ciSummary');
-    maybeAssign('failingCheckName');
-    maybeAssign('ciRequiredTotal');
-    maybeAssign('ciRequiredPassed');
-    maybeAssign('ciRequiredFailed');
-    maybeAssign('ciRequiredPending');
-    maybeAssign('reviewState');
-    maybeAssign('reviewSummary');
-    maybeAssign('unresolvedThreadCount');
-    maybeAssign('githubSyncStatus');
-    maybeAssign('githubSyncError');
-    maybeAssign('githubLastSyncedAt');
-    maybeAssign('gitState');
-    maybeAssign('gitAheadCount');
-    maybeAssign('gitBehindCount');
-    maybeAssign('hasUntracked');
-    maybeAssign('hasConflicts');
-
-    if (!changed) {
-      return false;
-    }
-
-    this.board.updateTaskSync(task.id, nextPatch);
-    return true;
-  }
-
   private async waitForRemoteBranch(
     repoPath: string,
     branch: string,
@@ -471,55 +429,234 @@ export class SyncService {
     return this.remoteGit;
   }
 
-  private async syncGitStatus(task: TaskRecord, repoPath: string): Promise<TaskSyncPatch | null> {
-    try {
-      const gitStatus = await this.gitFor(task).getWorkspaceStatus(task.worktreePath ?? repoPath);
-      return {
-        gitState: gitStatus.gitState,
-        gitAheadCount: gitStatus.aheadCount,
-        gitBehindCount: gitStatus.behindCount,
-        hasUntracked: gitStatus.hasUntracked,
-        hasConflicts: gitStatus.hasConflicts,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  private async reconcileTaskById(taskId: string, opts: ReconcileOptions): Promise<TaskReconcileResult> {
+  /**
+   * Brings one card's branches in line with GitHub, then decides where it belongs.
+   *
+   * Each branch reconciles independently, but the track transition is evaluated
+   * ONCE at the end from the whole card. Deciding per branch is what would let
+   * the first merged pull request of a five-pull-request feature close the card
+   * and delete the worktrees the other four are still being written in.
+   */
+  private async reconcileTaskById(
+    taskId: string,
+    opts: ReconcileOptions,
+  ): Promise<TaskReconcileResult> {
     const result: TaskReconcileResult = emptySyncResult();
     const task = this.board.getTask(taskId);
 
     // A general task has no repo, branch, or PR — there is nothing to reconcile.
-    if (!task || task.archivedAt != null || task.kind === 'general' || !task.branchName) {
+    if (!task || task.archivedAt != null || task.kind === 'general') {
       this.clearDelayedRetry(taskId);
       return result;
     }
 
-    const repoRow = task.repoId ? this.loadRepoRow(task.repoId) : undefined;
-    if (!repoRow) {
-      if (
-        this.applyTaskSyncPatch(task, {
-          githubSyncStatus: 'error',
-          githubSyncError: `Repo not found for task ${task.id}`,
-          githubLastSyncedAt: Date.now(),
-        })
-      ) {
-        result.tasksUpdated += 1;
-        result.errors.push(`Task ${task.id}: Repo not found for task ${task.id}`);
-      }
+    const branches = this.ensureTaskBranches(task);
+    if (branches.length === 0) {
+      this.clearDelayedRetry(taskId);
       return result;
     }
 
-    if (task.githubSyncStatus !== 'syncing') {
-      this.applyTaskSyncPatch(task, { githubSyncStatus: 'syncing' });
+    await this.discoverSiblingBranches(task, branches);
+
+    for (const branch of this.board.getTaskBranches(taskId)) {
+      const branchResult = await this.reconcileBranch(task, branch, opts);
+      result.tasksUpdated += branchResult.tasksUpdated;
+      result.errors.push(...branchResult.errors);
+      result.requestDelayedRetry ||= branchResult.requestDelayedRetry;
+      // The active branch's pull request is what the card-level callers expect.
+      if (branchResult.prInfo && (branch.id === task.activeBranchId || !result.prInfo)) {
+        result.prInfo = branchResult.prInfo;
+      }
+    }
+
+    result.tasksUpdated += this.evaluateTrackTransition(taskId);
+    return result;
+  }
+
+  /**
+   * A card written before branches existed still has its work in task columns.
+   *
+   * Seeding lazily here means a card the one-time backfill missed heals itself
+   * on its next sync instead of silently never syncing again.
+   */
+  private ensureTaskBranches(task: TaskRecord): TaskBranchRecord[] {
+    const existing = this.board.getTaskBranches(task.id);
+    if (existing.length > 0 || !task.repoId || !task.branchName) {
+      return existing;
+    }
+
+    this.board.addTaskBranch({
+      taskId: task.id,
+      repoId: task.repoId,
+      branchName: task.branchName,
+      ...(task.worktreePath ? { worktreePath: task.worktreePath } : {}),
+    });
+    return this.board.getTaskBranches(task.id);
+  }
+
+  /**
+   * Adopts pull requests opened on this card's branch name in other repos.
+   *
+   * A feature spanning several repositories is worked on under one branch name,
+   * so one org-wide search finds every sibling regardless of how many
+   * repositories are configured — cheaper, and it also finds repos the card has
+   * never touched before.
+   */
+  private async discoverSiblingBranches(
+    task: TaskRecord,
+    branches: readonly TaskBranchRecord[],
+  ): Promise<void> {
+    // Only a card actively being worked is worth searching for; the search API
+    // is rate-limited far more tightly than the rest of GitHub.
+    if (task.trackId === 'done' || !task.branchName) {
+      return;
+    }
+
+    try {
+      const known = new Set(branches.map((branch) => `${branch.repoId}#${branch.branchName}`));
+      const reposBySlug = this.reposBySlug();
+      const org = this.orgForTask(branches, reposBySlug);
+      const anchor = branches[0];
+      const repoPath = anchor ? this.repoPathFor(anchor.repoId) : undefined;
+      if (!org || !repoPath) {
+        return;
+      }
+
+      const found = await this.github.findPRsByHeadBranch(repoPath, org, task.branchName);
+      for (const pr of found) {
+        const repoId = reposBySlug.get(pr.repoSlug);
+        if (!repoId || known.has(`${repoId}#${task.branchName}`)) {
+          continue;
+        }
+        // No worktree: the branch is only prepared when the user opens it.
+        this.board.addTaskBranch({
+          taskId: task.id,
+          repoId,
+          branchName: task.branchName,
+        });
+      }
+    } catch {
+      // Discovery is an enhancement. A rate limit or an unreachable search must
+      // never stop the branches we already know about from syncing.
+    }
+  }
+
+  private reposBySlug(): Map<string, string> {
+    const rows = this.db
+      .prepare<[], { id: string; github_owner: string | null; github_repo: string | null }>(
+        'SELECT id, github_owner, github_repo FROM repos',
+      )
+      .all();
+
+    const bySlug = new Map<string, string>();
+    for (const row of rows) {
+      if (row.github_owner && row.github_repo) {
+        bySlug.set(`${row.github_owner}/${row.github_repo}`, row.id);
+      }
+    }
+    return bySlug;
+  }
+
+  private orgForTask(
+    branches: readonly TaskBranchRecord[],
+    reposBySlug: Map<string, string>,
+  ): string | null {
+    const repoIds = new Set(branches.map((branch) => branch.repoId));
+    for (const [slug, id] of reposBySlug) {
+      if (repoIds.has(id)) {
+        return slug.split('/')[0] ?? null;
+      }
+    }
+    return null;
+  }
+
+  private repoPathFor(repoId: string): string | undefined {
+    const row = this.loadRepoRow(repoId);
+    return row ? (row['path'] as string) : undefined;
+  }
+
+  /**
+   * Where the card belongs, decided from every branch at once.
+   *
+   * Returns how many moves were made, so the caller can report the card as
+   * updated.
+   */
+  private evaluateTrackTransition(taskId: string): number {
+    const task = this.board.getTask(taskId);
+    if (!task || task.archivedAt != null) {
+      return 0;
+    }
+
+    const branches = task.branches;
+    if (branches.length === 0 || task.trackId === 'done') {
+      return 0;
+    }
+
+    // Any open pull request means the card is back in review — including one
+    // that had reached shipping, since a newly opened branch makes "everything
+    // has merged" false again.
+    if (task.prOpenCount > 0) {
+      if (task.trackId === 'pr') {
+        return 0;
+      }
+      this.board.moveTask({ id: taskId, trackId: 'pr' });
+      return 1;
+    }
+
+    if (!allBranchesResolved(branches)) {
+      return 0;
+    }
+
+    // Everything has landed. Downstream cards are unblocked now — they were
+    // waiting on the code, not on the rollout.
+    const releasedTaskIds = this.missions?.reconcileTaskCompletion(taskId) ?? [];
+
+    const released = this.isFullyReleased?.(taskId) ?? true;
+    const nextTrack = released ? 'done' : 'shipping';
+    if (task.trackId === nextTrack) {
+      return releasedTaskIds.length;
+    }
+
+    this.board.moveTask({ id: taskId, trackId: nextTrack });
+
+    // Cleanup is deliberately tied to reaching done, not to a merge. A card in
+    // shipping is still waiting on a rollout and its worktrees have to survive
+    // in case the change has to be revisited.
+    if (nextTrack === 'done') {
+      void this.onTaskMergedOrClosed?.(taskId);
+    }
+
+    return 1 + releasedTaskIds.length;
+  }
+
+  /** Reconciles one branch: its git state, its pull request, its checks. */
+  private async reconcileBranch(
+    task: TaskRecord,
+    branch: TaskBranchRecord,
+    opts: ReconcileOptions,
+  ): Promise<TaskReconcileResult> {
+    const result: TaskReconcileResult = emptySyncResult();
+    const repoRow = this.loadRepoRow(branch.repoId);
+
+    if (!repoRow) {
+      this.board.updateTaskBranchSync(branch.id, {
+        githubSyncStatus: 'error',
+        githubSyncError: `Repo not found for branch ${branch.branchName}`,
+        githubLastSyncedAt: Date.now(),
+      });
+      result.tasksUpdated += 1;
+      result.errors.push(`Task ${task.id}: repo not found for branch ${branch.branchName}`);
+      return result;
+    }
+
+    if (branch.githubSyncStatus !== 'syncing') {
+      this.board.updateTaskBranchSync(branch.id, { githubSyncStatus: 'syncing' });
     }
 
     const repoPath = repoRow['path'] as string;
     const githubOwner = (repoRow['github_owner'] as string | null) ?? undefined;
     const githubRepo = (repoRow['github_repo'] as string | null) ?? undefined;
-    const storedBaseBranch = normalizeBaseBranch(repoRow['default_base_branch'] as string | null);
-    let baseBranch = storedBaseBranch;
+    let baseBranch = normalizeBaseBranch(repoRow['default_base_branch'] as string | null);
 
     if (!baseBranch) {
       baseBranch = normalizeBaseBranch(await this.git.defaultBranch(repoPath)) ?? 'main';
@@ -527,7 +664,7 @@ export class SyncService {
         .prepare<[string, number, string], void>(
           'UPDATE repos SET default_base_branch = ?, updated_at = ? WHERE id = ?',
         )
-        .run(baseBranch, Date.now(), task.repoId!);
+        .run(baseBranch, Date.now(), branch.repoId);
     }
 
     // GitHub work below stays on the local checkout; only the git-state read
@@ -536,60 +673,34 @@ export class SyncService {
       task.location === 'remote'
         ? ((repoRow['remote_path'] as string | null) ?? repoPath)
         : repoPath;
-    const gitPatch = await this.syncGitStatus(task, gitStatusRepoPath);
+    const gitPatch = await this.syncBranchGitStatus(task, branch, gitStatusRepoPath);
 
     if (!githubOwner || !githubRepo) {
-      const patch: TaskSyncPatch = {
+      this.board.updateTaskBranchSync(branch.id, {
+        ...(gitPatch ?? {}),
         githubSyncStatus: 'error',
-        githubSyncError: `Repo for task ${task.id} is missing GitHub identity`,
+        githubSyncError: `Repo for branch ${branch.branchName} is missing GitHub identity`,
         githubLastSyncedAt: Date.now(),
-      };
-      if (gitPatch) {
-        Object.assign(patch, gitPatch);
-      }
-      if (this.applyTaskSyncPatch(task, patch)) {
-        result.tasksUpdated += 1;
-      }
-      result.errors.push(`Task ${task.id}: Repo for task ${task.id} is missing GitHub identity`);
+      });
+      result.tasksUpdated += 1;
+      result.errors.push(`Task ${task.id}: repo for ${branch.branchName} is missing GitHub identity`);
       return result;
     }
 
     const fullRepo = `${githubOwner}/${githubRepo}`;
 
     try {
-      let prInfo: PRInfo | null = null;
-      const existing = await this.github.findBranchPR(repoPath, task.branchName, fullRepo);
+      const prInfo = await this.resolveBranchPR(task, branch, {
+        repoPath,
+        fullRepo,
+        baseBranch,
+        opts,
+        result,
+      });
 
-      if (existing) {
-        prInfo = await this.github.getPR(repoPath, task.branchName, fullRepo);
-        if (!prInfo) {
-          throw new GitHubServiceError(
-            'not_found',
-            `Pull request for branch ${task.branchName} disappeared during sync`,
-          );
-        }
-      } else {
-        const remoteBranchPresent = await this.waitForRemoteBranch(
-          repoPath,
-          task.branchName,
-          opts.waitForRemoteBranch === true,
-        );
-
-        if (remoteBranchPresent) {
-          prInfo = await this.github.createPR(repoPath, {
-            githubRepo: fullRepo,
-            branch: task.branchName,
-            baseBranch,
-            title: buildAutoPRTitle(task.id, task.title),
-            body: buildAutoPRBody(task.id),
-          });
-        } else if (opts.cause === 'push' || opts.cause === 'ensure_pr' || opts.cause === 'manual') {
-          result.requestDelayedRetry = true;
-        }
-      }
-
-      const patch: TaskSyncPatch = {
-        githubSyncStatus: prInfo ? 'ok' : task.prNumber != null ? 'ok' : 'idle',
+      const patch: TaskBranchSyncPatch = {
+        ...(gitPatch ?? {}),
+        githubSyncStatus: prInfo || branch.prNumber != null ? 'ok' : 'idle',
         githubSyncError: null,
         githubLastSyncedAt: Date.now(),
       };
@@ -609,69 +720,126 @@ export class SyncService {
         patch.reviewState = prInfo.reviewState;
         patch.reviewSummary = prInfo.reviewSummary ?? null;
         patch.unresolvedThreadCount = prInfo.unresolvedThreadCount;
+
+        // Captured once, on the transition into merged: the merge commit is what
+        // release tracking resolves against, and it never changes afterwards.
+        if (prInfo.prState === 'merged' && !branch.mergeCommitSha) {
+          Object.assign(patch, await this.loadMergeFacts(repoPath, prInfo.number, fullRepo));
+        }
       }
 
-      if (gitPatch) {
-        Object.assign(patch, gitPatch);
-      }
-
-      if (this.applyTaskSyncPatch(task, patch)) {
-        result.tasksUpdated += 1;
-      }
+      this.board.updateTaskBranchSync(branch.id, patch);
+      result.tasksUpdated += 1;
 
       if (prInfo) {
-        this.clearDelayedRetry(taskId);
-      }
-
-      if (
-        prInfo &&
-        task.trackId !== 'pr' &&
-        task.trackId !== 'done' &&
-        (prInfo.prState === 'draft' || prInfo.prState === 'open')
-      ) {
-        this.board.moveTask({ id: task.id, trackId: 'pr' });
-        task.trackId = 'pr';
-        result.tasksUpdated += 1;
-      }
-
-      if (
-        prInfo &&
-        task.trackId !== 'done' &&
-        (prInfo.prState === 'merged' || prInfo.prState === 'closed')
-      ) {
-        this.board.moveTask({ id: task.id, trackId: 'done' });
-        task.trackId = 'done';
-        result.tasksUpdated += 1;
-      }
-
-      if (prInfo?.prState === 'merged' || prInfo?.prState === 'closed') {
-        const releasedTaskIds = this.missions?.reconcileTaskCompletion(task.id) ?? [];
-        if (releasedTaskIds.length > 0) {
-          result.tasksUpdated += releasedTaskIds.length;
-        }
-        void this.onTaskMergedOrClosed?.(task.id);
+        this.clearDelayedRetry(task.id);
       }
 
       result.prInfo = prInfo;
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      const patch: TaskSyncPatch = {
+      this.board.updateTaskBranchSync(branch.id, {
+        ...(gitPatch ?? {}),
         githubSyncStatus: 'error',
         githubSyncError: message,
         githubLastSyncedAt: Date.now(),
-      };
-
-      if (gitPatch) {
-        Object.assign(patch, gitPatch);
-      }
-
-      if (this.applyTaskSyncPatch(task, patch)) {
-        result.tasksUpdated += 1;
-      }
-
-      result.errors.push(`Task ${task.id}: ${message}`);
+      });
+      result.tasksUpdated += 1;
+      result.errors.push(`Task ${task.id} (${branch.branchName}): ${message}`);
       return result;
+    }
+  }
+
+  /** Finds this branch's pull request, opening one when the branch is pushed. */
+  private async resolveBranchPR(
+    task: TaskRecord,
+    branch: TaskBranchRecord,
+    ctx: {
+      repoPath: string;
+      fullRepo: string;
+      baseBranch: string;
+      opts: ReconcileOptions;
+      result: TaskReconcileResult;
+    },
+  ): Promise<PRInfo | null> {
+    const existing = await this.github.findBranchPR(ctx.repoPath, branch.branchName, ctx.fullRepo);
+
+    if (existing) {
+      const prInfo = await this.github.getPR(ctx.repoPath, branch.branchName, ctx.fullRepo);
+      if (!prInfo) {
+        throw new GitHubServiceError(
+          'not_found',
+          `Pull request for branch ${branch.branchName} disappeared during sync`,
+        );
+      }
+      return prInfo;
+    }
+
+    const remoteBranchPresent = await this.waitForRemoteBranch(
+      ctx.repoPath,
+      branch.branchName,
+      ctx.opts.waitForRemoteBranch === true,
+    );
+
+    if (remoteBranchPresent) {
+      return this.github.createPR(ctx.repoPath, {
+        githubRepo: ctx.fullRepo,
+        branch: branch.branchName,
+        baseBranch: ctx.baseBranch,
+        title: buildAutoPRTitle(task.id, task.title),
+        body: buildAutoPRBody(task.id),
+      });
+    }
+
+    const cause = ctx.opts.cause;
+    if (cause === 'push' || cause === 'ensure_pr' || cause === 'manual') {
+      ctx.result.requestDelayedRetry = true;
+    }
+    return null;
+  }
+
+  /**
+   * The merge commit and time, for release tracking to resolve against.
+   *
+   * Best-effort: without them a merged branch is simply not yet resolvable,
+   * which is a far better outcome than failing the whole sync.
+   */
+  private async loadMergeFacts(
+    repoPath: string,
+    prNumber: number,
+    fullRepo: string,
+  ): Promise<TaskBranchSyncPatch> {
+    try {
+      const info = await this.github.getMergeInfo(repoPath, prNumber, fullRepo);
+      if (!info?.mergeCommitSha) {
+        return {};
+      }
+      return {
+        mergeCommitSha: info.mergeCommitSha,
+        ...(info.mergedAt ? { mergedAt: Date.parse(info.mergedAt) } : {}),
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  private async syncBranchGitStatus(
+    task: TaskRecord,
+    branch: TaskBranchRecord,
+    repoPath: string,
+  ): Promise<TaskBranchSyncPatch | null> {
+    try {
+      const gitStatus = await this.gitFor(task).getWorkspaceStatus(branch.worktreePath ?? repoPath);
+      return {
+        gitState: gitStatus.gitState,
+        gitAheadCount: gitStatus.aheadCount,
+        gitBehindCount: gitStatus.behindCount,
+        hasUntracked: gitStatus.hasUntracked,
+        hasConflicts: gitStatus.hasConflicts,
+      };
+    } catch {
+      return null;
     }
   }
 }

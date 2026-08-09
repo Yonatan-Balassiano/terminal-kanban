@@ -19,10 +19,83 @@ import type {
   TaskKind,
   TaskLocation,
   TaskSyncPatch,
+  TaskBranchRecord,
+  TaskBranchSyncPatch,
 } from '../types/index.js';
 import { createTaskBranchName, renameTaskBranchName } from './branch-name.js';
+import { rollupBranches, rowToTaskBranch } from './task-branches.js';
 
 // --------------- Row helpers ----------------------------------
+
+/**
+ * Builds the SET clauses shared by a card and one of its branches.
+ *
+ * The two tables carry the same GitHub columns by design — a card's are the
+ * rollup of its branches' — so the patch shape and the SQL are shared rather
+ * than written twice and left to drift.
+ */
+function buildSyncClauses(fields: TaskSyncPatch): {
+  setClauses: string[];
+  values: unknown[];
+} {
+  const setClauses: string[] = [];
+  const values: unknown[] = [];
+  const has = (key: keyof TaskSyncPatch): boolean =>
+    Object.prototype.hasOwnProperty.call(fields, key);
+
+  /** Nullable columns: an explicitly absent value clears them. */
+  const nullable: Array<[keyof TaskSyncPatch, string]> = [
+    ['prNumber', 'pr_number'],
+    ['prUrl', 'pr_url'],
+    ['ciSummary', 'ci_summary'],
+    ['failingCheckName', 'failing_check_name'],
+    ['reviewSummary', 'review_summary'],
+    ['githubSyncError', 'github_sync_error'],
+    ['githubLastSyncedAt', 'github_last_synced_at'],
+  ];
+  for (const [key, column] of nullable) {
+    if (has(key)) {
+      setClauses.push(`${column} = ?`);
+      values.push(fields[key] ?? null);
+    }
+  }
+
+  /** Non-null columns: only written when the patch carries a value. */
+  const required: Array<[keyof TaskSyncPatch, string]> = [
+    ['prState', 'pr_state'],
+    ['ciState', 'ci_state'],
+    ['ciRequiredTotal', 'ci_required_total'],
+    ['ciRequiredPassed', 'ci_required_passed'],
+    ['ciRequiredFailed', 'ci_required_failed'],
+    ['ciRequiredPending', 'ci_required_pending'],
+    ['reviewState', 'review_state'],
+    ['unresolvedThreadCount', 'unresolved_thread_count'],
+    ['githubSyncStatus', 'github_sync_status'],
+    ['gitState', 'git_state'],
+    ['gitAheadCount', 'git_ahead_count'],
+    ['gitBehindCount', 'git_behind_count'],
+  ];
+  for (const [key, column] of required) {
+    if (has(key) && fields[key] !== undefined) {
+      setClauses.push(`${column} = ?`);
+      values.push(fields[key]);
+    }
+  }
+
+  const booleans: Array<[keyof TaskSyncPatch, string]> = [
+    ['prDraft', 'pr_draft'],
+    ['hasUntracked', 'has_untracked'],
+    ['hasConflicts', 'has_conflicts'],
+  ];
+  for (const [key, column] of booleans) {
+    if (has(key) && fields[key] !== undefined) {
+      setClauses.push(`${column} = ?`);
+      values.push(fields[key] ? 1 : 0);
+    }
+  }
+
+  return { setClauses, values };
+}
 
 function rowToTask(row: Record<string, unknown>): TaskRecord {
   return {
@@ -68,6 +141,13 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
       row['session_attention_needed'] === 1 || row['session_attention_needed'] === true,
     sessionAttentionUpdatedAt:
       (row['session_attention_updated_at'] as number | null) ?? undefined,
+    // Filled in by the bulk load; a task read on its own reports no branches
+    // rather than silently querying per row.
+    branches: [],
+    activeBranchId: (row['active_branch_id'] as string | null) ?? undefined,
+    prCount: (row['pr_count'] as number | null) ?? 0,
+    prOpenCount: (row['pr_open_count'] as number | null) ?? 0,
+    prMergedCount: (row['pr_merged_count'] as number | null) ?? 0,
     archivedAt: (row['archived_at'] as number | null) ?? undefined,
     createdAt: row['created_at'] as number,
     updatedAt: row['updated_at'] as number,
@@ -134,11 +214,172 @@ export class BoardService {
       labelMap.set(lr.task_id, arr);
     }
 
+    // Bulk-loaded for the same reason labels are: this runs on nearly every
+    // RPC, and a query per card would make it N+1 on every keystroke.
+    const branchRows = this.db
+      .prepare<unknown[], Record<string, unknown>>(
+        `SELECT * FROM task_branches WHERE task_id IN (${placeholders}) ORDER BY sort_key`,
+      )
+      .all(...ids);
+
+    const branchMap = new Map<string, TaskBranchRecord[]>();
+    for (const row of branchRows) {
+      const branch = rowToTaskBranch(row);
+      const arr = branchMap.get(branch.taskId) ?? [];
+      arr.push(branch);
+      branchMap.set(branch.taskId, arr);
+    }
+
     for (const task of tasks) {
       task.labels = labelMap.get(task.id) ?? [];
+      task.branches = branchMap.get(task.id) ?? [];
     }
 
     return tasks;
+  }
+
+  // ---- Branch methods ----------------------------------------
+
+  /** Every repo and branch a card is working in. */
+  getTaskBranches(taskId: string): TaskBranchRecord[] {
+    return this.db
+      .prepare<[string], Record<string, unknown>>(
+        'SELECT * FROM task_branches WHERE task_id = ? ORDER BY sort_key',
+      )
+      .all(taskId)
+      .map(rowToTaskBranch);
+  }
+
+  /**
+   * Adds a repo + branch to a card, or returns the existing one.
+   *
+   * Idempotent by (task, repo, branch) so a branch discovered again by sync
+   * never becomes a duplicate.
+   */
+  addTaskBranch(params: {
+    taskId: string;
+    repoId: string;
+    branchName: string;
+    baseBranch?: string;
+    worktreePath?: string;
+  }): TaskBranchRecord {
+    const existing = this.db
+      .prepare<[string, string, string], Record<string, unknown>>(
+        'SELECT * FROM task_branches WHERE task_id = ? AND repo_id = ? AND branch_name = ?',
+      )
+      .get(params.taskId, params.repoId, params.branchName);
+    if (existing) {
+      return rowToTaskBranch(existing);
+    }
+
+    const now = Date.now();
+    const id = generateId();
+    const nextSortKey =
+      this.db
+        .prepare<[string], { next: number }>(
+          'SELECT COALESCE(MAX(sort_key), -1) + 1 AS next FROM task_branches WHERE task_id = ?',
+        )
+        .get(params.taskId)?.next ?? 0;
+
+    this.db
+      .prepare(
+        `INSERT INTO task_branches
+           (id, task_id, repo_id, branch_name, base_branch, worktree_path, sort_key,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        params.taskId,
+        params.repoId,
+        params.branchName,
+        params.baseBranch ?? null,
+        params.worktreePath ?? null,
+        nextSortKey,
+        now,
+        now,
+      );
+
+    // The first branch a card gets is the one its session works in.
+    this.db
+      .prepare<[string, string], void>(
+        'UPDATE tasks SET active_branch_id = COALESCE(active_branch_id, ?) WHERE id = ?',
+      )
+      .run(id, params.taskId);
+
+    this.recomputeTaskRollup(params.taskId);
+    return this.getTaskBranch(id)!;
+  }
+
+  getTaskBranch(branchId: string): TaskBranchRecord | null {
+    const row = this.db
+      .prepare<[string], Record<string, unknown>>('SELECT * FROM task_branches WHERE id = ?')
+      .get(branchId);
+    return row ? rowToTaskBranch(row) : null;
+  }
+
+  removeTaskBranch(branchId: string): void {
+    const branch = this.getTaskBranch(branchId);
+    if (!branch) {
+      return;
+    }
+
+    this.db.prepare<[string], void>('DELETE FROM task_branches WHERE id = ?').run(branchId);
+
+    // Hand the session to whatever is left rather than leaving it pointing at a
+    // branch that no longer exists. Only touches the card that lost a branch,
+    // and only when that branch was the active one.
+    this.db
+      .prepare<[string, string], void>(
+        `UPDATE tasks
+            SET active_branch_id =
+                  (SELECT b.id FROM task_branches b WHERE b.task_id = tasks.id
+                    ORDER BY b.sort_key LIMIT 1)
+          WHERE id = ? AND active_branch_id = ?`,
+      )
+      .run(branch.taskId, branchId);
+
+    this.recomputeTaskRollup(branch.taskId);
+  }
+
+  setTaskBranchWorktree(branchId: string, worktreePath: string | null): void {
+    this.db
+      .prepare<[string | null, number, string], void>(
+        'UPDATE task_branches SET worktree_path = ?, updated_at = ? WHERE id = ?',
+      )
+      .run(worktreePath, Date.now(), branchId);
+  }
+
+  /**
+   * Points the card's session at one of its branches.
+   *
+   * The branch's repo, name and worktree are mirrored onto the card because
+   * session bootstrap and workspace planning still read them from there. The
+   * repo has to move with them: leaving `repo_id` on the previous repository
+   * would pair one repo's identity with another's branch, and the session would
+   * be built from the wrong base branch and the wrong checkout.
+   */
+  setActiveTaskBranch(taskId: string, branchId: string): void {
+    const branch = this.getTaskBranch(branchId);
+    if (!branch || branch.taskId !== taskId) {
+      throw new Error(`Branch ${branchId} does not belong to task ${taskId}`);
+    }
+
+    this.db
+      .prepare<[string, string, string, string | null, number, string], void>(
+        `UPDATE tasks
+            SET active_branch_id = ?, repo_id = ?, branch_name = ?, worktree_path = ?,
+                updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(
+        branchId,
+        branch.repoId,
+        branch.branchName,
+        branch.worktreePath ?? null,
+        Date.now(),
+        taskId,
+      );
   }
 
   getAllTasks(filter?: { repoId?: string; includeArchived?: boolean }): TaskRecord[] {
@@ -161,6 +402,7 @@ export class BoardService {
       .all(id);
 
     task.labels = labelRows.map((l) => l.label_id);
+    task.branches = this.getTaskBranches(id);
     return task;
   }
 
@@ -211,6 +453,13 @@ export class BoardService {
         now,
       );
 
+    // A repo card starts with the one branch it was created for. Everything
+    // downstream reads branches, so a card without one would look like it has
+    // no work in it at all.
+    if (!isGeneral && params.repoId && branchName) {
+      this.addTaskBranch({ taskId: id, repoId: params.repoId, branchName });
+    }
+
     return this.getTask(id)!;
   }
 
@@ -229,18 +478,33 @@ export class BoardService {
       )
       .get(id);
 
-    // A general task has no branch to follow the rename.
+    const branches = this.getTaskBranches(id);
+
+    // A general task has no branch to follow the rename, and once a card spans
+    // several branches there is no non-arbitrary one to rename — so the title
+    // and the branches part ways there.
     if (
       current &&
       current.kind !== 'general' &&
       current.session_id == null &&
-      current.secondary_session_id == null
+      current.secondary_session_id == null &&
+      branches.length <= 1
     ) {
+      const nextBranch = renameTaskBranchName(title, current.branch_name ?? undefined);
       this.db
         .prepare<[string, string, number, string], void>(
           'UPDATE tasks SET title = ?, branch_name = ?, updated_at = ? WHERE id = ?',
         )
-        .run(title, renameTaskBranchName(title, current.branch_name ?? undefined), Date.now(), id);
+        .run(title, nextBranch, Date.now(), id);
+
+      const only = branches[0];
+      if (only) {
+        this.db
+          .prepare<[string, number, string], void>(
+            'UPDATE task_branches SET branch_name = ?, updated_at = ? WHERE id = ?',
+          )
+          .run(nextBranch, Date.now(), only.id);
+      }
       return;
     }
 
@@ -333,113 +597,111 @@ export class BoardService {
     this.db.prepare<[string], void>('DELETE FROM tasks WHERE id = ?').run(id);
   }
 
-  updateTaskSync(
-    id: string,
-    fields: TaskSyncPatch,
-  ): void {
-    const setClauses: string[] = [];
-    const values: unknown[] = [];
-    const has = (key: keyof TaskSyncPatch): boolean =>
-      Object.prototype.hasOwnProperty.call(fields, key);
+  updateTaskSync(id: string, fields: TaskSyncPatch): void {
+    const { setClauses, values } = buildSyncClauses(fields);
+    if (setClauses.length === 0) return;
 
-    if (has('prNumber')) {
-      setClauses.push('pr_number = ?');
-      values.push(fields.prNumber ?? null);
+    setClauses.push('updated_at = ?');
+    values.push(Date.now(), id);
+
+    this.db
+      .prepare<unknown[], void>(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`)
+      .run(...values);
+  }
+
+  /**
+   * Applies a sync patch to one branch, then re-rolls up the card.
+   *
+   * The card's own columns are derived from its branches, so writing a branch
+   * without recomputing them would leave the board showing the state of
+   * whichever branch happened to sync last.
+   */
+  updateTaskBranchSync(branchId: string, fields: TaskBranchSyncPatch): void {
+    const { setClauses, values } = buildSyncClauses(fields);
+
+    if (Object.prototype.hasOwnProperty.call(fields, 'mergeCommitSha')) {
+      setClauses.push('merge_commit_sha = ?');
+      values.push(fields.mergeCommitSha ?? null);
     }
-    if (has('prState') && fields.prState !== undefined) {
-      setClauses.push('pr_state = ?');
-      values.push(fields.prState);
-    }
-    if (has('prDraft') && fields.prDraft !== undefined) {
-      setClauses.push('pr_draft = ?');
-      values.push(fields.prDraft ? 1 : 0);
-    }
-    if (has('prUrl')) {
-      setClauses.push('pr_url = ?');
-      values.push(fields.prUrl ?? null);
-    }
-    if (has('ciState') && fields.ciState !== undefined) {
-      setClauses.push('ci_state = ?');
-      values.push(fields.ciState);
-    }
-    if (has('ciSummary')) {
-      setClauses.push('ci_summary = ?');
-      values.push(fields.ciSummary ?? null);
-    }
-    if (has('failingCheckName')) {
-      setClauses.push('failing_check_name = ?');
-      values.push(fields.failingCheckName ?? null);
-    }
-    if (has('ciRequiredTotal') && fields.ciRequiredTotal !== undefined) {
-      setClauses.push('ci_required_total = ?');
-      values.push(fields.ciRequiredTotal);
-    }
-    if (has('ciRequiredPassed') && fields.ciRequiredPassed !== undefined) {
-      setClauses.push('ci_required_passed = ?');
-      values.push(fields.ciRequiredPassed);
-    }
-    if (has('ciRequiredFailed') && fields.ciRequiredFailed !== undefined) {
-      setClauses.push('ci_required_failed = ?');
-      values.push(fields.ciRequiredFailed);
-    }
-    if (has('ciRequiredPending') && fields.ciRequiredPending !== undefined) {
-      setClauses.push('ci_required_pending = ?');
-      values.push(fields.ciRequiredPending);
-    }
-    if (has('reviewState') && fields.reviewState !== undefined) {
-      setClauses.push('review_state = ?');
-      values.push(fields.reviewState);
-    }
-    if (has('reviewSummary')) {
-      setClauses.push('review_summary = ?');
-      values.push(fields.reviewSummary ?? null);
-    }
-    if (has('unresolvedThreadCount') && fields.unresolvedThreadCount !== undefined) {
-      setClauses.push('unresolved_thread_count = ?');
-      values.push(fields.unresolvedThreadCount);
-    }
-    if (has('githubSyncStatus') && fields.githubSyncStatus !== undefined) {
-      setClauses.push('github_sync_status = ?');
-      values.push(fields.githubSyncStatus);
-    }
-    if (has('githubSyncError')) {
-      setClauses.push('github_sync_error = ?');
-      values.push(fields.githubSyncError ?? null);
-    }
-    if (has('githubLastSyncedAt')) {
-      setClauses.push('github_last_synced_at = ?');
-      values.push(fields.githubLastSyncedAt ?? null);
-    }
-    if (has('gitState') && fields.gitState !== undefined) {
-      setClauses.push('git_state = ?');
-      values.push(fields.gitState);
-    }
-    if (has('gitAheadCount') && fields.gitAheadCount !== undefined) {
-      setClauses.push('git_ahead_count = ?');
-      values.push(fields.gitAheadCount);
-    }
-    if (has('gitBehindCount') && fields.gitBehindCount !== undefined) {
-      setClauses.push('git_behind_count = ?');
-      values.push(fields.gitBehindCount);
-    }
-    if (has('hasUntracked') && fields.hasUntracked !== undefined) {
-      setClauses.push('has_untracked = ?');
-      values.push(fields.hasUntracked ? 1 : 0);
-    }
-    if (has('hasConflicts') && fields.hasConflicts !== undefined) {
-      setClauses.push('has_conflicts = ?');
-      values.push(fields.hasConflicts ? 1 : 0);
+    if (Object.prototype.hasOwnProperty.call(fields, 'mergedAt')) {
+      setClauses.push('merged_at = ?');
+      values.push(fields.mergedAt ?? null);
     }
 
     if (setClauses.length === 0) return;
 
     setClauses.push('updated_at = ?');
-    values.push(Date.now());
-    values.push(id);
+    values.push(Date.now(), branchId);
 
     this.db
-      .prepare<unknown[], void>(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`)
+      .prepare<unknown[], void>(`UPDATE task_branches SET ${setClauses.join(', ')} WHERE id = ?`)
       .run(...values);
+
+    const branch = this.getTaskBranch(branchId);
+    if (branch) {
+      this.recomputeTaskRollup(branch.taskId);
+    }
+  }
+
+  /**
+   * Rewrites a card's flat state from its branches.
+   *
+   * Every existing consumer — border colour, badges, filters, sorting — reads
+   * those columns, so keeping them derived is what lets a card grow extra
+   * branches without any of them changing.
+   */
+  recomputeTaskRollup(taskId: string): void {
+    const branches = this.getTaskBranches(taskId);
+    if (branches.length === 0) {
+      return;
+    }
+
+    const rollup = rollupBranches(branches);
+
+    this.db
+      .prepare<unknown[], void>(
+        `UPDATE tasks SET
+           pr_number = ?, pr_url = ?, pr_state = ?, pr_draft = ?,
+           ci_state = ?, ci_summary = ?, failing_check_name = ?,
+           ci_required_total = ?, ci_required_passed = ?,
+           ci_required_failed = ?, ci_required_pending = ?,
+           review_state = ?, review_summary = ?, unresolved_thread_count = ?,
+           git_state = ?, git_ahead_count = ?, git_behind_count = ?,
+           has_untracked = ?, has_conflicts = ?,
+           github_sync_status = ?, github_sync_error = ?, github_last_synced_at = ?,
+           pr_count = ?, pr_open_count = ?, pr_merged_count = ?,
+           updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        rollup.prNumber ?? null,
+        rollup.prUrl ?? null,
+        rollup.prState,
+        rollup.prDraft ? 1 : 0,
+        rollup.ciState,
+        rollup.ciSummary ?? null,
+        rollup.failingCheckName ?? null,
+        rollup.ciRequiredTotal,
+        rollup.ciRequiredPassed,
+        rollup.ciRequiredFailed,
+        rollup.ciRequiredPending,
+        rollup.reviewState,
+        rollup.reviewSummary ?? null,
+        rollup.unresolvedThreadCount,
+        rollup.gitState,
+        rollup.gitAheadCount,
+        rollup.gitBehindCount,
+        rollup.hasUntracked ? 1 : 0,
+        rollup.hasConflicts ? 1 : 0,
+        rollup.githubSyncStatus,
+        rollup.githubSyncError ?? null,
+        rollup.githubLastSyncedAt ?? null,
+        rollup.prCount,
+        rollup.prOpenCount,
+        rollup.prMergedCount,
+        Date.now(),
+        taskId,
+      );
   }
 
   linkSession(

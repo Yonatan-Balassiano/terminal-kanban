@@ -101,6 +101,50 @@ export interface TrackRecord {
   sortOrder: number;
 }
 
+/**
+ * One repo + branch a card is working in, and the pull request it carries.
+ *
+ * This is the level actions operate at. A card can hold several, so anything
+ * that merges, comments on, or opens "the PR" has to name which branch it
+ * means — the card itself no longer has a single answer.
+ */
+export interface TaskBranchRecord {
+  id: string;
+  taskId: string;
+  repoId: string;
+  branchName: string;
+  baseBranch?: string;
+  worktreePath?: string;
+  sortKey: number;
+  prNumber?: number;
+  prUrl?: string;
+  prState: PRState;
+  prDraft: boolean;
+  /** The squashed commit this branch landed as; the anchor for release tracking. */
+  mergeCommitSha?: string;
+  mergedAt?: number;
+  ciState: CIState;
+  ciSummary?: string;
+  failingCheckName?: string;
+  ciRequiredTotal: number;
+  ciRequiredPassed: number;
+  ciRequiredFailed: number;
+  ciRequiredPending: number;
+  reviewState: ReviewState;
+  reviewSummary?: string;
+  unresolvedThreadCount: number;
+  gitState: GitState;
+  gitAheadCount: number;
+  gitBehindCount: number;
+  hasUntracked: boolean;
+  hasConflicts: boolean;
+  githubSyncStatus: GitHubSyncStatus;
+  githubSyncError?: string;
+  githubLastSyncedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface TaskRecord {
   id: string;
   title: string;
@@ -145,6 +189,26 @@ export interface TaskRecord {
   hasConflicts: boolean;
   sessionAttentionNeeded: boolean;
   sessionAttentionUpdatedAt?: number;
+  /**
+   * Every repo and branch this card is working in.
+   *
+   * A card spanning several repositories has one entry per repository, and
+   * stacked work in one repository has one entry per branch. The flat `pr*`,
+   * `ci*` and `review*` fields above are a rollup of these.
+   */
+  branches: TaskBranchRecord[];
+  /** Which branch the session is currently working in. */
+  activeBranchId?: string;
+  prCount: number;
+  prOpenCount: number;
+  prMergedCount: number;
+  /**
+   * How far this card's merged work has travelled towards production.
+   *
+   * Absent until a pull request merges and the release status is resolved;
+   * absent is "not known", never "not shipped".
+   */
+  release?: TaskReleaseSummary;
   archivedAt?: number;
   createdAt: number;
   updatedAt: number;
@@ -409,6 +473,13 @@ export type RPCMethod =
   | 'getArtifacts'
   | 'refreshArtifacts'
   | 'rolloutArtifact'
+  | 'getReleaseStatus'
+  | 'refreshReleaseStatus'
+  | 'addTaskBranch'
+  | 'removeTaskBranch'
+  | 'setActiveTaskBranch'
+  | 'mergeTaskBranchPR'
+  | 'commentTaskBranchPR'
   | 'subscribe';
 
 // --------------- RPC param/result types ---------------------
@@ -710,6 +781,17 @@ export interface TaskSyncPatch {
   hasConflicts?: boolean;
 }
 
+/**
+ * A sync patch for one branch.
+ *
+ * Everything a card carries, plus the merge facts that only exist per branch —
+ * a card has no single merge commit once it spans several pull requests.
+ */
+export interface TaskBranchSyncPatch extends TaskSyncPatch {
+  mergeCommitSha?: string | null;
+  mergedAt?: number | null;
+}
+
 export interface GetBufferResult {
   lines: string[];
   ansiLines: string[];
@@ -827,6 +909,122 @@ export interface ArtifactRecord {
    * not be determined, which is distinct from a confident zero.
    */
   myPendingCount?: number;
+  /**
+   * A rollout currently moving this artifact towards production.
+   *
+   * Read by the release-status resolver so asking "is my commit mid-rollout"
+   * costs no extra calls per pull request.
+   */
+  rolloutInFlight?: RolloutInFlight;
+}
+
+/** An in-flight production rollout, as far as the artifacts rail can see it. */
+export interface RolloutInFlight {
+  status: string;
+  toVersion?: string;
+  startedAt?: string;
+}
+
+/**
+ * How far a merged pull request has travelled towards production.
+ *
+ * The ordering is a pipeline, not a ranking: `awaiting-build` -> `rc-built` ->
+ * `rolling-out` -> `ga`. The three outcomes that are not stages of that
+ * pipeline are kept separate on purpose — `no-artifact` is a confident "nothing
+ * to ship here", while `unknown` is "could not tell", and conflating them would
+ * let an outage read as success.
+ */
+export type ReleaseStage =
+  | 'unknown'
+  | 'not-merged'
+  | 'no-artifact'
+  | 'awaiting-build'
+  | 'rc-built'
+  | 'rolling-out'
+  | 'ga';
+
+/**
+ * How the release candidate carrying a commit was identified.
+ *
+ * Only containment is recorded, because it is the only uncertain step: once the
+ * candidate is known, comparing it against the production version is exact.
+ * `time-order` is the weak one — it means the candidate was merely the first
+ * built after the merge, with no ancestry check behind it.
+ */
+export type ReleaseEvidence = 'none' | 'where-is-my-commit' | 'ancestry' | 'time-order';
+
+/**
+ * How much the verdict can be trusted.
+ *
+ * `inferred` is reserved for release candidates built in a different repository
+ * from the pull request — the monorepo mirror — where commit ancestry cannot be
+ * checked and only build ordering supports the conclusion.
+ */
+export type ReleaseConfidence = 'confirmed' | 'inferred' | 'unknown';
+
+/** Why a verdict came back `unknown`. Drives both the UI text and the retry delay. */
+export type ReleaseUnknownReason =
+  | 'not-polled'
+  | 'mcp-auth'
+  | 'mcp-error'
+  | 'gh-error'
+  | 'repo-not-tracked'
+  | 'catalog-unavailable'
+  | 'no-merge-commit'
+  | 'commit-not-found'
+  | 'unparseable-version';
+
+/** Where one pull request stands with respect to one artifact. */
+export interface ArtifactReleaseStatus {
+  artifactName: string;
+  shortName: string;
+  stage: ReleaseStage;
+  confidence: ReleaseConfidence;
+  evidence: ReleaseEvidence;
+  reason?: ReleaseUnknownReason;
+  /** The release candidate proven to carry this pull request's merge commit. */
+  containingRcVersion?: string;
+  containingRcCommit?: string;
+  /** Production version at the moment of the check, for explaining the verdict. */
+  gaVersion?: string;
+  rolloutToVersion?: string;
+  /**
+   * False for artifacts that never go GA — libraries and proto packages publish
+   * release candidates forever, so gating a card on one would never complete.
+   */
+  gates: boolean;
+  checkedAt: number;
+}
+
+/** Where one pull request stands across every artifact it touches. */
+export interface PRReleaseStatus {
+  repoSlug: string;
+  prNumber: number;
+  stage: ReleaseStage;
+  confidence: ReleaseConfidence;
+  reason?: ReleaseUnknownReason;
+  artifacts: ArtifactReleaseStatus[];
+  checkedAt: number;
+}
+
+/**
+ * A card's release position, condensed to what one badge can say.
+ *
+ * The card shows the least-progressed pull request, because a feature is only
+ * as shipped as its slowest part.
+ */
+export interface TaskReleaseSummary {
+  stage: ReleaseStage;
+  confidence: ReleaseConfidence;
+  reason?: ReleaseUnknownReason;
+  /** How many gating pull requests have reached production. */
+  gaCount: number;
+  gatingCount: number;
+  /** The artifact holding the card back, for the badge text. */
+  blockingArtifact?: string;
+  blockingRcVersion?: string;
+  blockingGaVersion?: string;
+  checkedAt: number;
 }
 
 /** Exposure strategy for a production rollout. There is deliberately no immediate option. */

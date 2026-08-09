@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { buildNewSessionBootstrapCommand } from '../src/services/session-bootstrap.js';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import {
+  buildNewSessionBootstrapCommand,
+  type SessionWorkspaceEntry,
+} from '../src/services/session-bootstrap.js';
+
+const execFileAsync = promisify(execFile);
+const BOOTSTRAP = join(process.cwd(), 'scripts', 'session-bootstrap.sh');
 
 describe('buildNewSessionBootstrapCommand', () => {
   it('runs the configured bootstrap script with claude task context', () => {
@@ -20,6 +31,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_USES_WORKTREE="0" ' +
         'AGENTBOARD_BOOTSTRAP_NOTICE="" ' +
         'AGENTBOARD_AGENT_ARGS="" ' +
+        'AGENTBOARD_WORKSPACES="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -46,7 +58,135 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_USES_WORKTREE="1" ' +
         'AGENTBOARD_BOOTSTRAP_NOTICE="Git command failed: git worktree add" ' +
         'AGENTBOARD_AGENT_ARGS="" ' +
+        'AGENTBOARD_WORKSPACES="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
+  });
+});
+
+describe('workspace map encoding', () => {
+  const twoWorkspaces: SessionWorkspaceEntry[] = [
+    { label: 'monorepo', branch: 'ab/api-0001', path: '/w/api' },
+    { label: 'sdk', branch: 'ab/sdk-0002', path: '/w/sdk' },
+  ];
+
+  function commandWith(workspaces: readonly SessionWorkspaceEntry[]): string {
+    return buildNewSessionBootstrapCommand({
+      repoPath: '/repo',
+      branch: 'ab/api-0001',
+      agentCli: 'claude',
+      sessionBootstrapScript: '/s.sh',
+      workspaces,
+    });
+  }
+
+  it('packs every workspace into one env var as tab columns and newline rows', () => {
+    // Act
+    const command = commandWith(twoWorkspaces);
+
+    // Assert — JSON.stringify is the only escaping involved, so the separators
+    // arrive as \t and \n escape sequences rather than raw control characters.
+    expect(command).toContain(
+      'AGENTBOARD_WORKSPACES="monorepo\\tab/api-0001\\t/w/api\\nsdk\\tab/sdk-0002\\t/w/sdk"'
+    );
+  });
+
+  it('never emits a raw tab or newline that would break the command line', () => {
+    // Arrange — a raw separator would split the env assignment into a new word
+    // or a new command, so this is the bug the escaping exists to prevent.
+    const command = commandWith(twoWorkspaces);
+
+    // Assert
+    expect(command).not.toMatch(/[\t\n]/);
+  });
+
+  it('leaves the workspace var empty when the caller resolved no map', () => {
+    // Arrange + Act — undefined means "not resolved", not "the card owns none".
+    const command = buildNewSessionBootstrapCommand({
+      repoPath: '/repo',
+      branch: 'ab/api-0001',
+      agentCli: 'claude',
+      sessionBootstrapScript: '/s.sh',
+    });
+
+    // Assert
+    expect(command).toContain('AGENTBOARD_WORKSPACES=""');
+  });
+});
+
+describe('session-bootstrap.sh workspace banner', () => {
+  /**
+   * Runs the real command line the daemon would emit, through a real shell, with
+   * a fake agent on PATH. This is what proves the round trip: nothing but
+   * JSON.stringify escapes the map on the way out, and nothing but `printf %b`
+   * decodes it on the way in.
+   */
+  async function runBootstrap(workspaces?: readonly SessionWorkspaceEntry[]): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-workspaces-'));
+    try {
+      const fake = join(dir, 'claude');
+      writeFileSync(fake, '#!/bin/bash\necho AGENT_STARTED\n');
+      chmodSync(fake, 0o755);
+
+      const command = buildNewSessionBootstrapCommand({
+        repoPath: dir,
+        branch: 'ab/api-0001',
+        agentCli: 'claude',
+        usesWorktree: true,
+        cwd: dir,
+        sessionBootstrapScript: BOOTSTRAP,
+        ...(workspaces ? { workspaces } : {}),
+      });
+
+      const { stdout } = await execFileAsync('bash', ['-c', command], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}` },
+      });
+      return stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('prints every workspace row and still launches the agent', async () => {
+    // Act
+    const stdout = await runBootstrap([
+      { label: 'monorepo', branch: 'ab/api-0001', path: '/w/api' },
+      { label: 'sdk', branch: 'ab/sdk-0002', path: '/w/sdk' },
+      { label: 'infra', branch: 'ab/infra-0003', path: '/w/infra' },
+    ]);
+
+    // Assert — every row, and the agent still starts after the banner.
+    expect(stdout).toContain('monorepo');
+    expect(stdout).toContain('/w/api');
+    expect(stdout).toContain('sdk');
+    expect(stdout).toContain('/w/sdk');
+    expect(stdout).toContain('infra');
+    expect(stdout).toContain('/w/infra');
+    expect(stdout).toContain('AGENT_STARTED');
+  });
+
+  it('keeps each row on its own line so the columns stay readable', async () => {
+    // Arrange — a row separator that survived as a literal "\n" would collapse
+    // the whole map onto one line.
+    const stdout = await runBootstrap([
+      { label: 'monorepo', branch: 'ab/api-0001', path: '/w/api' },
+      { label: 'sdk', branch: 'ab/sdk-0002', path: '/w/sdk' },
+    ]);
+
+    // Assert
+    const rowLines = stdout.split('\n').filter((line) => line.includes('/w/'));
+    expect(rowLines).toHaveLength(2);
+    expect(stdout).not.toContain('\\t');
+    expect(stdout).not.toContain('\\n');
+  });
+
+  it('prints no banner and still launches the agent when there is no map', async () => {
+    // Act — a single-branch card behaves exactly as it did before the map existed.
+    const stdout = await runBootstrap();
+
+    // Assert
+    expect(stdout).not.toContain('Workspaces for this card');
+    expect(stdout).toContain('AGENT_STARTED');
   });
 });

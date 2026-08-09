@@ -48,6 +48,8 @@ import type {
   ChatTurnParams,
   SetDualSessionModeParams,
   SetTaskBranchParams,
+  TaskBranchRecord,
+  TaskRecord,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
 import { trackWatchedSessionTask } from './session-update-watch.js';
@@ -117,6 +119,182 @@ function makePlaceholderBoard(): BoardSnapshot {
     savedViews: [],
     uiState: {},
   };
+}
+
+// --------------- Branch-scoped actions ----------------------
+
+/**
+ * Params for the branch-scoped RPCs.
+ *
+ * Declared here rather than in the shared contract because only this dispatch
+ * reads them; the Go TUI sends them positionally as JSON.
+ */
+interface AddTaskBranchParams {
+  taskId: string;
+  repoId: string;
+  /** Defaults to the branch name the card already works under. */
+  branchName?: string;
+  baseBranch?: string;
+}
+
+interface TaskBranchActionParams {
+  taskId: string;
+  branchId: string;
+}
+
+interface CommentTaskBranchPRParams extends TaskBranchActionParams {
+  body: string;
+}
+
+/**
+ * Loads a branch, and checks it belongs to the named card when one is given.
+ *
+ * A branch id already identifies a branch on its own, so `taskId` is an
+ * optional cross-check rather than part of the lookup: requiring it would break
+ * every caller that legitimately has only the branch in hand, which is the
+ * normal case when acting on a row the user just selected.
+ */
+function requireTaskBranch(
+  services: ServiceContainer,
+  taskId: string | undefined,
+  branchId: string,
+): TaskBranchRecord {
+  if (!branchId) {
+    throw new Error('A branch id is required');
+  }
+
+  const branch = services.board.getTaskBranch(branchId);
+  if (!branch) {
+    throw new Error(`Branch not found: ${branchId}`);
+  }
+  // Only when the caller claimed a card, so a stale id from a TUI that has
+  // since moved on still cannot act on another card's pull request.
+  if (taskId !== undefined && branch.taskId !== taskId) {
+    throw new Error(`Branch ${branchId} does not belong to task ${taskId}`);
+  }
+  return branch;
+}
+
+/**
+ * The one pull request a card-scoped action can honestly mean.
+ *
+ * `tasks.pr_number` is null the moment a card carries more than one branch, so
+ * the legacy card-scoped handlers have to resolve it themselves — and refuse
+ * when there is a choice to make, rather than acting on an arbitrary branch.
+ */
+function resolveSoleBranchWithPR(
+  services: ServiceContainer,
+  taskId: string,
+): { task: TaskRecord; branch: TaskBranchRecord } {
+  const task = services.board.getTask(taskId);
+  if (!task) {
+    throw new Error(`Task not found: ${taskId}`);
+  }
+
+  const withPR = (task.branches ?? []).filter((branch) => branch.prNumber !== undefined);
+  if (withPR.length === 0) {
+    throw new Error(`Task ${taskId} has no PR number`);
+  }
+  if (withPR.length > 1) {
+    const choices = withPR.map((branch) => `#${branch.prNumber} (${branch.branchName})`).join(', ');
+    throw new Error(`This card has ${withPR.length} pull requests — choose one: ${choices}`);
+  }
+
+  return { task, branch: withPR[0]! };
+}
+
+function requireGitHubRepo(
+  services: ServiceContainer,
+  branch: TaskBranchRecord,
+): { path: string; githubRepo: string } {
+  const repo = services.workspace.getRepo(branch.repoId);
+  if (!repo) {
+    throw new Error(`Repo not found for branch ${branch.branchName}`);
+  }
+  if (!repo.githubOwner || !repo.githubRepo) {
+    throw new Error(`Repo ${repo.id} is missing GitHub identity`);
+  }
+  return { path: repo.path, githubRepo: `${repo.githubOwner}/${repo.githubRepo}` };
+}
+
+/**
+ * Merges one branch's pull request.
+ *
+ * Deliberately does not touch the card's track: the rollup decides what the
+ * card looks like, and a card with other branches still open is not done.
+ */
+async function mergeBranchPR(
+  services: ServiceContainer,
+  branch: TaskBranchRecord,
+): Promise<void> {
+  if (branch.prNumber === undefined) {
+    throw new Error(`Branch ${branch.branchName} has no PR number`);
+  }
+  if (branch.prState !== 'open') {
+    throw new Error(`Branch ${branch.branchName} does not have an open PR`);
+  }
+  if (branch.ciState !== 'passed') {
+    throw new Error(`Branch ${branch.branchName} build has not passed`);
+  }
+  if (branch.reviewState !== 'approved') {
+    throw new Error(`Branch ${branch.branchName} is not approved`);
+  }
+
+  const repo = requireGitHubRepo(services, branch);
+  await services.github.mergePR(repo.path, {
+    githubRepo: repo.githubRepo,
+    prNumber: branch.prNumber,
+  });
+
+  // The card's pr/ci/review columns follow from this, via recomputeTaskRollup.
+  services.board.updateTaskBranchSync(branch.id, {
+    prState: 'merged',
+    prDraft: false,
+  });
+}
+
+async function commentBranchPR(
+  services: ServiceContainer,
+  branch: TaskBranchRecord,
+  body: string,
+): Promise<void> {
+  if (branch.prNumber === undefined) {
+    throw new Error(`Branch ${branch.branchName} has no PR number`);
+  }
+  if (branch.prState !== 'open' && branch.prState !== 'draft') {
+    throw new Error(`Branch ${branch.branchName} does not have an open or draft PR`);
+  }
+  if (!body.trim()) {
+    throw new Error('PR comment body cannot be empty');
+  }
+
+  const repo = requireGitHubRepo(services, branch);
+  await services.github.commentPR(repo.path, {
+    githubRepo: repo.githubRepo,
+    prNumber: branch.prNumber,
+    body,
+  });
+}
+
+/**
+ * Releases a branch's worktree before its row is dropped.
+ *
+ * Delegates to the lifecycle service rather than removing it here, because that
+ * is the only path that runs the probe and the removal on the card's own host —
+ * doing it locally silently leaks every remote worktree.
+ *
+ * Reports whether the directory is actually gone, so the caller can refuse to
+ * drop the row that records where it was when it is not.
+ */
+async function removeBranchWorktree(
+  services: ServiceContainer,
+  branch: TaskBranchRecord,
+): Promise<boolean> {
+  if (!branch.worktreePath) {
+    return true;
+  }
+
+  return services.taskLifecycle.removeBranchWorktree(branch.id);
 }
 
 // --------------- Dispatch -----------------------------------
@@ -529,35 +707,12 @@ export async function dispatch(
       }
 
       case 'commentTaskPR': {
+        // Card-scoped shim kept for the Go TUI, which migrates to
+        // 'commentTaskBranchPR' separately. It refuses rather than guessing when
+        // the card carries more than one pull request.
         const params = p as unknown as CommentTaskPRParams;
-        const task = services.board.getTask(params.taskId);
-        if (!task) {
-          throw new Error(`Task not found: ${params.taskId}`);
-        }
-        if (task.prNumber === undefined) {
-          throw new Error(`Task ${params.taskId} has no PR number`);
-        }
-        if (task.prState !== 'open' && task.prState !== 'draft') {
-          throw new Error(`Task ${params.taskId} does not have an open or draft PR`);
-        }
-        if (!params.body.trim()) {
-          throw new Error('PR comment body cannot be empty');
-        }
-
-        const repo = services.workspace.getRepo(task.repoId);
-        if (!repo) {
-          throw new Error(`Repo not found for task ${params.taskId}`);
-        }
-        if (!repo.githubOwner || !repo.githubRepo) {
-          throw new Error(`Repo ${repo.id} is missing GitHub identity`);
-        }
-
-        await services.github.commentPR(repo.path, {
-          githubRepo: `${repo.githubOwner}/${repo.githubRepo}`,
-          prNumber: task.prNumber,
-          body: params.body,
-        });
-
+        const { branch } = resolveSoleBranchWithPR(services, params.taskId);
+        await commentBranchPR(services, branch, params.body);
         return { id: req.id, result: { commented: true } };
       }
 
@@ -569,45 +724,24 @@ export async function dispatch(
       }
 
       case 'mergeTaskPR': {
+        // Card-scoped shim kept for the Go TUI, which migrates to
+        // 'mergeTaskBranchPR' separately.
         const taskId = (p as unknown as MergeTaskPRParams).taskId;
-        const task = services.board.getTask(taskId);
-        if (!task) {
-          throw new Error(`Task not found: ${taskId}`);
-        }
-        if (task.prNumber === undefined) {
-          throw new Error(`Task ${taskId} has no PR number`);
-        }
-        if (task.prState !== 'open') {
-          throw new Error(`Task ${taskId} does not have an open PR`);
-        }
-        if (task.ciState !== 'passed') {
-          throw new Error(`Task ${taskId} build has not passed`);
-        }
-        if (task.reviewState !== 'approved') {
-          throw new Error(`Task ${taskId} is not approved`);
+        const { task, branch } = resolveSoleBranchWithPR(services, taskId);
+        await mergeBranchPR(services, branch);
+
+        // Only a card that had nothing else in it is finished by this merge.
+        // Refusing a *second pull request* is not enough: a card whose other
+        // branch is still being written has no PR on it yet, and closing the
+        // card here would abandon that work. Anything else is left to the sync
+        // loop, which decides from every branch at once.
+        if (task.branches.length === 1) {
+          if (task.trackId !== 'done') {
+            services.board.moveTask({ id: taskId, trackId: 'done' });
+          }
+          services.missions?.reconcileTaskCompletion(taskId);
         }
 
-        const repo = services.workspace.getRepo(task.repoId);
-        if (!repo) {
-          throw new Error(`Repo not found for task ${taskId}`);
-        }
-        if (!repo.githubOwner || !repo.githubRepo) {
-          throw new Error(`Repo ${repo.id} is missing GitHub identity`);
-        }
-
-        await services.github.mergePR(repo.path, {
-          githubRepo: `${repo.githubOwner}/${repo.githubRepo}`,
-          prNumber: task.prNumber,
-        });
-
-        services.board.updateTaskSync(task.id, {
-          prState: 'merged',
-          prDraft: false,
-        });
-        if (task.trackId !== 'done') {
-          services.board.moveTask({ id: task.id, trackId: 'done' });
-        }
-        services.missions?.reconcileTaskCompletion(task.id);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
@@ -669,6 +803,135 @@ export async function dispatch(
           ? await services.artifacts.refresh()
           : { artifacts: [], refreshedAt: 0, stale: false };
         return { id: req.id, result: snapshot };
+      }
+
+      case 'getReleaseStatus': {
+        // Per-artifact detail for one card, served from what was last resolved
+        // so opening the pane never waits on devex.
+        const taskId = p['taskId'] as string;
+        return {
+          id: req.id,
+          result: { statuses: services.release?.getStatuses(taskId) ?? [] },
+        };
+      }
+
+      case 'refreshReleaseStatus': {
+        if (!services.release) {
+          return { id: req.id, result: { statuses: [] } };
+        }
+        const taskId = p['taskId'] as string;
+        const statuses = await services.release.refreshTask(taskId);
+        return { id: req.id, result: { statuses } };
+      }
+
+      // ---- branch-scoped actions ------------------------------
+      case 'addTaskBranch': {
+        const params = p as unknown as AddTaskBranchParams;
+        const task = services.board.getTask(params.taskId);
+        if (!task) {
+          throw new Error(`Task not found: ${params.taskId}`);
+        }
+        // A general card owns no repo, so workspace planning skips it entirely
+        // — a branch added here could never get a checkout, but would start
+        // writing pull-request state onto a card that has none.
+        if (task.kind === 'general') {
+          throw new Error('General cards have no repo, so they cannot carry a branch');
+        }
+        if (!services.workspace.getRepo(params.repoId)) {
+          throw new Error(`Repo not found: ${params.repoId}`);
+        }
+
+        // A card spanning several repos normally carries the same branch name in
+        // each, so default to the one it already works under instead of
+        // inventing a second name the user would have to reconcile by hand.
+        const branchName = params.branchName?.trim() || task.branchName;
+        if (!branchName) {
+          throw new Error(
+            `Task ${params.taskId} has no branch name to default from — pass branchName`,
+          );
+        }
+
+        services.board.addTaskBranch({
+          taskId: params.taskId,
+          repoId: params.repoId,
+          branchName,
+          ...(params.baseBranch ? { baseBranch: params.baseBranch } : {}),
+        });
+
+        const snapshot = services.view.getBoardSnapshot();
+        serverEvents.emit('event', { type: 'board_patch', payload: snapshot });
+        // The new branch has no GitHub state yet; let sync discover its PR.
+        void services.sync.trigger().catch(() => {});
+        return { id: req.id, result: snapshot };
+      }
+
+      case 'removeTaskBranch': {
+        const params = p as unknown as TaskBranchActionParams;
+        const branch = requireTaskBranch(services, params.taskId, params.branchId);
+        // Dropping merged work would leave the card reading as complete while
+        // part of what it shipped is no longer tracked anywhere.
+        if (branch.prState === 'merged') {
+          throw new Error(
+            `Branch ${branch.branchName} has a merged pull request and cannot be removed`,
+          );
+        }
+
+        // A card with no branches has nothing to derive its state from, so its
+        // pull-request and check columns would freeze on whatever the removed
+        // branch last reported — the board would keep painting a PR that is no
+        // longer tracked. Deleting the card is the way to remove its last branch.
+        if (services.board.getTaskBranches(branch.taskId).length <= 1) {
+          throw new Error(
+            `Branch ${branch.branchName} is this card's only branch — delete the card instead`,
+          );
+        }
+
+        // The row is what records where the worktree is, so it only goes once
+        // the directory is actually gone — otherwise the checkout is orphaned
+        // with nothing left pointing at it.
+        if (!(await removeBranchWorktree(services, branch))) {
+          throw new Error(
+            `Could not remove the worktree at ${branch.worktreePath} — resolve it and try again`,
+          );
+        }
+        services.board.removeTaskBranch(branch.id);
+
+        const snapshot = services.view.getBoardSnapshot();
+        serverEvents.emit('event', { type: 'board_patch', payload: snapshot });
+        return { id: req.id, result: snapshot };
+      }
+
+      case 'setActiveTaskBranch': {
+        const params = p as unknown as TaskBranchActionParams;
+        const branch = requireTaskBranch(services, params.taskId, params.branchId);
+        // The board mirrors the branch's repo, name and worktree onto the card
+        // in one write — splitting them here is how the card ended up pairing
+        // one repository's id with another's branch.
+        services.board.setActiveTaskBranch(branch.taskId, branch.id);
+
+        const snapshot = services.view.getBoardSnapshot();
+        serverEvents.emit('event', { type: 'board_patch', payload: snapshot });
+        return { id: req.id, result: snapshot };
+      }
+
+      case 'mergeTaskBranchPR': {
+        const params = p as unknown as TaskBranchActionParams;
+        const branch = requireTaskBranch(services, params.taskId, params.branchId);
+        await mergeBranchPR(services, branch);
+
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        void services.sync.trigger().catch(() => {});
+        return { id: req.id, result: { merged: true } };
+      }
+
+      case 'commentTaskBranchPR': {
+        const params = p as unknown as CommentTaskBranchPRParams;
+        const branch = requireTaskBranch(services, params.taskId, params.branchId);
+        await commentBranchPR(services, branch, params.body);
+        return { id: req.id, result: { commented: true } };
       }
 
       case 'subscribe':

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { openDb, type Db } from '../src/db/index.js';
@@ -168,5 +168,183 @@ describe('WorktreeService remote task resolution', () => {
     // Assert
     expect(workspace.repoPath).toBe(localRepoDir);
     expect(remote.exists).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorktreeService multi-branch cards', () => {
+  let db: Db;
+  let board: BoardService;
+  let root: string;
+
+  /** Two real repo checkouts on disk, so the local transport can stat them. */
+  let repoA: string;
+  let repoB: string;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    root = mkdtempSync(join(tmpdir(), 'agentboard-multi-'));
+    repoA = join(root, 'monorepo');
+    repoB = join(root, 'sdk');
+    mkdirSync(repoA, { recursive: true });
+    mkdirSync(repoB, { recursive: true });
+
+    // Different default_base_branch per repo: the whole point of joining each
+    // branch row to its own repo row.
+    insertRepo(db, { id: 'repo-a', label: 'monorepo', path: repoA, baseBranch: 'master' });
+    insertRepo(db, { id: 'repo-b', label: 'sdk', path: repoB, baseBranch: 'develop' });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function insertRepo(
+    database: Db,
+    repo: { id: string; label: string; path: string; baseBranch: string },
+  ): void {
+    database
+      .prepare(
+        `INSERT INTO repos
+           (id, label, path, default_base_branch, health, worktree_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'ok', 'auto', 1, 1)`,
+      )
+      .run(repo.id, repo.label, repo.path, repo.baseBranch);
+  }
+
+  /** Records every worktree git was asked to create, without running git. */
+  function makeGit() {
+    return {
+      createWorktreeAsync: vi.fn(
+        async (_repoPath: string, _worktreePath: string, _branch: string, _base: string) =>
+          undefined,
+      ),
+    };
+  }
+
+  it('resolves one plan per branch, each with its own repo base branch', async () => {
+    // Arrange — one card, two repos, the long-lived feature case.
+    const task = board.createTask({ title: 'Cross repo feature', repoId: 'repo-a' });
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-b', branchName: 'ab/sdk-side-0002' });
+    const git = makeGit();
+    const service = new WorktreeService(db, board, git as never);
+
+    // Act
+    await service.prepareTaskWorkspace(task.id);
+
+    // Assert — each branch was created from its OWN repo's base branch.
+    const calls = git.createWorktreeAsync.mock.calls.map((call) => ({
+      repoPath: call[0],
+      branch: call[2],
+      baseBranch: call[3],
+    }));
+    expect(calls).toHaveLength(2);
+    expect(calls).toContainEqual({
+      repoPath: repoA,
+      branch: task.branchName,
+      baseBranch: 'master',
+    });
+    expect(calls).toContainEqual({
+      repoPath: repoB,
+      branch: 'ab/sdk-side-0002',
+      baseBranch: 'develop',
+    });
+  });
+
+  it('isolates two branches of one card in the same repo instead of letting them stomp', async () => {
+    // Arrange — the latent bug: sibling *tasks* are counted, and two branches of
+    // the SAME card see zero siblings, so both used to take the bare checkout.
+    const task = board.createTask({ title: 'Stacked work', repoId: 'repo-a' });
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-a', branchName: 'ab/stacked-top-0002' });
+    const git = makeGit();
+    const service = new WorktreeService(db, board, git as never);
+
+    // Act
+    const workspace = await service.prepareTaskWorkspace(task.id);
+
+    // Assert
+    expect(workspace.usedWorktree).toBe(true);
+    const created = git.createWorktreeAsync.mock.calls.map((call) => call[1]);
+    expect(created).toHaveLength(2);
+    expect(new Set(created).size).toBe(2);
+    expect(created).not.toContain(repoA);
+  });
+
+  it('writes each branch its own worktree path back to the board', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Cross repo feature', repoId: 'repo-a' });
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-b', branchName: 'ab/sdk-side-0002' });
+    const service = new WorktreeService(db, board, makeGit() as never);
+
+    // Act
+    await service.prepareTaskWorkspace(task.id);
+
+    // Assert
+    const branches = board.getTaskBranches(task.id);
+    expect(branches).toHaveLength(2);
+    for (const branch of branches) {
+      expect(branch.worktreePath).toBeTruthy();
+    }
+    expect(new Set(branches.map((branch) => branch.worktreePath)).size).toBe(2);
+  });
+
+  it('mirrors only the active branch onto the card so reveal-workspace still opens something', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Cross repo feature', repoId: 'repo-a' });
+    const second = board.addTaskBranch({
+      taskId: task.id,
+      repoId: 'repo-b',
+      branchName: 'ab/sdk-side-0002',
+    });
+    board.setActiveTaskBranch(task.id, second.id);
+    const service = new WorktreeService(db, board, makeGit() as never);
+
+    // Act
+    const workspace = await service.prepareTaskWorkspace(task.id);
+
+    // Assert — the session sits in the ACTIVE branch's repo, not the first one.
+    expect(workspace.repoPath).toBe(repoB);
+    expect(board.getTask(task.id)?.worktreePath).toBe(workspace.path);
+  });
+
+  it('reopens a session in whichever of the card worktrees it was last used in', async () => {
+    // Arrange — the bug: testing only the active branch's root snapped a session
+    // that was last used in repo B back to repo A.
+    const task = board.createTask({ title: 'Cross repo feature', repoId: 'repo-a' });
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-b', branchName: 'ab/sdk-side-0002' });
+    const service = new WorktreeService(db, board, makeGit() as never);
+    const first = await service.prepareTaskWorkspace(task.id);
+    const other = board
+      .getTaskBranches(task.id)
+      .map((branch) => branch.worktreePath!)
+      .find((path) => path !== first.path)!;
+    mkdirSync(other, { recursive: true });
+    board.setTaskLastSessionCwd(task.id, other);
+
+    // Act
+    const reopened = await service.prepareTaskWorkspace(task.id);
+
+    // Assert
+    expect(reopened.path).toBe(other);
+  });
+
+  it('leaves a single-branch card in the bare checkout exactly as before', async () => {
+    // Arrange — the multi-branch rule must not change the one-branch heuristic:
+    // no live sibling task, auto mode, so no worktree at all.
+    const task = board.createTask({ title: 'Just one branch', repoId: 'repo-a' });
+    const git = makeGit();
+    const service = new WorktreeService(db, board, git as never);
+
+    // Act
+    const workspace = await service.prepareTaskWorkspace(task.id);
+
+    // Assert
+    expect(workspace.usedWorktree).toBe(false);
+    expect(workspace.path).toBe(repoA);
+    expect(workspace.repoPath).toBe(repoA);
+    expect(git.createWorktreeAsync).not.toHaveBeenCalled();
+    expect(board.getTaskBranches(task.id)[0]?.worktreePath).toBeUndefined();
   });
 });

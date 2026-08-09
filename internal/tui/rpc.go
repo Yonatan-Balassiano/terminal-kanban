@@ -159,7 +159,11 @@ func rpcTimeout(method string) time.Duration {
 		return 8 * time.Minute
 	case "shutdownManagedOllama":
 		return 20 * time.Second
-	case "createTaskPR", "commentTaskPR", "mergeTaskPR", "triggerSync":
+	case "createTaskPR", "commentTaskPR", "mergeTaskPR", "triggerSync",
+		// The branch-scoped forms do the same gh round trip as the card-scoped
+		// ones; on the default timeout a real merge reads to the user as a
+		// failure while the daemon goes on to complete it.
+		"mergeTaskBranchPR", "commentTaskBranchPR", "addTaskBranch", "removeTaskBranch":
 		return 45 * time.Second
 	case "refreshArtifacts":
 		// Bypasses the daemon cache and re-reads the upstream artifact catalog.

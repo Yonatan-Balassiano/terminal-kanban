@@ -8,14 +8,23 @@ import {
 import { McpAuthRequiredError } from '../src/services/mcp/oauth.js';
 import type { McpClient } from '../src/services/mcp/client.js';
 
-/** Stands in for the MCP client, returning canned devex get_project payloads. */
+/**
+ * Stands in for the MCP client, returning canned devex get_project payloads.
+ *
+ * `calls` records get_project only. A drifting artifact also triggers the
+ * ownership and rollout enrichments, and counting those here would turn every
+ * assertion about how often a project was looked up into a moving target.
+ */
 function fakeClient(
   responder: (projectName: string) => unknown
 ): { client: McpClient; calls: string[] } {
   const calls: string[] = [];
   const client = {
     callTool: vi.fn(async (_tool: string, args: Record<string, unknown>) => {
-      const name = args['projectName'] as string;
+      const name = args['projectName'] as string | undefined;
+      if (name === undefined) {
+        return {};
+      }
       calls.push(name);
       return responder(name);
     }),
@@ -417,5 +426,198 @@ describe('ArtifactsService ownership annotation', () => {
     const record = (await service.refresh()).artifacts[0];
     expect(record?.myPendingCount).toBeUndefined();
     expect(record?.pendingRcCount).toBeUndefined();
+  });
+});
+
+describe('ArtifactsService reachability', () => {
+  it('reports stale when it could not reach the server at all', async () => {
+    // Arrange — a network outage used to be indistinguishable from six
+    // artifacts that happen to be unknown, so the rail claimed a fresh refresh
+    // while it actually knew nothing.
+    const client = {
+      callTool: vi.fn(async () => {
+        throw new TypeError('fetch failed');
+      }),
+    } as unknown as McpClient;
+    const service = new ArtifactsService({ client, artifactNames: ['a', 'b', 'c'] });
+
+    // Act
+    const snapshot = await service.refresh();
+
+    // Assert
+    expect(snapshot.stale).toBe(true);
+    expect(snapshot.error).toContain('fetch failed');
+    // Nothing was learned, so no invented rows are kept either.
+    expect(snapshot.artifacts).toEqual([]);
+  });
+
+  it('keeps the last good rows when a later refresh cannot reach the server', async () => {
+    // Arrange
+    let reachable = true;
+    const client = {
+      callTool: vi.fn(async (tool: string, args: Record<string, unknown>) => {
+        if (!reachable) {
+          throw new TypeError('fetch failed');
+        }
+        if (tool === 'devex__get_project') {
+          return project({ projectName: args['projectName'] as string });
+        }
+        return {};
+      }),
+    } as unknown as McpClient;
+    const service = new ArtifactsService({ client, artifactNames: ['a'] });
+    await service.refresh();
+
+    // Act
+    reachable = false;
+    const snapshot = await service.refresh();
+
+    // Assert — the versions stay on screen, flagged as no longer trustworthy.
+    expect(snapshot.artifacts).toHaveLength(1);
+    expect(snapshot.stale).toBe(true);
+    expect(snapshot.error).toContain('fetch failed');
+  });
+
+  it('stays fresh when only some artifacts fail', async () => {
+    // Arrange — one bad artifact must not blank a rail that is otherwise fine.
+    const client = {
+      callTool: vi.fn(async (tool: string, args: Record<string, unknown>) => {
+        if (tool === 'devex__get_project') {
+          if (args['projectName'] === 'broken') {
+            throw new Error('project not found');
+          }
+          return project({ projectName: 'good' });
+        }
+        return {};
+      }),
+    } as unknown as McpClient;
+    const service = new ArtifactsService({ client, artifactNames: ['good', 'broken'] });
+
+    // Act
+    const snapshot = await service.refresh();
+
+    // Assert
+    expect(snapshot.stale).toBe(false);
+    expect(snapshot.artifacts.map((a) => a.status)).toEqual(['drift', 'unknown']);
+  });
+});
+
+describe('ArtifactsService rollout annotation', () => {
+  function serviceWith(history: unknown, opts: { drift?: boolean } = {}) {
+    const inSync = opts.drift === false;
+    const client = {
+      callTool: vi.fn(async (tool: string) => {
+        if (tool === 'devex__get_project') {
+          return project(
+            inSync
+              ? { gaVersion: '1.0.0', latestRcVersion: '1.0.0', projectName: 'com.wixpress.svc' }
+              : { gaVersion: '1.0.0', latestRcVersion: '1.5.0', projectName: 'com.wixpress.svc' }
+          );
+        }
+        if (tool === 'devex__get_rollout_history') {
+          if (history instanceof Error) {
+            throw history;
+          }
+          return history;
+        }
+        return { releases: [] };
+      }),
+    } as unknown as McpClient;
+
+    return {
+      client,
+      service: new ArtifactsService({ client, artifactNames: ['com.wixpress.svc'] }),
+    };
+  }
+
+  it('carries an in-flight rollout on the artifact', async () => {
+    // Arrange
+    const { service } = serviceWith([
+      { status: 'IN_PROGRESS', toVersion: '1.5.0', createdAt: '2026-08-07T09:00:00Z' },
+    ]);
+
+    // Act
+    const record = (await service.refresh()).artifacts[0];
+
+    // Assert
+    expect(record?.rolloutInFlight).toEqual({
+      status: 'IN_PROGRESS',
+      toVersion: '1.5.0',
+      startedAt: '2026-08-07T09:00:00Z',
+    });
+  });
+
+  it('splits the project id at its last dot', async () => {
+    // Arrange — devex takes the group and artifact halves separately.
+    const { service, client } = serviceWith([]);
+
+    // Act
+    await service.refresh();
+
+    // Assert
+    const call = (client.callTool as ReturnType<typeof vi.fn>).mock.calls.find(
+      (args) => args[0] === 'devex__get_rollout_history'
+    );
+    expect(call?.[1]).toMatchObject({ groupId: 'com.wixpress', artifactId: 'svc' });
+  });
+
+  it('ignores rollouts that already finished', async () => {
+    const { service } = serviceWith([{ status: 'SUCCEEDED', toVersion: '1.4.0' }]);
+    expect((await service.refresh()).artifacts[0]?.rolloutInFlight).toBeUndefined();
+  });
+
+  it('leaves the field unset when the lookup fails', async () => {
+    // Arrange — a shape or transport failure must not break the rail.
+    const { service } = serviceWith(new Error('upstream down'));
+
+    // Act
+    const record = (await service.refresh()).artifacts[0];
+
+    // Assert
+    expect(record?.status).toBe('drift');
+    expect(record?.rolloutInFlight).toBeUndefined();
+  });
+
+  it('spends no call on an artifact that is already in sync', async () => {
+    const { service, client } = serviceWith([], { drift: false });
+
+    await service.refresh();
+
+    const tools = (client.callTool as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(tools).not.toContain('devex__get_rollout_history');
+  });
+});
+
+describe('ArtifactsService.artifactsForRepo', () => {
+  async function serviceFor(repoUrl: string | undefined) {
+    const client = {
+      callTool: vi.fn(async (tool: string) => {
+        if (tool === 'devex__get_project') {
+          return project({
+            projectName: 'com.wixpress.svc',
+            gaVersion: '1.0.0',
+            latestRcVersion: '1.0.0',
+            repoUrl,
+          });
+        }
+        return {};
+      }),
+    } as unknown as McpClient;
+    const service = new ArtifactsService({ client, artifactNames: ['com.wixpress.svc'] });
+    await service.refresh();
+    return service;
+  }
+
+  it('matches regardless of which remote form devex reports', async () => {
+    const ssh = await serviceFor('git@github.com:wix-private/web5.git');
+    const https = await serviceFor('https://github.com/wix-private/web5');
+
+    expect(ssh.artifactsForRepo('wix-private/web5')).toHaveLength(1);
+    expect(https.artifactsForRepo('wix-private/web5')).toHaveLength(1);
+  });
+
+  it('is empty for a repo it does not build', async () => {
+    const service = await serviceFor('git@github.com:wix-private/web5.git');
+    expect(service.artifactsForRepo('wix-private/other')).toEqual([]);
   });
 });

@@ -16,6 +16,7 @@ interface TaskWorkspaceRow {
   worktree_path: string | null;
   last_session_cwd: string | null;
   location: string;
+  active_branch_id: string | null;
 }
 
 interface RepoWorkspaceRow {
@@ -28,11 +29,45 @@ interface RepoWorkspaceRow {
   worktree_root: string | null;
 }
 
+/**
+ * A task_branches row already joined to its own repo.
+ *
+ * The join is per row rather than per card: two branches of the same card can
+ * live in different repos, and worktree_root / default_base_branch / remote_path
+ * are all repo-scoped.
+ */
+interface TaskBranchWorkspaceRow extends RepoWorkspaceRow {
+  branch_id: string;
+  branch_name: string;
+  base_branch: string | null;
+  branch_worktree_path: string | null;
+}
+
+/** One branch of a card, resolved against the repo that branch lives in. */
+export interface BranchWorkspacePlan {
+  /** Null only for a legacy card that has no task_branches row yet. */
+  branchId: string | null;
+  repoId: string;
+  repoLabel: string;
+  repoPath: string;
+  branch: string;
+  baseBranch: string;
+  /** Null when this branch works directly in the repo checkout. */
+  worktreePath: string | null;
+}
+
 export interface TaskWorkspaceInfo {
   taskId: string;
   path: string;
   repoPath: string;
   usedWorktree: boolean;
+  /**
+   * Every branch of the card, active one first. Empty for a general task.
+   *
+   * Optional because callers that stub this type out do not have to model it;
+   * absent means "not resolved", not "the card owns nothing".
+   */
+  workspaces?: BranchWorkspacePlan[];
 }
 
 /** Everything the workspace needs, resolved from the database before any I/O. */
@@ -47,6 +82,8 @@ interface WorkspacePlan {
   /** Null when the task works directly in the repo checkout. */
   worktreePath: string | null;
   lastSessionCwd: string | null;
+  /** Active branch first, so plan.branches[0] is the one the session sits in. */
+  branches: BranchWorkspacePlan[];
 }
 
 function sanitizeWorktreeDir(branch: string): string {
@@ -59,6 +96,11 @@ function isPathInside(parent: string, child: string | null): boolean {
 
 function toTaskLocation(value: string | null): TaskLocation {
   return value === 'remote' ? 'remote' : 'local';
+}
+
+/** Where a branch is actually worked on: its worktree, else the bare checkout. */
+function branchRoot(branch: BranchWorkspacePlan): string {
+  return branch.worktreePath ?? branch.repoPath;
 }
 
 export class WorktreeService {
@@ -84,7 +126,14 @@ export class WorktreeService {
     repo: RepoWorkspaceRow,
     location: TaskLocation,
     currentPath: string | null,
+    branchCount: number,
   ): boolean {
+    // Two branches of the same card in the same repo have no sibling *task* to
+    // count, so the heuristic below would send both to the bare checkout and let
+    // them stomp each other's HEAD. A multi-branch card is always isolated.
+    if (branchCount > 1) {
+      return true;
+    }
     // The remote host has a single checkout that every agent would otherwise
     // fight over, so remote tasks are always isolated in their own worktree.
     if (location === 'remote') {
@@ -137,10 +186,141 @@ export class WorktreeService {
     return this.remoteGit;
   }
 
+  private branchPlan(params: {
+    taskId: string;
+    repo: RepoWorkspaceRow;
+    location: TaskLocation;
+    branchId: string | null;
+    branch: string;
+    baseBranch: string;
+    currentPath: string | null;
+    branchCount: number;
+  }): BranchWorkspacePlan {
+    const { repo, location } = params;
+    const repoPath = this.resolveRepoPath(repo, location);
+    const useWorktree = this.shouldUseWorktree(
+      params.taskId,
+      repo,
+      location,
+      params.currentPath,
+      params.branchCount,
+    );
+    // A configured worktree_root is a path on this laptop, so it cannot apply to
+    // the remote host; remote worktrees always mirror the default layout there.
+    const worktreeRoot =
+      location === 'remote'
+        ? this.defaultWorktreeRoot(repoPath)
+        : (repo.worktree_root ?? this.defaultWorktreeRoot(repoPath));
+
+    return {
+      branchId: params.branchId,
+      repoId: repo.id,
+      repoLabel: repo.label,
+      repoPath,
+      branch: params.branch,
+      baseBranch: params.baseBranch,
+      worktreePath: useWorktree
+        ? (params.currentPath ?? join(worktreeRoot, sanitizeWorktreeDir(params.branch)))
+        : null,
+    };
+  }
+
+  /**
+   * Keeps tasks.branch_name in step with the title-derived name.
+   *
+   * Only meaningful while the card owns exactly one branch: once there are
+   * several there is no single "the card's branch" to keep in step with.
+   */
+  private syncCardBranchName(task: TaskWorkspaceRow, stored: string | null): string {
+    const branch = resolveTaskBranchName(task.title, task.id, stored ?? undefined);
+    if (branch !== task.branch_name) {
+      this.board.setTaskBranch?.(task.id, branch);
+    }
+    return branch;
+  }
+
+  private loadRepo(repoId: string, taskId: string): RepoWorkspaceRow {
+    const repo = this.db
+      .prepare<[string], RepoWorkspaceRow>(
+        `SELECT id, label, path, remote_path, default_base_branch, worktree_mode, worktree_root
+         FROM repos
+         WHERE id = ?`,
+      )
+      .get(repoId);
+    if (!repo) {
+      throw new Error(`Repo not found for task ${taskId}`);
+    }
+    return repo;
+  }
+
+  private loadBranchRows(taskId: string): TaskBranchWorkspaceRow[] {
+    return this.db
+      .prepare<[string], TaskBranchWorkspaceRow>(
+        `SELECT tb.id AS branch_id,
+                tb.branch_name AS branch_name,
+                tb.base_branch AS base_branch,
+                tb.worktree_path AS branch_worktree_path,
+                r.id AS id,
+                r.label AS label,
+                r.path AS path,
+                r.remote_path AS remote_path,
+                r.default_base_branch AS default_base_branch,
+                r.worktree_mode AS worktree_mode,
+                r.worktree_root AS worktree_root
+         FROM task_branches tb
+         JOIN repos r ON r.id = tb.repo_id
+         WHERE tb.task_id = ?
+         ORDER BY tb.sort_key, tb.created_at`,
+      )
+      .all(taskId);
+  }
+
+  private resolveBranchPlans(
+    task: TaskWorkspaceRow,
+    location: TaskLocation,
+  ): BranchWorkspacePlan[] {
+    const rows = this.loadBranchRows(task.id);
+
+    // A card predating task_branches has no row to resolve, so the tasks row is
+    // still the only description of its single branch.
+    if (rows.length === 0) {
+      const repo = this.loadRepo(task.repo_id ?? '', task.id);
+      return [
+        this.branchPlan({
+          taskId: task.id,
+          repo,
+          location,
+          branchId: null,
+          branch: this.syncCardBranchName(task, task.branch_name),
+          baseBranch: repo.default_base_branch ?? 'main',
+          currentPath: task.worktree_path,
+          branchCount: 1,
+        }),
+      ];
+    }
+
+    const isSingle = rows.length === 1;
+    return rows.map((row) =>
+      this.branchPlan({
+        taskId: task.id,
+        repo: row,
+        location,
+        branchId: row.branch_id,
+        branch: isSingle ? this.syncCardBranchName(task, row.branch_name) : row.branch_name,
+        baseBranch: row.base_branch ?? row.default_base_branch ?? 'main',
+        // tasks.worktree_path is the pre-task_branches home of this value, so a
+        // single-branch card still honours it when its own row is empty.
+        currentPath: row.branch_worktree_path ?? (isSingle ? task.worktree_path : null),
+        branchCount: rows.length,
+      }),
+    );
+  }
+
   private resolvePlan(taskId: string): WorkspacePlan {
     const task = this.db
       .prepare<[string], TaskWorkspaceRow>(
-        `SELECT id, title, kind, repo_id, branch_name, worktree_path, last_session_cwd, location
+        `SELECT id, title, kind, repo_id, branch_name, worktree_path, last_session_cwd, location,
+                active_branch_id
          FROM tasks
          WHERE id = ?`,
       )
@@ -161,51 +341,33 @@ export class WorktreeService {
         baseBranch: '',
         worktreePath: null,
         lastSessionCwd: task.last_session_cwd,
+        branches: [],
       };
     }
 
-    const repo = this.db
-      .prepare<[string], RepoWorkspaceRow>(
-        `SELECT id, label, path, remote_path, default_base_branch, worktree_mode, worktree_root
-         FROM repos
-         WHERE id = ?`,
-      )
-      .get(task.repo_id ?? '');
-    if (!repo) {
-      throw new Error(`Repo not found for task ${taskId}`);
-    }
-
     const location = toTaskLocation(task.location);
-    const repoPath = this.resolveRepoPath(repo, location);
-
-    const branch = resolveTaskBranchName(task.title, task.id, task.branch_name ?? undefined);
-    if (branch !== task.branch_name) {
-      this.board.setTaskBranch?.(taskId, branch);
-    }
-
-    const useWorktree = this.shouldUseWorktree(taskId, repo, location, task.worktree_path);
-    // A configured worktree_root is a path on this laptop, so it cannot apply to
-    // the remote host; remote worktrees always mirror the default layout there.
-    const worktreeRoot =
-      location === 'remote'
-        ? this.defaultWorktreeRoot(repoPath)
-        : (repo.worktree_root ?? this.defaultWorktreeRoot(repoPath));
+    const resolved = this.resolveBranchPlans(task, location);
+    // The session sits in the card's active branch; a card that never picked one
+    // falls back to the first by sort_key.
+    const active = resolved.find((plan) => plan.branchId === task.active_branch_id) ?? resolved[0]!;
+    const branches = [active, ...resolved.filter((plan) => plan !== active)];
 
     return {
       taskId,
       kind: 'repo',
       location,
-      repoPath,
-      branch,
-      baseBranch: repo.default_base_branch ?? 'main',
-      worktreePath: useWorktree
-        ? (task.worktree_path ?? join(worktreeRoot, sanitizeWorktreeDir(branch)))
-        : null,
+      repoPath: active.repoPath,
+      branch: active.branch,
+      baseBranch: active.baseBranch,
+      worktreePath: active.worktreePath,
       lastSessionCwd: task.last_session_cwd,
+      branches,
     };
   }
 
   private commit(plan: WorkspacePlan, worktreePath: string | null, cwd: string): TaskWorkspaceInfo {
+    // tasks.worktree_path mirrors the ACTIVE branch so reveal-workspace and
+    // open-in-IDE still open something sensible on a multi-branch card.
     this.board.setTaskWorktree?.(plan.taskId, worktreePath);
     this.board.setTaskLastSessionCwd?.(plan.taskId, cwd);
     return {
@@ -213,6 +375,7 @@ export class WorktreeService {
       path: cwd,
       repoPath: plan.repoPath,
       usedWorktree: worktreePath !== null,
+      workspaces: plan.branches,
     };
   }
 
@@ -221,35 +384,59 @@ export class WorktreeService {
     const plan = this.resolvePlan(taskId);
     const transport = this.transports.forLocation(plan.location);
 
-    if (!plan.worktreePath) {
-      const cwd = await this.reuseCwd(transport, plan.repoPath, plan.lastSessionCwd);
-      return this.commit(plan, null, cwd);
+    // Every branch gets its own checkout, not just the active one: an agent that
+    // moves to another repo mid-card must find that worktree already there.
+    for (const branch of plan.branches) {
+      await this.ensureBranchWorkspace(transport, plan.location, branch);
+    }
+
+    const roots = plan.branches.length > 0 ? plan.branches.map(branchRoot) : [plan.repoPath];
+    const cwd = await this.reuseCwd(transport, roots, plan.lastSessionCwd);
+    return this.commit(plan, plan.worktreePath, cwd);
+  }
+
+  private async ensureBranchWorkspace(
+    transport: ExecTransport,
+    location: TaskLocation,
+    branch: BranchWorkspacePlan,
+  ): Promise<void> {
+    if (!branch.worktreePath) {
+      return;
     }
 
     // mkdirp only when the worktree is actually missing: on a remote host every
     // call is an SSH round trip, and an existing worktree implies its parent.
-    if (!(await transport.exists(plan.worktreePath))) {
-      await transport.mkdirp(dirname(plan.worktreePath));
-      await this.gitFor(plan.location).createWorktreeAsync(
-        plan.repoPath,
-        plan.worktreePath,
-        plan.branch,
-        plan.baseBranch,
+    if (!(await transport.exists(branch.worktreePath))) {
+      await transport.mkdirp(dirname(branch.worktreePath));
+      await this.gitFor(location).createWorktreeAsync(
+        branch.repoPath,
+        branch.worktreePath,
+        branch.branch,
+        branch.baseBranch,
       );
     }
 
-    const cwd = await this.reuseCwd(transport, plan.worktreePath, plan.lastSessionCwd);
-    return this.commit(plan, plan.worktreePath, cwd);
+    // Written back so the board can point at each branch's checkout directly
+    // instead of every reader re-deriving the path from the branch name.
+    if (branch.branchId) {
+      this.board.setTaskBranchWorktree(branch.branchId, branch.worktreePath);
+    }
   }
 
   private async reuseCwd(
     transport: ExecTransport,
-    root: string,
+    roots: readonly string[],
     lastSessionCwd: string | null,
   ): Promise<string> {
-    if (!isPathInside(root, lastSessionCwd)) {
-      return root;
+    // roots[0] is the active branch's directory — where the session goes when
+    // the last cwd tells us nothing usable.
+    const fallback = roots[0]!;
+    // A card owns a workspace per branch, so a session last used in repo B must
+    // reopen there rather than snapping back to whichever repo is active.
+    const isOwned = roots.some((root) => isPathInside(root, lastSessionCwd));
+    if (!isOwned) {
+      return fallback;
     }
-    return (await transport.exists(lastSessionCwd!)) ? lastSessionCwd! : root;
+    return (await transport.exists(lastSessionCwd!)) ? lastSessionCwd! : fallback;
   }
 }

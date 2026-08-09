@@ -178,9 +178,73 @@ type TaskRecord struct {
 	HasConflicts              bool             `json:"hasConflicts"`
 	SessionAttentionNeeded    bool             `json:"sessionAttentionNeeded"`
 	SessionAttentionUpdatedAt *int64           `json:"sessionAttentionUpdatedAt"`
-	ArchivedAt                *int64           `json:"archivedAt"`
-	CreatedAt                 int64            `json:"createdAt"`
-	UpdatedAt                 int64            `json:"updatedAt"`
+	// Every repo and branch this card is working in. The flat PR, CI and review
+	// fields above are a rollup of these.
+	Branches       []TaskBranchRecord `json:"branches"`
+	ActiveBranchID string             `json:"activeBranchId"`
+	PRCount        int                `json:"prCount"`
+	PROpenCount    int                `json:"prOpenCount"`
+	PRMergedCount  int                `json:"prMergedCount"`
+	// Nil until the daemon has resolved where this card's merged work got to.
+	// Nil is "not known", never "not shipped".
+	Release    *TaskReleaseSummary `json:"release"`
+	ArchivedAt *int64              `json:"archivedAt"`
+	CreatedAt  int64               `json:"createdAt"`
+	UpdatedAt  int64               `json:"updatedAt"`
+}
+
+// TaskBranchRecord is one repo + branch a card is working in, and the pull
+// request that branch carries. Actions that merge, comment on, or open "the PR"
+// operate at this level, because a card no longer has a single answer.
+type TaskBranchRecord struct {
+	ID                    string           `json:"id"`
+	TaskID                string           `json:"taskId"`
+	RepoID                string           `json:"repoId"`
+	BranchName            string           `json:"branchName"`
+	BaseBranch            string           `json:"baseBranch"`
+	WorktreePath          string           `json:"worktreePath"`
+	SortKey               float64          `json:"sortKey"`
+	PRNumber              *int             `json:"prNumber"`
+	PRURL                 string           `json:"prUrl"`
+	PRState               PRState          `json:"prState"`
+	PRDraft               bool             `json:"prDraft"`
+	MergeCommitSha        string           `json:"mergeCommitSha"`
+	MergedAt              *int64           `json:"mergedAt"`
+	CIState               CIState          `json:"ciState"`
+	CISummary             string           `json:"ciSummary"`
+	FailingCheckName      string           `json:"failingCheckName"`
+	CIRequiredTotal       int              `json:"ciRequiredTotal"`
+	CIRequiredPassed      int              `json:"ciRequiredPassed"`
+	CIRequiredFailed      int              `json:"ciRequiredFailed"`
+	CIRequiredPending     int              `json:"ciRequiredPending"`
+	ReviewState           ReviewState      `json:"reviewState"`
+	ReviewSummary         string           `json:"reviewSummary"`
+	UnresolvedThreadCount int              `json:"unresolvedThreadCount"`
+	GitState              GitState         `json:"gitState"`
+	GitAheadCount         int              `json:"gitAheadCount"`
+	GitBehindCount        int              `json:"gitBehindCount"`
+	HasUntracked          bool             `json:"hasUntracked"`
+	HasConflicts          bool             `json:"hasConflicts"`
+	GitHubSyncStatus      GitHubSyncStatus `json:"githubSyncStatus"`
+	GitHubSyncError       string           `json:"githubSyncError"`
+	GitHubLastSyncedAt    *int64           `json:"githubLastSyncedAt"`
+	CreatedAt             int64            `json:"createdAt"`
+	UpdatedAt             int64            `json:"updatedAt"`
+}
+
+// TaskReleaseSummary is how far a card's merged work has travelled towards
+// production, condensed to what one badge can show.
+type TaskReleaseSummary struct {
+	Stage       string `json:"stage"`
+	Confidence  string `json:"confidence"`
+	Reason      string `json:"reason"`
+	GaCount     int    `json:"gaCount"`
+	GatingCount int    `json:"gatingCount"`
+	// The artifact holding the card back, already shortened for a narrow card.
+	BlockingArtifact  string `json:"blockingArtifact"`
+	BlockingRcVersion string `json:"blockingRcVersion"`
+	BlockingGaVersion string `json:"blockingGaVersion"`
+	CheckedAt         int64  `json:"checkedAt"`
 }
 
 type MissionRecord struct {

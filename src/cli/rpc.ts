@@ -15,6 +15,11 @@ function rpcTimeoutMs(method: RPCMethod): number {
     case 'createTaskPR':
     case 'mergeTaskPR':
     case 'triggerSync':
+    // The branch-scoped forms do the same gh round trip as the card-scoped ones.
+    case 'mergeTaskBranchPR':
+    case 'commentTaskBranchPR':
+    case 'addTaskBranch':
+    case 'removeTaskBranch':
       return 45_000;
     case 'openSession':
     case 'recreateSession':

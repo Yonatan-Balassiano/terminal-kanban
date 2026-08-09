@@ -24,6 +24,8 @@ export interface ServiceContainer {
   doctor: import('../services/doctor.js').DoctorService;
   /** Absent when no artifacts are configured. */
   artifacts?: import('../services/artifacts.js').ArtifactsService;
+  /** Absent for the same reason: without a catalog nothing can be resolved. */
+  release?: import('../services/release-tracker.js').ReleaseTracker;
   aiChat: import('../services/ai-chat.js').AIChatService;
   ollama?: import('../services/ollama.js').ManagedOllamaService;
   db: import('../db/index.js').Db;
@@ -47,7 +49,15 @@ const DEFAULT_MCP_SERVER_URL = 'https://mcp-s.wewix.net/mcp';
 async function createArtifactsService(
   cfg: import('../types/index.js').AppConfig,
   dbPath: string
-): Promise<import('../services/artifacts.js').ArtifactsService | undefined> {
+): Promise<
+  | {
+      artifacts: import('../services/artifacts.js').ArtifactsService;
+      // Handed back so release tracking can reach devex over the same
+      // connection rather than opening a second authenticated one.
+      client: import('../services/mcp/client.js').McpClient;
+    }
+  | undefined
+> {
   const list = cfg.artifacts?.list ?? [];
   if (list.length === 0) {
     return undefined;
@@ -71,11 +81,83 @@ async function createArtifactsService(
     credentialsPath: path.join(path.dirname(dbPath), 'mcp-auth.json'),
   });
 
-  return new ArtifactsService({
-    client: new McpClient({ serverUrl, auth }),
-    artifactNames: list,
-    refreshIntervalMs: cfg.artifacts?.refreshIntervalMs,
-    ownership,
+  const client = new McpClient({ serverUrl, auth });
+
+  return {
+    client,
+    artifacts: new ArtifactsService({
+      client,
+      artifactNames: list,
+      refreshIntervalMs: cfg.artifacts?.refreshIntervalMs,
+      ownership,
+    }),
+  };
+}
+
+// --------------- Release tracking ----------------------------
+
+/**
+ * Builds the service that answers "has this card's merged work shipped?".
+ *
+ * The pull-request lookup is supplied as a function so the tracker is unaware
+ * of how a card stores its work — one branch today, several later.
+ */
+async function createReleaseTracker(deps: {
+  db: import('../db/index.js').Db;
+  board: import('../services/board.js').BoardService;
+  workspace: import('../services/workspace.js').WorkspaceService;
+  github: import('../services/github.js').GitHubService;
+  client: import('../services/mcp/client.js').McpClient;
+  artifacts: import('../services/artifacts.js').ArtifactsService;
+}): Promise<import('../services/release-tracker.js').ReleaseTracker> {
+  const { ReleaseStatusService } = await import('../services/release-status.js');
+  const { ReleaseTracker } = await import('../services/release-tracker.js');
+
+  // Read from the card's branches, not its rolled-up columns: tasks.pr_number is
+  // null by design once a card carries more than one pull request, so anything
+  // reading it would silently see a multi-repo feature as having no work at all.
+  const prsForTask = (taskId: string) =>
+    deps.board
+      .getTaskBranches(taskId)
+      .flatMap((branch) => {
+        if (branch.prNumber === undefined) {
+          return [];
+        }
+
+        const repo = deps.workspace.getRepo(branch.repoId);
+        if (!repo?.githubOwner || !repo.githubRepo) {
+          return [];
+        }
+
+        return [
+          {
+            repoSlug: `${repo.githubOwner}/${repo.githubRepo}`,
+            prNumber: branch.prNumber,
+            repoPath: repo.path,
+            prState: branch.prState,
+            // The merge timestamp is deliberately not passed from the stored
+            // epoch: the devex release query filters on GitHub's exact string,
+            // and one rebuilt from milliseconds would shift the boundary. The
+            // resolver fetches it itself and caches it for the process lifetime.
+          },
+        ];
+      });
+
+  return new ReleaseTracker({
+    db: deps.db,
+    resolver: new ReleaseStatusService({
+      client: deps.client,
+      artifacts: deps.artifacts,
+      github: deps.github,
+    }),
+    listTaskPRs: prsForTask,
+    // Any card with merged work has something that might have shipped. Archived
+    // cards are nobody's pending question.
+    listTrackedTaskIds: () =>
+      deps.board
+        .getTasks()
+        .filter((task) => task.prMergedCount > 0)
+        .map((task) => task.id),
   });
 }
 
@@ -176,11 +258,20 @@ export function warmOllamaOnStartup(
   });
 }
 
+/**
+ * The board's columns.
+ *
+ * `shipping` exists because merging stopped being the end of the story: a card
+ * whose pull requests have all landed but whose artifacts have not reached
+ * production is neither in review nor finished, and its worktrees must survive
+ * until they are.
+ */
 const BOARD_TRACKS = [
   { id: 'backlog', label: 'Backlog', sortOrder: 0 },
   { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
   { id: 'pr', label: 'PR', sortOrder: 2 },
-  { id: 'done', label: 'Done', sortOrder: 3 },
+  { id: 'shipping', label: 'Shipping', sortOrder: 3 },
+  { id: 'done', label: 'Done', sortOrder: 4 },
 ] as const;
 
 function normalizeBoardTracks(
@@ -439,7 +530,8 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
 
   // The artifacts rail is optional: with no configured list there is nothing to
   // show, so no MCP client and no OAuth are created at all.
-  const artifacts = await createArtifactsService(cfg, opts.dbPath);
+  const artifactsSetup = await createArtifactsService(cfg, opts.dbPath);
+  const artifacts = artifactsSetup?.artifacts;
   const buffers = new TerminalBufferService();
   const worktrees = new WorktreeService(db, board, git, transports);
   const session = new SessionManager(
@@ -471,10 +563,33 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
       payload: view.getBoardSnapshot(),
     });
   };
+  // Release tracking rides the artifacts rail's connection, so it exists only
+  // when that rail does — without a devex catalog there is nothing to resolve
+  // a commit against.
+  const release = artifactsSetup
+    ? await createReleaseTracker({
+        db,
+        board,
+        workspace,
+        github,
+        client: artifactsSetup.client,
+        artifacts: artifactsSetup.artifacts,
+      })
+    : undefined;
+
+  if (release) {
+    view.releaseSummaryFor = (taskId) => release.getSummary(taskId);
+  }
+
   const taskLifecycle = new TaskLifecycleService(db, board, git, session, transports);
   const sync = new SyncService(board, missions, github, git, db);
   sync.transports = transports;
+  // Fires on reaching done, not on a merge: a card whose pull requests have
+  // landed but whose change has not shipped still needs its worktrees.
   sync.onTaskMergedOrClosed = (taskId) => taskLifecycle.cleanupTaskResources(taskId);
+  if (release) {
+    sync.isFullyReleased = (taskId) => release.isFullyReleased(taskId);
+  }
   const ollama = new ManagedOllamaService(cfg.aiChat);
   const aiChat = new AIChatService({
     board,
@@ -521,6 +636,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
 
   sync.start(pollIntervalMs);
   artifacts?.start();
+  release?.start();
 
   // ---- Fan sync events to server subscribers -----------------
   sync.syncEvent.on('sync', (event: unknown) => {
@@ -564,6 +680,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     events,
     doctor,
     artifacts,
+    release,
     aiChat,
     ollama,
   };
