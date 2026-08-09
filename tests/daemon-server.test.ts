@@ -1326,6 +1326,37 @@ describe('daemon setTrackedArtifacts dispatch', () => {
     expect(response).toEqual({ id: 'req-messy-names', result: { names: cleaned } });
   });
 
+  it('serves the configured list, including artifacts the rail could not resolve', async () => {
+    // The editor opens on this, not on the rail's rows. An artifact devex is
+    // down for is still tracked, and omitting it here is what let the next save
+    // delete it from the config.
+    const configured = ['com.wixpress.resolved', 'com.wixpress.unreachable'];
+
+    const response = await dispatch(
+      { id: 'req-tracked', method: 'getTrackedArtifacts', params: {} },
+      {
+        artifacts: {
+          getArtifactNames: vi.fn().mockReturnValue(configured),
+          // Only one of the two resolved; the snapshot is the shorter list.
+          getSnapshot: vi.fn().mockReturnValue({ artifacts: [{ name: 'com.wixpress.resolved' }] }),
+        },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(response).toEqual({ id: 'req-tracked', result: { names: configured } });
+  });
+
+  it('reports an empty tracked list when no rail is running', async () => {
+    const response = await dispatch(
+      { id: 'req-tracked-none', method: 'getTrackedArtifacts', params: {} },
+      {} as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(response).toEqual({ id: 'req-tracked-none', result: { names: [] } });
+  });
+
   it('persists an emptied list even with nothing to apply it to', async () => {
     // Removing the last artifact must still reach disk, or it returns on restart.
     const response = await dispatch(

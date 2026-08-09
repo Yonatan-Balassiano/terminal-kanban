@@ -798,6 +798,19 @@ export async function dispatch(
         return { id: req.id, result };
       }
 
+      case 'getTrackedArtifacts': {
+        // Which artifacts are configured, which is not the same question as
+        // which ones resolved. The editor asks this one: seeding it from the
+        // snapshot dropped every artifact devex could not answer for right
+        // now — including all of them for the moment after a save, while the
+        // refresh is still in flight — and the next save wrote that shortened
+        // list to disk, deleting them for good.
+        return {
+          id: req.id,
+          result: { names: [...(services.artifacts?.getArtifactNames() ?? [])] },
+        };
+      }
+
       case 'setTrackedArtifacts': {
         const names = (p['names'] as string[] | undefined) ?? [];
         const cleaned = [

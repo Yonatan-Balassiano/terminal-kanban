@@ -119,6 +119,12 @@ type artifactListAppliedMsg struct {
 	err   error
 }
 
+// trackedArtifactsLoadedMsg carries the configured list into the open editor.
+type trackedArtifactsLoadedMsg struct {
+	names []string
+	err   error
+}
+
 type spinnerTickMsg struct{}
 type sessionPollTickMsg struct{}
 type artifactsPollTickMsg struct{}
@@ -347,6 +353,20 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case artifactRolloutMsg:
 		return m, m.applyArtifactRollout(msg)
+
+	case trackedArtifactsLoadedMsg:
+		// The modal may already be gone; the reply is then simply dropped.
+		if m.artifactListModal == nil {
+			return m, nil
+		}
+		m.artifactListModal.Loading = false
+		if msg.err != nil {
+			m.artifactListModal.Error = msg.err.Error()
+			return m, nil
+		}
+		m.artifactListModal.Names = msg.names
+		m.artifactListModal.Selected = 0
+		return m, nil
 
 	case artifactListAppliedMsg:
 		if msg.err != nil {
@@ -693,8 +713,7 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	case "T":
 		// Sits with the other artifact keys (S refresh, ; select, G roll out).
-		m.openArtifactListModal()
-		return nil
+		return m.openArtifactListModal()
 	case "u":
 		return m.toggleMissionsPaneCmd(true)
 	case "t":
@@ -1360,6 +1379,22 @@ func (m *Model) setTrackedArtifactsCmd(names []string) tea.Cmd {
 			return artifactListAppliedMsg{err: err}
 		}
 		return artifactListAppliedMsg{names: result.Names}
+	}
+}
+
+// fetchTrackedArtifactsCmd asks which artifacts are configured.
+//
+// Deliberately not the rail snapshot: that holds what resolved, which is a
+// shorter list whenever devex is unreachable or a refresh is still in flight.
+func (m *Model) fetchTrackedArtifactsCmd() tea.Cmd {
+	return func() tea.Msg {
+		var result struct {
+			Names []string `json:"names"`
+		}
+		if err := m.client.Call("getTrackedArtifacts", nil, &result); err != nil {
+			return trackedArtifactsLoadedMsg{err: err}
+		}
+		return trackedArtifactsLoadedMsg{names: result.Names}
 	}
 }
 
