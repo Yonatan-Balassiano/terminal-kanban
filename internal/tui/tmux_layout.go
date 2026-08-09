@@ -116,8 +116,22 @@ func attachTaskSessionInTmuxWithEnvironment(tmuxEnv string, tmuxPane string, run
 	}
 
 	joinedPanes := []string{}
+	clearedBoardPaneTag := false
 	for _, sourcePane := range sourcePanes {
-		if strings.TrimSpace(sourcePane) == "" || sourcePane == boardPane {
+		if strings.TrimSpace(sourcePane) == "" {
+			continue
+		}
+		// The board's own pane is never a task pane, so a tag on it is stale
+		// bookkeeping — and leaving it there wedges the card for good: this
+		// attach finds nothing to join, while the daemon keeps reporting the
+		// session alive because *some* pane still carries the tag, so it hands
+		// back the dead record instead of rebuilding. Strip the tag to break
+		// that loop.
+		if sourcePane == boardPane {
+			if err := tmuxUntagPane(runner, sourcePane); err != nil {
+				return err
+			}
+			clearedBoardPaneTag = true
 			continue
 		}
 		if err := tmuxSetPaneOption(runner, sourcePane, tmuxBackendSessionIDPaneOption, backendSessionID); err != nil {
@@ -135,6 +149,9 @@ func attachTaskSessionInTmuxWithEnvironment(tmuxEnv string, tmuxPane string, run
 		joinedPanes = append(joinedPanes, sourcePane)
 	}
 	if len(joinedPanes) == 0 {
+		if clearedBoardPaneTag {
+			return fmt.Errorf("tmux task pane for %s was lost; open the task again to start a fresh session", backendSessionID)
+		}
 		return fmt.Errorf("tmux task pane not found: %s", backendSessionID)
 	}
 
@@ -167,7 +184,40 @@ func tmuxResolveBoardPane(runner tmuxRunner, tmuxPane string) (string, error) {
 		return boardPane, nil
 	}
 
-	return currentPane, nil
+	return tmuxBoardPaneByTag(runner, currentPane), nil
+}
+
+// Pick the board pane in a window that has not recorded one yet — a freshly
+// built layout, or one rebuilt after a relaunch.
+//
+// The active pane is the only other hint available, and it is the wrong answer
+// whenever a task pane holds focus. Task panes always carry a backend-session
+// tag and the board pane never does, so an untagged pane beats a tagged active
+// one. Guessing wrong is expensive: the layout engine then treats the board's
+// own pane as a task pane, tags it and breaks it out into the holding session,
+// and every later attach dies on a task pane that is really the board.
+func tmuxBoardPaneByTag(runner tmuxRunner, currentPane string) string {
+	panes, err := tmuxPanesInWindow(runner, currentPane)
+	if err != nil {
+		return currentPane
+	}
+
+	untagged := []string{}
+	for _, pane := range panes {
+		if pane.BackendSessionID == "" {
+			untagged = append(untagged, pane.ID)
+		}
+	}
+
+	for _, paneID := range untagged {
+		if paneID == currentPane {
+			return currentPane
+		}
+	}
+	if len(untagged) == 1 {
+		return untagged[0]
+	}
+	return currentPane
 }
 
 func tmuxWindowOption(runner tmuxRunner, targetPane string, option string) string {
@@ -200,6 +250,17 @@ func tmuxSetPaneOption(runner tmuxRunner, targetPane string, option string, valu
 	}
 	args = append(args, option, value)
 	_, err := runner.Run(args...)
+	return err
+}
+
+func tmuxUntagPane(runner tmuxRunner, targetPane string) error {
+	targetPane = strings.TrimSpace(targetPane)
+	if targetPane == "" {
+		// Without a target tmux unsets the option on the current pane, which is
+		// the one pane this must never touch.
+		return nil
+	}
+	_, err := runner.Run("set-option", "-p", "-q", "-u", "-t", targetPane, tmuxBackendSessionIDPaneOption)
 	return err
 }
 
