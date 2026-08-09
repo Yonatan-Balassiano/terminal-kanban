@@ -12,6 +12,7 @@ uses_worktree="${AGENTBOARD_USES_WORKTREE:-0}"
 bootstrap_notice="${AGENTBOARD_BOOTSTRAP_NOTICE:-}"
 agent_args="${AGENTBOARD_AGENT_ARGS:-}"
 workspaces="${AGENTBOARD_WORKSPACES:-}"
+agent_session_id="${AGENTBOARD_AGENT_SESSION_ID:-}"
 
 # The card's checkouts, one "label<TAB>branch<TAB>path" row per line.
 #
@@ -72,10 +73,29 @@ if ! command -v "$command_name" >/dev/null 2>&1; then
   exit 127
 fi
 
-if [[ -n "$agent_args" ]]; then
-  # agent_args is a shell-quoted argument list built by the daemon, not user
-  # free-text, so eval is what re-splits it back into distinct arguments.
-  eval "\"\$command_name\" $agent_args"
-else
-  "$command_name"
+# Flags pinning the agent to this card's conversation.
+#
+# A card outlives whichever pane it was last opened in, so reopening one has to
+# rejoin its conversation rather than start a blank agent. Resuming by id beats
+# "the newest conversation in this directory": a card's second pane, and any
+# sibling task sharing the checkout, all write their history to the same place.
+#
+# An id only becomes resumable once the agent has written it out, which does not
+# happen until the first message — so a card that was opened and abandoned has
+# nothing to resume, and starts its conversation under that same id instead.
+#
+# Only claude is wired up; codex's resume flags are not verified here, so it
+# keeps launching the way it always has.
+session_args=""
+if [[ -n "$agent_session_id" && "$agent" == "claude" ]]; then
+  claude_projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+  if compgen -G "$claude_projects/*/$agent_session_id.jsonl" >/dev/null 2>&1; then
+    session_args="--resume $(printf '%q' "$agent_session_id")"
+  else
+    session_args="--session-id $(printf '%q' "$agent_session_id")"
+  fi
 fi
+
+# agent_args is a shell-quoted argument list built by the daemon, not user
+# free-text, so eval is what re-splits it back into distinct arguments.
+eval "\"\$command_name\" $session_args $agent_args"

@@ -257,6 +257,8 @@ export interface SessionRecord {
   backendSessionId?: string;
   /** Shell command to reattach, e.g. "tmux attach -t agentboard_abc123" */
   attachCommand?: string;
+  /** The agent CLI's own conversation id — see CreateSessionOpts.agentSessionId. */
+  agentSessionId?: string;
   status: SessionStatus;
   cwd?: string;
   branch?: string;
@@ -363,6 +365,16 @@ export interface CreateSessionOpts {
   sessionBootstrapScript: string;
   agentPermissionMode?: AgentPermissionMode;
   agentArgs?: Partial<Record<AgentCLI, string[]>>;
+  /**
+   * The conversation id to run the agent CLI under, stable for the life of the
+   * card's slot.
+   *
+   * A card outlives the tmux pane it was last opened in, so relaunching one
+   * would otherwise drop the user into a blank agent. Pinning the id lets the
+   * bootstrap script resume that exact conversation — not merely the newest one
+   * in the directory, which a card's second pane or a sibling task would win.
+   */
+  agentSessionId?: string;
 }
 
 export interface AttachMetadata {

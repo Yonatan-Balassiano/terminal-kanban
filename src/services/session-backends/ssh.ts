@@ -297,6 +297,7 @@ export class SshTmuxBackend implements SessionBackend {
         sessionBootstrapScript: remoteBootstrapScript,
         agentPermissionMode: opts.agentPermissionMode,
         agentArgs: opts.agentArgs,
+        agentSessionId: opts.agentSessionId,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       this.rememberInspect(backendSessionId, { backendSessionId, status: 'active' });

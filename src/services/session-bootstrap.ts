@@ -32,6 +32,8 @@ export interface SessionBootstrapCommandOptions {
    * could not resolve them — the script then simply prints no map.
    */
   workspaces?: readonly SessionWorkspaceEntry[];
+  /** Conversation id to resume, or to start this conversation under. */
+  agentSessionId?: string;
 }
 
 /**
@@ -90,6 +92,7 @@ export function buildNewSessionBootstrapCommand({
   agentPermissionMode,
   agentArgs,
   workspaces = [],
+  agentSessionId,
 }: SessionBootstrapCommandOptions): string {
   const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs);
   const envVars: Array<[string, string]> = [
@@ -103,6 +106,7 @@ export function buildNewSessionBootstrapCommand({
     ['AGENTBOARD_BOOTSTRAP_NOTICE', bootstrapNotice ?? ''],
     ['AGENTBOARD_AGENT_ARGS', shellJoin(resolvedAgentArgs)],
     ['AGENTBOARD_WORKSPACES', encodeWorkspaces(workspaces)],
+    ['AGENTBOARD_AGENT_SESSION_ID', agentSessionId ?? ''],
   ];
 
   return [

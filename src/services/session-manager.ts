@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import type {
   AgentCLI,
@@ -48,6 +49,7 @@ interface SessionRow {
   backend_type: string;
   backend_session_id: string | null;
   attach_command: string | null;
+  agent_session_id: string | null;
   status: string;
   cwd: string | null;
   branch: string | null;
@@ -127,6 +129,7 @@ function rowToRecord(row: SessionRow): SessionRecord {
     backendType: row.backend_type as SessionBackendType,
     backendSessionId: row.backend_session_id ?? undefined,
     attachCommand: row.attach_command ?? undefined,
+    agentSessionId: row.agent_session_id ?? undefined,
     status: row.status as SessionStatus,
     cwd: row.cwd ?? undefined,
     branch: row.branch ?? undefined,
@@ -535,6 +538,7 @@ export class SessionManager {
 
     const taskRepoPath = this.repoPathForTask(taskRow, repoRow);
     const workspace = await this.prepareWorkspaceForSession(taskId, taskRepoPath);
+    const agentSessionId = this.resolveAgentSessionId(taskId, slot);
 
     // `workspaces` rides alongside the shared CreateSessionOpts rather than in
     // it: the backends forward the map to the bootstrap builder, and the shared
@@ -555,12 +559,14 @@ export class SessionManager {
       agentPermissionMode: this.agentPermissionMode,
       agentArgs: this.agentArgs,
       workspaces: sessionWorkspaceEntries(workspace),
+      agentSessionId,
     };
     const createdSession = await backend.create(createOpts);
     const sessionRecord: SessionRecord = {
       ...createdSession,
       taskId,
       slot,
+      agentSessionId,
       branch: isGeneral ? undefined : createdSession.branch,
     };
 
@@ -579,6 +585,7 @@ export class SessionManager {
           string,
           string | null,
           string | null,
+          string | null,
           string,
           string | null,
           string | null,
@@ -590,8 +597,8 @@ export class SessionManager {
       >(
         `INSERT INTO sessions
            (id, task_id, slot, backend_type, backend_session_id, attach_command,
-            status, cwd, branch, last_heartbeat, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            agent_session_id, status, cwd, branch, last_heartbeat, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         sessionRecord.id,
@@ -600,6 +607,7 @@ export class SessionManager {
         sessionRecord.backendType,
         sessionRecord.backendSessionId ?? null,
         sessionRecord.attachCommand ?? null,
+        sessionRecord.agentSessionId ?? null,
         sessionRecord.status,
         sessionRecord.cwd ?? null,
         sessionRecord.branch ?? null,
@@ -617,6 +625,32 @@ export class SessionManager {
     this.clearTaskAttention(taskId);
 
     return sessionRecord;
+  }
+
+  /**
+   * The conversation id this task's slot runs its agent under.
+   *
+   * Reuses the id from whatever session row the slot last had, so a card
+   * reopened after its pane died resumes where it left off. Status is
+   * deliberately not filtered: the rows worth inheriting from are exactly the
+   * dead ones. A slot that has never been opened gets a fresh id, which the
+   * bootstrap script starts the conversation under.
+   */
+  private resolveAgentSessionId(taskId: string, slot: SessionSlot): string {
+    const previous = this.db
+      .prepare<[string, SessionSlot], { agent_session_id: string }>(
+        `SELECT agent_session_id FROM sessions
+          WHERE task_id = ?
+            AND slot = ?
+            AND agent_session_id IS NOT NULL
+          ORDER BY updated_at DESC
+          LIMIT 1`
+      )
+      .get(taskId, slot);
+
+    // A uuid, not generateId(): it is the agent CLI's identifier, and claude
+    // rejects --session-id values that are not one.
+    return previous?.agent_session_id ?? randomUUID();
   }
 
   // ---- adoption --------------------------------------------

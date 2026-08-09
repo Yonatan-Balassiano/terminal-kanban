@@ -1688,3 +1688,139 @@ describe('SessionManager duplicate session rows', () => {
     expect(row.status).toBe('active');
   });
 });
+
+describe('SessionManager agent conversation id', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  /** A backend whose sessions are always dead by the time they are looked at. */
+  function makeManager() {
+    let created = 0;
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => {
+      created += 1;
+      return {
+        id: `session-${created}`,
+        taskId: opts.taskId,
+        backendType: 'pty',
+        backendSessionId: `ab_session_${created}`,
+        status: 'active',
+        cwd: opts.cwd ?? opts.repoPath,
+        branch: opts.branch,
+        createdAt: created,
+        updatedAt: created,
+      };
+    });
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({ command: '' })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    return { manager, create };
+  }
+
+  it('hands the agent a uuid it can be relaunched under, and stores it', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Move config', repoId: 'repo-1' });
+    const { manager, create } = makeManager();
+
+    // Act
+    const session = await manager.openSession(task.id);
+
+    // Assert — claude only accepts a uuid for --session-id.
+    expect(session.agentSessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    );
+    expect(create.mock.calls[0]?.[0].agentSessionId).toBe(session.agentSessionId);
+    const row = db
+      .prepare('SELECT agent_session_id FROM sessions WHERE id = ?')
+      .get(session.id) as { agent_session_id: string };
+    expect(row.agent_session_id).toBe(session.agentSessionId);
+  });
+
+  it('reopens a card whose pane died on the same conversation', async () => {
+    // Arrange — the backend reports every session dead, so reopening rebuilds it.
+    const task = board.createTask({ title: 'Move config', repoId: 'repo-1' });
+    const { manager, create } = makeManager();
+    const first = await manager.openSession(task.id);
+
+    // Act
+    const second = await manager.openSession(task.id);
+
+    // Assert — a new backend session, still the same conversation.
+    expect(second.id).not.toBe(first.id);
+    expect(second.agentSessionId).toBe(first.agentSessionId);
+    expect(create.mock.calls[1]?.[0].agentSessionId).toBe(first.agentSessionId);
+  });
+
+  it('keeps the conversation across an explicit recreate', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Move config', repoId: 'repo-1' });
+    const { manager } = makeManager();
+    const first = await manager.openSession(task.id);
+
+    // Act
+    const recreated = await manager.recreateSession(task.id);
+
+    // Assert
+    expect(recreated.agentSessionId).toBe(first.agentSessionId);
+  });
+
+  it('gives a second pane on the same card its own conversation', async () => {
+    // Arrange — both slots share a checkout, so only the id tells them apart.
+    const task = board.createTask({ title: 'Move config', repoId: 'repo-1' });
+    const { manager } = makeManager();
+
+    // Act
+    const primary = await manager.openSession(task.id, 'primary');
+    const secondary = await manager.openSession(task.id, 'secondary');
+
+    // Assert
+    expect(secondary.agentSessionId).not.toBe(primary.agentSessionId);
+  });
+});
