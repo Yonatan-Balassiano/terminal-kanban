@@ -799,20 +799,26 @@ export async function dispatch(
       }
 
       case 'setTrackedArtifacts': {
-        // Persisted as well as applied, or the change would last only until the
-        // next daemon start and quietly revert.
-        if (!services.artifacts) {
-          throw new Error('No artifacts configured');
-        }
-
         const names = (p['names'] as string[] | undefined) ?? [];
         const cleaned = [
           ...new Set(names.map((name) => name.trim()).filter((name) => name.length > 0)),
         ];
 
+        // Persisted as well as applied, or the change would last only until the
+        // next daemon start and quietly revert. This runs before anything reads
+        // the running rail: the rail exists only for a non-empty list, so
+        // requiring it here rejected the one edit that could not have it — the
+        // first artifact — and the list stayed empty forever.
         const { saveArtifactList } = await import('../config/index.js');
         saveArtifactList(cleaned);
-        services.artifacts.setArtifactNames(cleaned);
+
+        if (services.artifacts) {
+          services.artifacts.setArtifactNames(cleaned);
+        } else {
+          // Nothing to bring up for an empty list, and enableArtifacts says so
+          // itself rather than being guarded here.
+          await services.enableArtifacts?.(cleaned);
+        }
 
         return { id: req.id, result: { names: cleaned } };
       }
