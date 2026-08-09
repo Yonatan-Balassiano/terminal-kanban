@@ -57,6 +57,8 @@ func renderModal(m *Model) string {
 		return renderAIChatModal(m)
 	case ModalMissionDeps:
 		return renderMissionDependenciesModal(m)
+	case ModalArtifactList:
+		return renderArtifactListModal(m)
 	case ModalArtifactRollout:
 		return renderArtifactRolloutModal(m)
 	case ModalBranchPRList:
@@ -311,6 +313,63 @@ func renderPRCommentModal(m *Model) string {
 
 // Everything that decides the blast radius — full artifact id, the exact
 // version jump, and the graduality — is on screen before the field can be armed.
+// renderArtifactListModal shows which artifacts the rail tracks, and lets the
+// list be edited without leaving the board for config.json.
+func renderArtifactListModal(m *Model) string {
+	state := m.artifactListModal
+	if state == nil {
+		return ""
+	}
+
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Text)).Render("TRACKED ARTIFACTS"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+			Render("A merged card only reports GA for artifacts listed here."),
+		"",
+	}
+
+	if len(state.Names) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+			Render("  Nothing tracked yet."))
+	}
+	for index, name := range state.Names {
+		marker := "  "
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
+		if index == state.Selected && !state.Adding {
+			marker = artifactSelectedMark + " "
+			style = style.Bold(true).Background(lipgloss.Color(uiChrome.AccentMuted))
+		}
+		lines = append(lines, style.Render(marker+truncateText(name, 60)))
+	}
+
+	if state.Adding {
+		lines = append(lines,
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).
+				Render("New artifact id: "+state.Draft+"█"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+				Render("e.g. com.wixpress.web5.ecom-integrations"),
+		)
+	}
+
+	if state.Error != "" {
+		lines = append(lines, "",
+			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Danger)).Render(state.Error))
+	}
+
+	hint := "a add   d remove   enter save   esc cancel"
+	if state.Adding {
+		hint = "enter add   esc cancel"
+	}
+	if state.Applying {
+		hint = "saving..."
+	}
+	lines = append(lines, "",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(hint))
+
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
 func renderArtifactRolloutModal(m *Model) string {
 	state := m.artifactRolloutModal
 	if state == nil {

@@ -35,15 +35,34 @@ type RPCEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
+// How long to keep trying to find the daemon again after it goes away, and how
+// often. Restarting the daemon is a normal part of working on it, so the board
+// is expected to survive one rather than have to be restarted alongside it.
+const (
+	reconnectInterval = 250 * time.Millisecond
+	reconnectWindow   = 30 * time.Second
+)
+
+// errDaemonRestarted replaces the raw "broken pipe" a severed socket produces,
+// which says nothing a user can act on.
+var errDaemonRestarted = errors.New("lost the daemon connection; reconnecting")
+
 type RPCClient struct {
-	conn    net.Conn
-	events  chan RPCEvent
-	closed  chan struct{}
-	counter atomic.Uint64
+	socketPath string
+	events     chan RPCEvent
+	closed     chan struct{}
+	counter    atomic.Uint64
+
+	connMu sync.Mutex
+	conn   net.Conn
 
 	writeMu   sync.Mutex
 	pendingMu sync.Mutex
 	pending   map[string]chan rpcResponse
+
+	// Replayed after a reconnect, so board pushes resume without the model
+	// having to notice the connection ever dropped.
+	subscribed atomic.Bool
 }
 
 func NewRPCClient(socketPath string) (*RPCClient, error) {
@@ -53,13 +72,68 @@ func NewRPCClient(socketPath string) (*RPCClient, error) {
 	}
 
 	client := &RPCClient{
-		conn:    conn,
-		events:  make(chan RPCEvent, 512),
-		closed:  make(chan struct{}),
-		pending: make(map[string]chan rpcResponse),
+		socketPath: socketPath,
+		conn:       conn,
+		events:     make(chan RPCEvent, 512),
+		closed:     make(chan struct{}),
+		pending:    make(map[string]chan rpcResponse),
 	}
 	go client.readLoop()
 	return client, nil
+}
+
+func (c *RPCClient) currentConn() net.Conn {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.conn
+}
+
+func (c *RPCClient) isClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// redial waits for the daemon to come back and takes over the connection.
+//
+// Reports false only when the client is shutting down or the daemon never
+// returns, which is the one case where the board genuinely cannot continue.
+func (c *RPCClient) redial() bool {
+	deadline := time.Now().Add(reconnectWindow)
+
+	for time.Now().Before(deadline) {
+		if c.isClosed() {
+			return false
+		}
+
+		conn, err := net.Dial("unix", c.socketPath)
+		if err != nil {
+			time.Sleep(reconnectInterval)
+			continue
+		}
+
+		c.connMu.Lock()
+		previous := c.conn
+		c.conn = conn
+		c.connMu.Unlock()
+		if previous != nil {
+			_ = previous.Close()
+		}
+
+		// The new connection knows nothing of the old subscription, so board
+		// pushes would silently stop arriving without this.
+		if c.subscribed.Load() {
+			go func() {
+				_ = c.Call("subscribe", nil, nil)
+			}()
+		}
+		return true
+	}
+
+	return false
 }
 
 func (c *RPCClient) Events() <-chan RPCEvent {
@@ -67,7 +141,11 @@ func (c *RPCClient) Events() <-chan RPCEvent {
 }
 
 func (c *RPCClient) Subscribe() error {
-	return c.Call("subscribe", nil, nil)
+	if err := c.Call("subscribe", nil, nil); err != nil {
+		return err
+	}
+	c.subscribed.Store(true)
+	return nil
 }
 
 func (c *RPCClient) Close() error {
@@ -77,18 +155,34 @@ func (c *RPCClient) Close() error {
 	default:
 		close(c.closed)
 	}
-	return c.conn.Close()
+	return c.currentConn().Close()
 }
 
 func (c *RPCClient) readLoop() {
-	reader := bufio.NewReader(c.conn)
+	for {
+		if c.readFrom(c.currentConn()) {
+			return
+		}
+
+		// The connection dropped. Anything still waiting on it will never be
+		// answered, so fail it now rather than let it sit until its timeout.
+		c.failPending(errDaemonRestarted)
+		if c.isClosed() || !c.redial() {
+			close(c.events)
+			return
+		}
+	}
+}
+
+// readFrom pumps one connection until it ends. Reports whether the client is
+// shutting down, as opposed to the connection merely having dropped.
+func (c *RPCClient) readFrom(conn net.Conn) bool {
+	reader := bufio.NewReader(conn)
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			c.failPending(err)
-			close(c.events)
-			return
+			return c.isClosed()
 		}
 
 		line = strings.TrimSpace(line)
@@ -196,10 +290,7 @@ func (c *RPCClient) Call(method string, params interface{}, target interface{}) 
 		return err
 	}
 
-	c.writeMu.Lock()
-	_, err = c.conn.Write(append(payload, '\n'))
-	c.writeMu.Unlock()
-	if err != nil {
+	if err := c.write(payload); err != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, id)
 		c.pendingMu.Unlock()
@@ -230,8 +321,46 @@ func (c *RPCClient) Notify(method string, params interface{}) error {
 		return err
 	}
 
+	return c.write(payload)
+}
+
+// write sends one framed message, retrying once on a connection that has died.
+//
+// A daemon restart severs the socket without warning, and the first write after
+// it fails with a raw "broken pipe" that tells the user nothing. The read loop
+// is already redialling by then, so waiting briefly and trying the new
+// connection turns the common case into no error at all.
+func (c *RPCClient) write(payload []byte) error {
+	framed := append(payload, '\n')
+
+	c.writeMu.Lock()
+	_, err := c.currentConn().Write(framed)
+	c.writeMu.Unlock()
+	if err == nil {
+		return nil
+	}
+
+	broken := c.currentConn()
+	deadline := time.Now().Add(reconnectWindow)
+	for time.Now().Before(deadline) {
+		if c.isClosed() {
+			return errDaemonRestarted
+		}
+		if c.currentConn() != broken {
+			break
+		}
+		time.Sleep(reconnectInterval)
+	}
+
+	if c.currentConn() == broken {
+		return errDaemonRestarted
+	}
+
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err = c.conn.Write(append(payload, '\n'))
-	return err
+	_, err = c.currentConn().Write(framed)
+	if err != nil {
+		return errDaemonRestarted
+	}
+	return nil
 }

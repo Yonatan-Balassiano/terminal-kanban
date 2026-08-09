@@ -798,6 +798,25 @@ export async function dispatch(
         return { id: req.id, result };
       }
 
+      case 'setTrackedArtifacts': {
+        // Persisted as well as applied, or the change would last only until the
+        // next daemon start and quietly revert.
+        if (!services.artifacts) {
+          throw new Error('No artifacts configured');
+        }
+
+        const names = (p['names'] as string[] | undefined) ?? [];
+        const cleaned = [
+          ...new Set(names.map((name) => name.trim()).filter((name) => name.length > 0)),
+        ];
+
+        const { saveArtifactList } = await import('../config/index.js');
+        saveArtifactList(cleaned);
+        services.artifacts.setArtifactNames(cleaned);
+
+        return { id: req.id, result: { names: cleaned } };
+      }
+
       case 'refreshArtifacts': {
         const snapshot = services.artifacts
           ? await services.artifacts.refresh()

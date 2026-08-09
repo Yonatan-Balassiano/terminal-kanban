@@ -114,6 +114,11 @@ type artifactRolloutMsg struct {
 	err    error
 }
 
+type artifactListAppliedMsg struct {
+	names []string
+	err   error
+}
+
 type spinnerTickMsg struct{}
 type sessionPollTickMsg struct{}
 type artifactsPollTickMsg struct{}
@@ -236,6 +241,7 @@ type Model struct {
 	aiChatModal               *aiChatModalState
 	missionDependenciesModal  *missionDependenciesModalState
 	artifactRolloutModal      *artifactRolloutModalState
+	artifactListModal         *artifactListModalState
 	branchPRListModal         *branchPRListModalState
 }
 
@@ -341,6 +347,21 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case artifactRolloutMsg:
 		return m, m.applyArtifactRollout(msg)
+
+	case artifactListAppliedMsg:
+		if msg.err != nil {
+			if m.artifactListModal != nil {
+				m.artifactListModal.Applying = false
+				m.artifactListModal.Error = msg.err.Error()
+			}
+			m.statusMessage = "Could not save artifacts: " + msg.err.Error()
+			return m, nil
+		}
+		m.closeModal()
+		m.statusMessage = fmt.Sprintf("Tracking %d artifact(s).", len(msg.names))
+		// The rail refreshes upstream in the background; pull the new rows in
+		// rather than leaving the footer showing the old list.
+		return m, m.fetchArtifactsCmd()
 
 	case boardLoadedMsg:
 		if msg.err != nil {
@@ -669,6 +690,10 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return nil
 	case "G":
 		m.openArtifactRolloutModal()
+		return nil
+	case "T":
+		// Sits with the other artifact keys (S refresh, ; select, G roll out).
+		m.openArtifactListModal()
 		return nil
 	case "u":
 		return m.toggleMissionsPaneCmd(true)
@@ -1319,6 +1344,23 @@ func artifactsPollTickCmd() tea.Cmd {
 
 func (m *Model) fetchArtifactsCmd() tea.Cmd {
 	return m.artifactsCmd("getArtifacts", false)
+}
+
+// setTrackedArtifactsCmd rewrites which artifacts the rail follows.
+//
+// The daemon persists the list as well as applying it, so the change survives a
+// restart rather than reverting the next time the board starts.
+func (m *Model) setTrackedArtifactsCmd(names []string) tea.Cmd {
+	payload := append([]string{}, names...)
+	return func() tea.Msg {
+		var result struct {
+			Names []string `json:"names"`
+		}
+		if err := m.client.Call("setTrackedArtifacts", map[string]any{"names": payload}, &result); err != nil {
+			return artifactListAppliedMsg{err: err}
+		}
+		return artifactListAppliedMsg{names: result.Names}
+	}
 }
 
 func (m *Model) refreshArtifactsCmd() tea.Cmd {

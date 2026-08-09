@@ -475,6 +475,7 @@ export type RPCMethod =
   | 'rolloutArtifact'
   | 'getReleaseStatus'
   | 'refreshReleaseStatus'
+  | 'setTrackedArtifacts'
   | 'addTaskBranch'
   | 'removeTaskBranch'
   | 'setActiveTaskBranch'

@@ -18,6 +18,14 @@ const (
 	// Leads the card header so it survives truncation on narrow cards.
 	remoteTaskMarker = "☁ "
 
+	// How far a merged card's change has got towards production. Purple and the
+	// tick are reserved for work that is actually live: before this, a change
+	// nobody had shipped looked identical to one running in production.
+	releaseShippedGlyph = "✓"
+	releaseRollingGlyph = "↻"
+	releasePendingGlyph = "▲"
+	releaseMergedGlyph  = "◇"
+
 	artifactDriftMarker   = "▲"
 	artifactInSyncMarker  = "✓"
 	artifactOwnedMarker   = "●"
@@ -2310,38 +2318,49 @@ func githubStatusBadgeModel(task TaskRecord) *githubStatusBadge {
 // an answer the daemon could not get.
 func releaseStageLabel(release *TaskReleaseSummary) string {
 	if release == nil {
-		return "merged"
+		// Not resolved yet. "merged" is what the card always said, and claiming
+		// anything more would be inventing a verdict nobody reached.
+		return releaseMergedGlyph + " merged"
 	}
 
 	switch release.Stage {
 	case "ga":
 		if release.BlockingGaVersion != "" {
-			return "GA " + release.BlockingGaVersion
+			return releaseShippedGlyph + " GA " + release.BlockingGaVersion
 		}
-		return "GA"
+		return releaseShippedGlyph + " GA"
 	case "rolling-out":
 		if release.BlockingRcVersion != "" {
-			return "rollout " + release.BlockingRcVersion
+			return releaseRollingGlyph + " rollout " + release.BlockingRcVersion
 		}
-		return "rolling out"
+		return releaseRollingGlyph + " rolling out"
 	case "rc-built":
 		if release.BlockingRcVersion != "" {
-			return "rc " + release.BlockingRcVersion
+			return releasePendingGlyph + " rc " + release.BlockingRcVersion
 		}
-		return "rc built"
+		return releasePendingGlyph + " rc built"
 	case "awaiting-build":
-		return "merged·building"
+		return releasePendingGlyph + " building"
 	case "no-artifact":
-		return "merged"
+		// Landed, but nothing tracked ships it. Deliberately not the shipped
+		// styling: the two are different facts, and a card that merely touched
+		// no tracked artifact must never read as "live in production".
+		return releaseMergedGlyph + " merged"
 	default:
-		return "merged"
+		// Could not tell. The question mark is the whole point — silence here
+		// would read as a confident verdict.
+		return releaseMergedGlyph + " merged ?"
 	}
 }
 
-// releaseStageTone colours the badge by how far production is.
+// releaseStageTone colours the badge by how far from production the work is.
+//
+// Purple is reserved for work that is actually live. It used to mean "merged",
+// which made a change nobody had shipped look identical to one running in
+// production.
 func releaseStageTone(release *TaskReleaseSummary) string {
 	if release == nil {
-		return "purple"
+		return "muted"
 	}
 
 	switch release.Stage {
@@ -2352,7 +2371,9 @@ func releaseStageTone(release *TaskReleaseSummary) string {
 	case "rc-built", "awaiting-build":
 		return "warning"
 	default:
-		return "purple"
+		// no-artifact and unknown: landed, with nothing to wait for or nothing
+		// knowable. Neither is production.
+		return "muted"
 	}
 }
 
@@ -2816,7 +2837,7 @@ func kbdHints(focus AppFocus) string {
 	case FocusBoard:
 		// e/E lead: this string already overflows a narrow terminal, and the PR
 		// pane and picker are the only way to act on a card with several PRs.
-		return "e PRs pane  E PR actions  ↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G rollout  1-9 repo  ? help"
+		return "e PRs pane  E PR actions  ↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G rollout  T track  1-9 repo  ? help"
 	case FocusDetail:
 		return "↑↓ branch  ←→ card  E PR actions  e/Esc close"
 	case FocusMissions:

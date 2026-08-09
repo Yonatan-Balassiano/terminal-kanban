@@ -302,6 +302,7 @@ func (m *Model) closeModal() {
 	m.aiChatModal = nil
 	m.missionDependenciesModal = nil
 	m.artifactRolloutModal = nil
+	m.artifactListModal = nil
 	m.branchPRListModal = nil
 }
 
@@ -518,6 +519,121 @@ func (m *Model) openBranchPRListModal(task *TaskRecord) {
 	m.modal = ModalBranchPRList
 	m.focus = FocusModal
 	m.branchPRListModal = &branchPRListModalState{TaskID: task.ID}
+}
+
+// ModalArtifactList is the editor for which artifacts the rail tracks. Declared
+// here rather than in types.go so the whole feature stays in one file.
+const ModalArtifactList ModalType = "artifact-list"
+
+// artifactListModalState edits the tracked-artifact list.
+//
+// Holds its own copy of the names so an accidental keystroke is not applied to
+// the running rail — nothing leaves here until the user confirms.
+type artifactListModalState struct {
+	Names    []string
+	Selected int
+	// Non-empty while typing a new artifact id.
+	Draft    string
+	Adding   bool
+	Error    string
+	Applying bool
+}
+
+// openArtifactListModal edits which artifacts the rail tracks.
+//
+// The list lives in config.json, which meant adding one needed a text editor and
+// a daemon restart — and until then a merged card touching that artifact read as
+// "nothing to ship".
+func (m *Model) openArtifactListModal() {
+	m.closeModal()
+	names := make([]string, 0, len(m.artifacts.Artifacts))
+	for _, artifact := range m.artifacts.Artifacts {
+		names = append(names, artifact.Name)
+	}
+	m.artifactListModal = &artifactListModalState{Names: names}
+	m.modal = ModalArtifactList
+	m.focus = FocusModal
+}
+
+func (m *Model) handleArtifactListModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.artifactListModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+
+	if state.Adding {
+		switch key.String() {
+		case "esc":
+			state.Adding = false
+			state.Draft = ""
+			return nil
+		case "enter":
+			name := strings.TrimSpace(state.Draft)
+			if name == "" {
+				state.Adding = false
+				return nil
+			}
+			for _, existing := range state.Names {
+				if existing == name {
+					state.Error = "Already tracked: " + name
+					state.Adding = false
+					state.Draft = ""
+					return nil
+				}
+			}
+			state.Names = append(state.Names, name)
+			state.Selected = len(state.Names) - 1
+			state.Adding = false
+			state.Draft = ""
+			state.Error = ""
+			return nil
+		case "backspace":
+			state.Draft = trimLastRune(state.Draft)
+			return nil
+		default:
+			if next, ok := appendPrintableInput(state.Draft, key); ok {
+				state.Draft = next
+			}
+			return nil
+		}
+	}
+
+	switch key.String() {
+	case "esc", "q":
+		m.closeModal()
+		return nil
+	case "up", "k":
+		if state.Selected > 0 {
+			state.Selected--
+		}
+		return nil
+	case "down", "j":
+		if state.Selected < len(state.Names)-1 {
+			state.Selected++
+		}
+		return nil
+	case "a", "n":
+		state.Adding = true
+		state.Draft = ""
+		state.Error = ""
+		return nil
+	case "d", "x":
+		if len(state.Names) == 0 {
+			return nil
+		}
+		state.Names = append(state.Names[:state.Selected], state.Names[state.Selected+1:]...)
+		if state.Selected >= len(state.Names) && state.Selected > 0 {
+			state.Selected--
+		}
+		state.Error = ""
+		return nil
+	case "enter":
+		state.Applying = true
+		return m.setTrackedArtifactsCmd(state.Names)
+	}
+
+	return nil
 }
 
 func (m *Model) openArtifactRolloutModal() {
@@ -749,6 +865,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleAIChatModalKey(key)
 	case ModalMissionDeps:
 		return m.handleMissionDependenciesModalKey(key)
+	case ModalArtifactList:
+		return m.handleArtifactListModalKey(key)
 	case ModalArtifactRollout:
 		return m.handleArtifactRolloutModalKey(key)
 	case ModalBranchPRList:
