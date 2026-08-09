@@ -15,11 +15,13 @@ func TestMergedCardWithoutReleaseStatusReadsAsBefore(t *testing.T) {
 	if badge == nil {
 		t.Fatal("expected a badge for a merged task")
 	}
-	if badge.Label != "merged" {
-		t.Fatalf("label = %q, want %q", badge.Label, "merged")
+	if badge.Label != releaseMergedGlyph+" merged" {
+		t.Fatalf("label = %q, want a plain merged label", badge.Label)
 	}
-	if badge.Tone != "purple" {
-		t.Fatalf("tone = %q, want purple", badge.Tone)
+	// Not purple: purple is reserved for work that is actually live, and an
+	// unresolved card has not been shown to be.
+	if badge.Tone == "purple" {
+		t.Fatalf("tone = %q, want anything but purple", badge.Tone)
 	}
 }
 
@@ -32,32 +34,32 @@ func TestReleaseStageLabelNamesTheVersionThatMatters(t *testing.T) {
 		{
 			name:    "shipped names the production version",
 			release: &TaskReleaseSummary{Stage: "ga", BlockingGaVersion: "1.279.0"},
-			want:    "GA 1.279.0",
+			want:    releaseShippedGlyph + " GA 1.279.0",
 		},
 		{
 			name:    "rolling out names the version on its way",
 			release: &TaskReleaseSummary{Stage: "rolling-out", BlockingRcVersion: "1.292.0"},
-			want:    "rollout 1.292.0",
+			want:    releaseRollingGlyph + " rollout 1.292.0",
 		},
 		{
 			name:    "built but not shipped names the candidate",
 			release: &TaskReleaseSummary{Stage: "rc-built", BlockingRcVersion: "1.292.0"},
-			want:    "rc 1.292.0",
+			want:    releasePendingGlyph + " rc 1.292.0",
 		},
 		{
 			name:    "waiting on a build says so",
 			release: &TaskReleaseSummary{Stage: "awaiting-build"},
-			want:    "merged·building",
+			want:    releasePendingGlyph + " building",
 		},
 		{
 			name:    "nothing to ship stays plain",
 			release: &TaskReleaseSummary{Stage: "no-artifact"},
-			want:    "merged",
+			want:    releaseMergedGlyph + " merged",
 		},
 		{
-			name:    "unknown never implies a verdict",
+			name:    "unknown says so, rather than implying a verdict",
 			release: &TaskReleaseSummary{Stage: "unknown", Confidence: "unknown"},
-			want:    "merged",
+			want:    releaseMergedGlyph + " merged ?",
 		},
 	}
 
@@ -78,7 +80,9 @@ func TestOnlyShippedWorkKeepsThePurpleBadge(t *testing.T) {
 		t.Fatalf("shipped tone = %q, want purple", shipped)
 	}
 
-	for _, stage := range []string{"rc-built", "awaiting-build", "rolling-out"} {
+	// no-artifact matters most here: "nothing tracked ships this" is a different
+	// fact from "this is running in production", and they used to look identical.
+	for _, stage := range []string{"rc-built", "awaiting-build", "rolling-out", "no-artifact", "unknown"} {
 		tone := githubStatusTone(mergedTask(&TaskReleaseSummary{Stage: stage}))
 		if tone == "purple" {
 			t.Fatalf("stage %q rendered as purple; it has not shipped", stage)

@@ -1,6 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { DEFAULT_AI_CHAT_SYSTEM_PROMPT } from '../src/prompts/ai-chat-system-prompt.js';
-import { defaultConfig, normalizeLegacyConfig } from '../src/config/index.js';
+import {
+  configPaths,
+  defaultConfig,
+  normalizeLegacyConfig,
+  saveArtifactList,
+} from '../src/config/index.js';
 
 describe('defaultConfig', () => {
   it('syncs GitHub every 60 seconds by default', () => {
@@ -79,5 +87,76 @@ describe('normalizeLegacyConfig', () => {
         { id: 'done', label: 'Done', sortOrder: 1 },
       ],
     });
+  });
+});
+
+describe('saveArtifactList', () => {
+  const originals: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    originals['XDG_CONFIG_HOME'] = process.env['XDG_CONFIG_HOME'];
+    originals['HOME'] = process.env['HOME'];
+    const dir = mkdtempSync(join(tmpdir(), 'ab-cfg-'));
+    process.env['HOME'] = dir;
+    process.env['XDG_CONFIG_HOME'] = join(dir, '.config');
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  it('keeps every other setting when the artifact list changes', () => {
+    // Arrange — the file is hand-edited, and may hold keys this build predates.
+    const { configDir, configFile } = configPaths();
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      configFile,
+      JSON.stringify({
+        sessionBackend: 'tmux',
+        somethingThisBuildHasNeverHeardOf: { keep: true },
+        artifacts: { list: ['com.a'], refreshIntervalMs: 300000, githubLogin: 'someone' },
+      }),
+    );
+
+    // Act
+    saveArtifactList(['com.a', 'com.b']);
+
+    // Assert
+    const saved = JSON.parse(readFileSync(configFile, 'utf8')) as Record<string, never>;
+    expect(saved['artifacts']).toEqual({
+      list: ['com.a', 'com.b'],
+      refreshIntervalMs: 300000,
+      githubLogin: 'someone',
+    });
+    expect(saved['sessionBackend']).toBe('tmux');
+    expect(saved['somethingThisBuildHasNeverHeardOf']).toEqual({ keep: true });
+  });
+
+  it('refuses to overwrite a config it cannot parse', () => {
+    // Arrange — replacing it would discard everything the user has configured.
+    const { configDir, configFile } = configPaths();
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(configFile, '{ this is not json');
+
+    // Act / Assert
+    expect(() => saveArtifactList(['com.a'])).toThrow(/not valid JSON/);
+    expect(readFileSync(configFile, 'utf8')).toBe('{ this is not json');
+  });
+
+  it('creates the artifacts section when the config has none', () => {
+    const { configDir, configFile } = configPaths();
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(configFile, JSON.stringify({ sessionBackend: 'pty' }));
+
+    saveArtifactList(['com.a']);
+
+    const saved = JSON.parse(readFileSync(configFile, 'utf8')) as Record<string, never>;
+    expect(saved['artifacts']).toEqual({ list: ['com.a'] });
   });
 });

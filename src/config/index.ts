@@ -514,6 +514,40 @@ export function writeDefaultConfig(): void {
   fs.writeFileSync(configFile, content, { encoding: 'utf8', mode: 0o600 });
 }
 
+/**
+ * Rewrites which artifacts the rail tracks, in place.
+ *
+ * Reads and rewrites the file rather than serialising the loaded config, so
+ * everything the user has hand-edited — including keys this build predates —
+ * survives having the artifact list changed from the board.
+ */
+export function saveArtifactList(list: readonly string[]): void {
+  const { configDir, configFile } = configPaths();
+  fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+
+  let current: Record<string, unknown> = {};
+  if (fs.existsSync(configFile)) {
+    try {
+      current = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<string, unknown>;
+    } catch {
+      // A corrupt file must not be silently replaced with a near-empty one, or
+      // changing one setting would discard everything else in it.
+      throw new Error(`Cannot edit artifacts: ${configFile} is not valid JSON`);
+    }
+  }
+
+  const artifacts = (current['artifacts'] as Record<string, unknown> | undefined) ?? {};
+  const next = {
+    ...current,
+    artifacts: { ...artifacts, list: [...list] },
+  };
+
+  fs.writeFileSync(configFile, JSON.stringify(next, null, 2) + '\n', {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+}
+
 // ============================================================
 // ensureDirectories
 // ============================================================

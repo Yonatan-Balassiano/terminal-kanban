@@ -153,7 +153,7 @@ export function buildRolloutComment(
 
 export class ArtifactsService {
   private readonly client: McpClient;
-  private readonly artifactNames: readonly string[];
+  private artifactNames: readonly string[];
   private readonly refreshIntervalMs: number;
   private readonly ownership?: CommitOwnership;
   private readonly now: () => number;
@@ -177,6 +177,34 @@ export class ArtifactsService {
    */
   getSnapshot(): ArtifactsSnapshot {
     return this.snapshot;
+  }
+
+  /** Which artifacts the rail tracks, in the order they were configured. */
+  getArtifactNames(): readonly string[] {
+    return this.artifactNames;
+  }
+
+  /**
+   * Changes which artifacts the rail tracks.
+   *
+   * Rows for artifacts that are no longer tracked are dropped immediately so
+   * the rail cannot keep showing something the user just removed, and the
+   * refresh that fills in any new ones runs in the background rather than
+   * making the caller wait on the network.
+   */
+  setArtifactNames(names: readonly string[]): void {
+    const deduped = [...new Set(names.map((name) => name.trim()).filter((name) => name.length > 0))];
+    this.artifactNames = deduped;
+
+    const keep = new Set(deduped);
+    this.snapshot = {
+      ...this.snapshot,
+      artifacts: this.snapshot.artifacts.filter((record) => keep.has(record.name)),
+    };
+
+    void this.refresh().catch(() => {
+      // Recorded on the snapshot; the rail reports its own staleness.
+    });
   }
 
   /**
