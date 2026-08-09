@@ -26,6 +26,17 @@ export interface ServiceContainer {
   artifacts?: import('../services/artifacts.js').ArtifactsService;
   /** Absent for the same reason: without a catalog nothing can be resolved. */
   release?: import('../services/release-tracker.js').ReleaseTracker;
+  /**
+   * Brings the rail up for a list that was empty when the daemon started.
+   *
+   * Without this the rail could only ever be edited once it already existed,
+   * so the very first artifact could not be added from the board at all.
+   * Undefined outside the daemon, where partial containers are dispatched
+   * against directly.
+   */
+  enableArtifacts?: (
+    names: readonly string[]
+  ) => Promise<import('../services/artifacts.js').ArtifactsService | undefined>;
   aiChat: import('../services/ai-chat.js').AIChatService;
   ollama?: import('../services/ollama.js').ManagedOllamaService;
   db: import('../db/index.js').Db;
@@ -48,7 +59,10 @@ const DEFAULT_MCP_SERVER_URL = 'https://mcp-s.wewix.net/mcp';
  */
 async function createArtifactsService(
   cfg: import('../types/index.js').AppConfig,
-  dbPath: string
+  dbPath: string,
+  // Defaults to what the config held at startup; passed explicitly when the
+  // list has just been edited, since the loaded config still has the old one.
+  names: readonly string[] = cfg.artifacts?.list ?? []
 ): Promise<
   | {
       artifacts: import('../services/artifacts.js').ArtifactsService;
@@ -58,8 +72,7 @@ async function createArtifactsService(
     }
   | undefined
 > {
-  const list = cfg.artifacts?.list ?? [];
-  if (list.length === 0) {
+  if (names.length === 0) {
     return undefined;
   }
 
@@ -87,7 +100,7 @@ async function createArtifactsService(
     client,
     artifacts: new ArtifactsService({
       client,
-      artifactNames: list,
+      artifactNames: names,
       refreshIntervalMs: cfg.artifacts?.refreshIntervalMs,
       ownership,
     }),
@@ -683,6 +696,54 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     release,
     aiChat,
     ollama,
+  };
+
+  // Everything the startup path wires when a list is already configured, done
+  // once the first artifact arrives instead. Release tracking is included: it
+  // rides the same connection, so a rail brought up here without it would
+  // leave every merged card reading "nothing tracked ships this" until the
+  // next restart — the very confusion the list editor exists to end.
+  const buildArtifactsRail = async (
+    names: readonly string[]
+  ): Promise<import('../services/artifacts.js').ArtifactsService | undefined> => {
+    const setup = await createArtifactsService(cfg, opts.dbPath, names);
+    if (!setup) {
+      return undefined;
+    }
+
+    const tracker = await createReleaseTracker({
+      db,
+      board,
+      workspace,
+      github,
+      client: setup.client,
+      artifacts: setup.artifacts,
+    });
+
+    services.artifacts = setup.artifacts;
+    services.release = tracker;
+    view.releaseSummaryFor = (taskId) => tracker.getSummary(taskId);
+    sync.isFullyReleased = (taskId) => tracker.isFullyReleased(taskId);
+
+    setup.artifacts.start();
+    tracker.start();
+    return setup.artifacts;
+  };
+
+  let enablingArtifacts: Promise<
+    import('../services/artifacts.js').ArtifactsService | undefined
+  > | null = null;
+
+  services.enableArtifacts = (names) => {
+    if (services.artifacts) {
+      return Promise.resolve(services.artifacts);
+    }
+    // Two edits arriving together must not each build a rail: the loser would
+    // be orphaned yet still polling devex on its own timer forever.
+    enablingArtifacts ??= buildArtifactsRail(names).finally(() => {
+      enablingArtifacts = null;
+    });
+    return enablingArtifacts;
   };
 
   const server = startServer(opts.socketPath, services);
