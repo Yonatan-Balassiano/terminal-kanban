@@ -40,17 +40,17 @@ func TestDevPortalURLIsEmptyWithoutAProjectID(t *testing.T) {
 
 // A rollout is refused for an in-sync artifact; opening a page is not, because
 // the portal is also where you go to look.
-func TestGOpensThePortalForAnyArtifact(t *testing.T) {
+func TestLowercaseGOpensThePortalForAnyArtifact(t *testing.T) {
 	for _, status := range []ArtifactStatus{ArtifactStatusInSync, ArtifactStatusDrift, ArtifactStatusNoGA} {
 		m := portalBoard(ArtifactRecord{Name: "com.wixpress.a", ShortName: "a", Status: status})
 
-		cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")})
+		cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
 
 		if cmd == nil {
-			t.Fatalf("status %q: G produced no command; status line said %q", status, m.statusMessage)
+			t.Fatalf("status %q: g produced no command; status line said %q", status, m.statusMessage)
 		}
 		if m.modal != ModalNone {
-			t.Fatalf("status %q: G opened modal %q instead of the browser", status, m.modal)
+			t.Fatalf("status %q: g opened modal %q instead of the browser", status, m.modal)
 		}
 	}
 }
@@ -59,7 +59,7 @@ func TestGOpensThePortalForAnyArtifact(t *testing.T) {
 func TestGWithNoArtifactSelectedSaysSo(t *testing.T) {
 	m := portalBoard()
 
-	if cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")}); cmd != nil {
+	if cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")}); cmd != nil {
 		t.Fatalf("G returned a command with nothing selected")
 	}
 	if !strings.Contains(m.statusMessage, "No artifact selected") {
@@ -67,17 +67,28 @@ func TestGWithNoArtifactSelectedSaysSo(t *testing.T) {
 	}
 }
 
-// The gradual rollout is still real functionality with a confirm and an audit
-// comment; taking G from it must not strand it.
-func TestCtrlGStillOpensTheGradualRolloutConfirm(t *testing.T) {
+// Uppercase G keeps the gradual rollout it always had.
+func TestUppercaseGStillOpensTheGradualRolloutConfirm(t *testing.T) {
 	m := portalBoard(ArtifactRecord{
 		Name: "com.wixpress.a", ShortName: "a", Status: ArtifactStatusDrift,
 		GAVersion: "1.1.0", LatestRCVersion: "1.2.0",
 	})
 
-	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")})
 
 	if m.modal != ModalArtifactRollout {
 		t.Fatalf("modal = %q, want %q; status = %q", m.modal, ModalArtifactRollout, m.statusMessage)
+	}
+}
+
+// Lowercase g used to open the view/layout modal, which moved to V rather than
+// losing its key entirely.
+func TestVOpensTheViewModal(t *testing.T) {
+	m := portalBoard()
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("V")})
+
+	if m.modal != ModalViewPicker {
+		t.Fatalf("modal = %q, want %q", m.modal, ModalViewPicker)
 	}
 }
