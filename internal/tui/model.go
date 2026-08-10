@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"slices"
@@ -738,6 +739,11 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		m.moveArtifactSelection(1)
 		return nil
 	case "G":
+		// The portal, not the gradual rollout: an immediate GA is the thing the
+		// API cannot do, and it is what this key is reached for. The gradual
+		// rollout keeps its confirm on Ctrl+G.
+		return m.openArtifactDevPortalCmd()
+	case "ctrl+g":
 		m.openArtifactRolloutModal()
 		return nil
 	case "T":
@@ -2082,6 +2088,50 @@ func (m *Model) resizeActiveSessionCmd() tea.Cmd {
 	}
 
 	return tea.Batch(commands...)
+}
+
+// devPortalProjectURL is where an artifact is administered by hand.
+//
+// The rollout API only offers a gradual rollout; an immediate GA has to be done
+// from the portal, so the board's job is to get you to the right page rather
+// than to pretend it can do it.
+const devPortalProjectURL = "https://wix-bo.com/dev/project/"
+
+func artifactDevPortalURL(artifact ArtifactRecord) string {
+	if artifact.Name == "" {
+		return ""
+	}
+	// The full project id, not the shortened rail label: the portal keys on
+	// com.wixpress.enterprise.web5.conversation-configuration, and the chip
+	// shows only the tail of that.
+	return devPortalProjectURL + url.PathEscape(artifact.Name)
+}
+
+// openArtifactDevPortalCmd opens the selected artifact in the dev portal.
+//
+// Unlike a rollout this reads nothing and changes nothing, so it is offered for
+// every artifact — including in-sync ones, where the portal is still the place
+// to go look at why.
+func (m *Model) openArtifactDevPortalCmd() tea.Cmd {
+	artifact := m.selectedArtifact()
+	if artifact == nil {
+		m.statusMessage = "No artifact selected — press ; to pick one."
+		return nil
+	}
+
+	target := artifactDevPortalURL(*artifact)
+	if target == "" {
+		m.statusMessage = "That artifact has no project id to open."
+		return nil
+	}
+
+	name := artifactDisplayName(*artifact)
+	return func() tea.Msg {
+		if err := openExternal(target); err != nil {
+			return asyncErrorMsg{err: err}
+		}
+		return boardActionMsg{status: "Opened " + name + " in the dev portal."}
+	}
 }
 
 func (m *Model) openPRCmd(task *TaskRecord, checks bool) tea.Cmd {

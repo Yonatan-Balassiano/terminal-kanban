@@ -220,14 +220,12 @@ func TestEveryChordIsDocumented(t *testing.T) {
 	}
 }
 
-// The user's own example, checked against the real table.
-func TestGaIsBoundToTheArtifactRollout(t *testing.T) {
+// The user's own example, checked against the real table. ",ga" means "GA it",
+// which is the portal — the API can only roll out gradually.
+func TestGaOpensTheDevPortal(t *testing.T) {
 	chord, _ := leaderChordFor("ga")
 	if chord == nil {
 		t.Fatalf(",ga is not bound")
-	}
-	if !strings.Contains(strings.ToLower(chord.Desc), "ga") {
-		t.Fatalf(",ga describes itself as %q", chord.Desc)
 	}
 
 	m := leaderBoard()
@@ -238,8 +236,27 @@ func TestGaIsBoundToTheArtifactRollout(t *testing.T) {
 
 	typeKeys(m, ",ga")
 
+	if m.modal != ModalNone {
+		t.Fatalf("modal = %q, want the browser rather than a modal", m.modal)
+	}
+	if strings.Contains(m.statusMessage, "No artifact") {
+		t.Fatalf(",ga could not find the selected artifact: %q", m.statusMessage)
+	}
+}
+
+// The gradual rollout keeps a home of its own, so taking ",ga" for the portal
+// does not strand it.
+func TestGdStillOpensTheGradualRolloutConfirm(t *testing.T) {
+	m := leaderBoard()
+	m.artifacts = ArtifactsSnapshot{Artifacts: []ArtifactRecord{{
+		Name: "com.wixpress.a", ShortName: "a", Status: ArtifactStatusDrift,
+		GAVersion: "1.1.0", LatestRCVersion: "1.2.0",
+	}}}
+
+	typeKeys(m, ",gd")
+
 	if m.modal != ModalArtifactRollout {
-		t.Fatalf("modal = %q, want the rollout confirm; status = %q", m.modal, m.statusMessage)
+		t.Fatalf("modal = %q, want %q; status = %q", m.modal, ModalArtifactRollout, m.statusMessage)
 	}
 }
 

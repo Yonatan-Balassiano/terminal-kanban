@@ -60,7 +60,10 @@ func withTask(run func(m *Model, task *TaskRecord) tea.Cmd) func(m *Model) tea.C
 // a one-line edit rather than a hunt through the key switch.
 var leaderChords = []leaderChord{
 	// ---- Artifacts / releases -------------------------------------
-	{Seq: "ga", Group: "Artifacts", Desc: "roll the selected artifact out to GA", Run: func(m *Model) tea.Cmd {
+	{Seq: "ga", Group: "Artifacts", Desc: "GA it now — opens the dev portal", Run: func(m *Model) tea.Cmd {
+		return m.openArtifactDevPortalCmd()
+	}},
+	{Seq: "gd", Group: "Artifacts", Desc: "start the gradual API rollout instead", Run: func(m *Model) tea.Cmd {
 		m.openArtifactRolloutModal()
 		return nil
 	}},
