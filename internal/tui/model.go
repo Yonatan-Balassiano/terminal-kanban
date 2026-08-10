@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -95,7 +96,9 @@ type asyncErrorMsg struct {
 }
 
 type tmuxPaneAttachedMsg struct {
-	err error
+	taskID string
+	slot   SessionSlot
+	err    error
 }
 
 type chatTurnMsg struct {
@@ -501,6 +504,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tmuxPaneAttachedMsg:
 		if msg.err != nil {
+			// The pane is gone but the card still wants a shell — a session
+			// released under the TUI's feet (reaching done does exactly that)
+			// or a tmux session killed by hand. Rebuild it rather than leaving
+			// the card with nothing to open.
+			if errors.Is(msg.err, errTmuxTaskPaneNotFound) && msg.taskID != "" {
+				m.clearTerminalSlotState(msg.slot)
+				m.statusMessage = "Task shell had gone; opening a new one."
+				return m, m.openSessionCmd(msg.taskID, false, msg.slot)
+			}
 			m.statusMessage = msg.err.Error()
 			return m, nil
 		}
@@ -688,11 +700,9 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "enter":
 		task := m.selectedTask()
 		if task != nil {
-			if task.ID == m.activeTaskID && m.terminalBackendTypeForSlot(SessionSlotPrimary).attachesInTmuxPane() {
+			if backendSessionID := m.terminalReattachSessionID(task, SessionSlotPrimary); backendSessionID != "" {
 				m.focusedTerminalSlot = SessionSlotPrimary
-				if backendSessionID := m.terminalBackendSessionIDForSlot(SessionSlotPrimary); backendSessionID != "" {
-					return m.attachTmuxSessionCmd(backendSessionID)
-				}
+				return m.attachTmuxSessionCmd(task.ID, SessionSlotPrimary, backendSessionID)
 			}
 			return m.openSessionCmd(task.ID, false, SessionSlotPrimary)
 		}
@@ -1617,11 +1627,11 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 
 	m.normalizeFocusedTerminalSlot()
 	if m.terminalBackendTypeForSlot(m.focusedTerminalSlot).attachesInTmuxPane() {
-		backendSessionID := m.terminalBackendSessionIDForSlot(m.focusedTerminalSlot)
+		backendSessionID := m.terminalReattachSessionID(m.taskByID(m.activeTaskID), m.focusedTerminalSlot)
 		if backendSessionID == "" {
 			return m.openSessionCmd(m.activeTaskID, false, m.focusedTerminalSlot)
 		}
-		return m.attachTmuxSessionCmd(backendSessionID)
+		return m.attachTmuxSessionCmd(m.activeTaskID, m.focusedTerminalSlot, backendSessionID)
 	}
 
 	m.terminalPaneVisible = true
@@ -1634,9 +1644,36 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 	)
 }
 
-func (m *Model) attachTmuxSessionCmd(backendSessionID string) tea.Cmd {
+// terminalReattachSessionID is the tmux backend session a card can be re-attached
+// to, or "" when it has to be opened again instead.
+//
+// Holding a backend id is not enough on its own. A session the daemon released
+// — reaching done releases both the session and its worktree — leaves its id
+// behind in the model, and attaching to that dead id fails *after* it has torn
+// the visible pane down, so the card ends up with no shell and no way to get one
+// back. The board still owning the session is what makes the id trustworthy.
+func (m *Model) terminalReattachSessionID(task *TaskRecord, slot SessionSlot) string {
+	if task == nil || task.ID != m.activeTaskID {
+		return ""
+	}
+	normalizedSlot := normalizeSessionSlot(slot)
+	if !m.taskHasSessionSlot(task, normalizedSlot) {
+		return ""
+	}
+	if !m.terminalBackendTypeForSlot(normalizedSlot).attachesInTmuxPane() {
+		return ""
+	}
+	return m.terminalBackendSessionIDForSlot(normalizedSlot)
+}
+
+func (m *Model) attachTmuxSessionCmd(taskID string, slot SessionSlot, backendSessionID string) tea.Cmd {
+	normalizedSlot := normalizeSessionSlot(slot)
 	return func() tea.Msg {
-		return tmuxPaneAttachedMsg{err: attachTaskSessionInTmux(backendSessionID)}
+		return tmuxPaneAttachedMsg{
+			taskID: taskID,
+			slot:   normalizedSlot,
+			err:    attachTaskSessionInTmux(backendSessionID),
+		}
 	}
 }
 
@@ -2149,6 +2186,13 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 		m.normalizeFocusedTerminalSlot()
 		if !m.activeTaskUsesDualTerminal() {
 			m.clearTerminalSlotState(SessionSlotSecondary)
+		}
+		// A session the daemon released takes its pane with it, so the backend
+		// id and buffer left behind describe something that no longer exists.
+		// Dropping them keeps the header honest and stops the next attach from
+		// chasing a dead pane.
+		if active := m.taskByID(m.activeTaskID); active != nil && !m.taskHasSessionSlot(active, SessionSlotPrimary) {
+			m.clearTerminalSlotState(SessionSlotPrimary)
 		}
 	}
 

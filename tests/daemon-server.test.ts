@@ -328,6 +328,31 @@ describe('daemon moveTask dispatch', () => {
     expect(response).toEqual({ id: 'req-move-done', result: null });
   });
 
+  it('leaves a card that is already done alone, so a reopened shell survives', async () => {
+    const moveTask = vi.fn();
+    const getTask = vi.fn().mockReturnValue({ id: 'task-1', trackId: 'done' });
+    const cleanupTaskResources = vi.fn().mockResolvedValue(undefined);
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+
+    const response = await dispatch(
+      {
+        id: 'req-move-done-again',
+        method: 'moveTask',
+        params: { id: 'task-1', trackId: 'done' },
+      },
+      {
+        board: { moveTask, getTask },
+        taskLifecycle: { cleanupTaskResources },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
+    expect(cleanupTaskResources).not.toHaveBeenCalled();
+    expect(response).toEqual({ id: 'req-move-done-again', result: null });
+  });
+
   it('does not clean up the worktree when moving to a non-done track', async () => {
     const moveTask = vi.fn();
     const cleanupTaskResources = vi.fn().mockResolvedValue(undefined);
