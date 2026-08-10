@@ -710,13 +710,13 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		m.moveArtifactSelection(1)
 		return nil
 	case "G":
-		// The portal, not the gradual rollout: an immediate GA is the thing the
-		// API cannot do, and it is what this key is reached for. The gradual
-		// rollout keeps its confirm on Ctrl+G.
-		return m.openArtifactDevPortalCmd()
-	case "ctrl+g":
 		m.openArtifactRolloutModal()
 		return nil
+	case "g":
+		// Lowercase opens the portal, where GA is immediate — the one thing the
+		// rollout API cannot do. Uppercase keeps the gradual rollout it always
+		// had, so neither path displaces the other.
+		return m.openArtifactDevPortalCmd()
 	case "T":
 		// Sits with the other artifact keys (S refresh, ; select, G roll out).
 		return m.openArtifactListModal()
@@ -760,7 +760,8 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return tea.Quit
 	case "f":
 		m.openFilterModal()
-	case "g":
+	case "V":
+		// Was lowercase g, which the dev portal now has.
 		m.openViewModal()
 	case "L":
 		if m.boardDensityMode == "list" {
