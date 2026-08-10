@@ -797,7 +797,9 @@ func TestDualTerminalDividerHeightRequiresRoomForTwoPanes(t *testing.T) {
 	}
 }
 
-func TestHandleKeyJOpensPRCommentModal(t *testing.T) {
+// j is navigation now; commenting moved to the ",pc" chord so hjkl could be
+// unambiguous. The action itself must still be reachable.
+func TestLeaderPCOpensPRCommentModal(t *testing.T) {
 	model := &Model{
 		focus:              FocusBoard,
 		selectedTrackIndex: 0,
@@ -820,11 +822,10 @@ func TestHandleKeyJOpensPRCommentModal(t *testing.T) {
 		},
 	}
 
-	cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-
-	if cmd != nil {
-		t.Fatal("handleKey(j) returned command, want nil")
+	for _, r := range []rune{',', 'p', 'c'} {
+		model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
+
 	if model.modal != ModalPRComment {
 		t.Fatalf("modal = %q, want %q", model.modal, ModalPRComment)
 	}

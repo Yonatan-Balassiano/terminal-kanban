@@ -125,6 +125,11 @@ type trackedArtifactsLoadedMsg struct {
 	err   error
 }
 
+// leaderTimeoutMsg abandons a chord nobody finished typing.
+type leaderTimeoutMsg struct {
+	Version int
+}
+
 type spinnerTickMsg struct{}
 type sessionPollTickMsg struct{}
 type artifactsPollTickMsg struct{}
@@ -226,6 +231,9 @@ type Model struct {
 	terminalBoardNavSlot          SessionSlot
 	terminalBoardNavConsumed      bool
 	terminalBoardNavVersion       int
+	leaderPending                 bool
+	leaderBuffer                  string
+	leaderVersion                 int
 	detailPaneVisible             bool
 	detailBranchIndex             int
 
@@ -325,6 +333,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statusMessage = "Watching pushed branch for PR creation."
 		return m, m.schedulePostPushSyncCmd(msg.TaskID)
+
+	case leaderTimeoutMsg:
+		// A newer chord (or a completed one) has already moved on.
+		if msg.Version != m.leaderVersion || !m.leaderPending {
+			return m, nil
+		}
+		m.clearLeader()
+		return m, nil
 
 	case terminalBoardNavTimeoutMsg:
 		if msg.Version != m.terminalBoardNavVersion || !m.terminalBoardNavPending {
@@ -646,6 +662,16 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		}
 	}
 
+	// A pending chord claims the next key before anything else on the board, so
+	// the "g" in ",ga" cannot be read as the layout modal partway through.
+	if m.leaderPending {
+		if key.Type == tea.KeyCtrlC {
+			m.clearLeader()
+			return tea.Quit
+		}
+		return m.handleLeaderKey(key)
+	}
+
 	if key.Type == tea.KeyCtrlC {
 		return tea.Quit
 	}
@@ -669,16 +695,19 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	}
 
 	switch key.String() {
-	case "left", "h", "right", "l", "up", "k", "down":
+	// j joins hjkl here. It used to open the PR comment modal, which is why
+	// boardNavigationActionForKey already mapped it to "down" but nothing ever
+	// reached that arm; commenting now lives at ",pc".
+	case "left", "h", "right", "l", "up", "k", "down", "j":
 		m.applyBoardNavigation(boardNavigationActionForKey(key))
 	case "tab":
 		if m.activeTaskID == "" {
 			return nil
 		}
 		return m.armTerminalBoardNav(m.activeTaskID, m.focusedTerminalSlot, false)
-	case ",":
-		m.switchRepo(-1)
-		return m.persistActiveRepoCmd()
+	case leaderKey:
+		// Was previous-repo, which now lives at ",rp" alongside ",rn".
+		return m.armLeader("")
 	case ".":
 		m.switchRepo(1)
 		return m.persistActiveRepoCmd()
@@ -827,8 +856,6 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		if task != nil {
 			return m.createTaskPRCmd(task)
 		}
-	case "j":
-		m.openPRCommentModal(m.selectedTask())
 	case "C":
 		task := m.selectedTask()
 		if task != nil {

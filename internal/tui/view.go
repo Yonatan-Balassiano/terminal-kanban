@@ -1666,7 +1666,11 @@ func renderStatusBar(m *Model) string {
 	} else if contextTask != nil && contextTask.SessionAttentionNeeded {
 		leftParts = append(leftParts, badge("attention", "info", "!", false))
 	}
-	if m.statusMessage != "" {
+	// A half-typed chord outranks whatever the status line last said: it is the
+	// only feedback that the next keystroke will not mean what it usually does.
+	if indicator := m.leaderIndicator(); indicator != "" {
+		leftParts = append(leftParts, badge(indicator, "accent", "", false))
+	} else if m.statusMessage != "" {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(m.statusMessage, max(1, m.width/2))))
 	} else if m.focus == FocusMissions {
 		if missionTask := m.selectedMissionTask(); missionTask != nil {
@@ -1692,17 +1696,25 @@ func renderStatusBar(m *Model) string {
 
 func renderHelpModal() string {
 	sections := [][]string{
-		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "a or A opens the local AI chat modal", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
+		{"Navigation", "Arrow keys move between columns and tasks, and h/j/k/l mirror them", ": or Ctrl+P opens the command palette", "a or A opens the local AI chat modal", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
 		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers, d deletes the selected mission"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar, D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"Remote", "Remote tasks run their agent in tmux on another machine", "Ctrl+R reconnects the selected remote card to that machine", "It keeps the running agent when the remote session survived, and starts the host first when it is switched off", "R recreates instead: it always throws the running agent away"},
-		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
-		{"Multi-PR cards", "A card can span several repos and PRs; its badge sums them up", "e opens the PR pane beside the board and stays open while you move", "E opens the PR picker: o open, v checks, j comment, m merge that PR", "c/j/m on the card itself stand down once there are several PRs"},
+		{"GitHub", "c create PR now, C retry pushed-branch PR creation", ",pc comments on the selected open or draft PR (j now moves down)", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
+		{"Multi-PR cards", "A card can span several repos and PRs; its badge sums them up", "e opens the PR pane beside the board and stays open while you move", "E opens the PR picker: o open, v checks, j comment, m merge that PR", "c/m on the card itself stand down once there are several PRs"},
 		{"Artifacts", "The footer strip tracks GA versus latest RC for every artifact", "S refreshes it now, ▲N marks how far the latest RC is ahead of GA", "; moves the footer selection, G rolls the selected drifting artifact out to production", "Chips dim when the data is stale; run agentboard mcp login if it asks for auth"},
-		{"Views", "f opens filters, g changes board / terminal layout", "Shift+Left/Right resizes the side-by-side terminal split", ", and . switch active repo, ? toggles this help"},
+		{"Views", "f opens filters, g changes board / terminal layout", "Shift+Left/Right resizes the side-by-side terminal split", ". switches active repo (,rn / ,rp do both ways), ? toggles this help"},
 		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Shift+Left/Right resizes the split, Esc returns focus to the board"},
 		{"Setup", "If worktree setup fails because the repo uses master, run:", "agentboard repos set-default-base-branch <repo-id> master"},
 	}
+
+	// Built from the chord table itself, so a rebinding cannot leave this
+	// screen describing keys that no longer do anything.
+	vim := append([]string{"Vim chords"},
+		"Press "+leaderKey+" then a mnemonic; the pending prefix shows in the status bar",
+		"Esc abandons it, and it lapses on its own after a moment")
+	vim = append(vim, leaderChordsByGroup()...)
+	sections = append(sections, vim)
 
 	lines := []string{
 		joinSpaceBetween(badge("KEYBOARD", "accent", "", false), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Esc close"), 68),
