@@ -1,11 +1,17 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
+
+// errTmuxTaskPaneNotFound says the backend session this attach was pointed at no
+// longer has a pane. The caller can recover by opening the session again rather
+// than leaving the card with no shell it can reach.
+var errTmuxTaskPaneNotFound = errors.New("tmux task pane not found")
 
 const (
 	tmuxBoardPaneOption            = "@agentboard_board_pane"
@@ -112,7 +118,7 @@ func attachTaskSessionInTmuxWithEnvironment(tmuxEnv string, tmuxPane string, run
 		return err
 	}
 	if len(sourcePanes) == 0 {
-		return fmt.Errorf("tmux task pane not found: %s", backendSessionID)
+		return fmt.Errorf("%w: %s", errTmuxTaskPaneNotFound, backendSessionID)
 	}
 
 	joinedPanes := []string{}

@@ -450,10 +450,14 @@ export async function dispatch(
 
       case 'moveTask': {
         const moveParams = p as unknown as MoveTaskParams;
+        // Cleanup is tied to *arriving* at done, not to sitting there. A card
+        // already closed may have had a shell reopened on it deliberately —
+        // reordering it inside the column must not take that shell away again.
+        const wasDone = services.board.getTask?.(moveParams.id)?.trackId === 'done';
         services.board.moveTask(moveParams);
         // Closing a card (moving it to the Done track) releases its worktree,
         // mirroring the automatic cleanup that runs when a PR is merged/closed.
-        if (moveParams.trackId === 'done') {
+        if (moveParams.trackId === 'done' && !wasDone) {
           await services.taskLifecycle.cleanupTaskResources(moveParams.id);
         }
         serverEvents.emit('event', {
