@@ -15,6 +15,13 @@ func artifactListModel(names ...string) *Model {
 	return &Model{artifacts: ArtifactsSnapshot{Artifacts: records}}
 }
 
+// openEditor opens the editor and hands it the configured list, standing in for
+// the getTrackedArtifacts round trip the daemon would answer.
+func openEditor(m *Model, configured ...string) {
+	m.openArtifactListModal()
+	m.Update(trackedArtifactsLoadedMsg{names: configured})
+}
+
 func pressKeys(t *testing.T, m *Model, keys ...string) {
 	t.Helper()
 	for _, key := range keys {
@@ -48,14 +55,75 @@ func TestTOpensTheTrackedArtifactEditor(t *testing.T) {
 	if m.modal != ModalArtifactList {
 		t.Fatalf("modal = %q, want %q", m.modal, ModalArtifactList)
 	}
+	if !m.artifactListModal.Loading {
+		t.Fatalf("editor opened already populated; it must wait for the configured list")
+	}
+
+	m.Update(trackedArtifactsLoadedMsg{names: []string{"com.wixpress.web5.ecom-integrations"}})
+
 	if got := m.artifactListModal.Names; len(got) != 1 || got[0] != "com.wixpress.web5.ecom-integrations" {
 		t.Fatalf("editor seeded with %v", got)
 	}
 }
 
+// The rail carries what devex resolved; the config carries what is tracked. They
+// differ whenever a lookup fails, and for the moment after every save while the
+// refresh is still in flight. Seeding from the rail dropped the difference, and
+// the next save wrote the shortened list to disk — deleting artifacts the user
+// never touched.
+func TestEditorOpensOnTheConfiguredListNotTheRail(t *testing.T) {
+	// One artifact resolved; three are configured.
+	m := artifactListModel("com.wixpress.resolved")
+	configured := []string{"com.wixpress.resolved", "com.wixpress.unreachable", "com.wixpress.new"}
+
+	openEditor(m, configured...)
+
+	if got := strings.Join(m.artifactListModal.Names, ","); got != strings.Join(configured, ",") {
+		t.Fatalf("editor seeded with %q, want the configured list %q", got, strings.Join(configured, ","))
+	}
+}
+
+// A save fired before the list landed would write a list the user never saw —
+// which is exactly how the seeded artifacts were lost.
+func TestEditorRefusesEditsUntilTheConfiguredListArrives(t *testing.T) {
+	m := artifactListModel()
+	m.openArtifactListModal()
+
+	pressKeys(t, m, "a", "d", "enter")
+
+	if m.artifactListModal == nil {
+		t.Fatalf("editor closed while loading")
+	}
+	if m.artifactListModal.Adding || m.artifactListModal.Applying {
+		t.Fatalf("editor accepted input while loading: %+v", m.artifactListModal)
+	}
+
+	m.Update(trackedArtifactsLoadedMsg{names: []string{"com.wixpress.a"}})
+
+	if got := m.artifactListModal.Names; len(got) != 1 || got[0] != "com.wixpress.a" {
+		t.Fatalf("names = %v, want the configured list intact", got)
+	}
+}
+
+// "Nothing tracked yet" is a claim about the config, so it must not be made
+// before the config has been read.
+func TestEditorSaysItIsLoadingRatherThanClaimingNothingIsTracked(t *testing.T) {
+	m := artifactListModel()
+	m.openArtifactListModal()
+
+	rendered := renderArtifactListModal(m)
+
+	if strings.Contains(rendered, "Nothing tracked yet") {
+		t.Fatalf("editor claimed an empty config before reading it:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Loading") {
+		t.Fatalf("editor gave no sign it is still loading:\n%s", rendered)
+	}
+}
+
 func TestAddingAnArtifactAppendsItToTheList(t *testing.T) {
 	m := artifactListModel("com.wixpress.a")
-	m.openArtifactListModal()
+	openEditor(m, "com.wixpress.a")
 
 	pressKeys(t, m, "a")
 	pressKeys(t, m, "c", "o", "m", ".", "b")
@@ -69,7 +137,7 @@ func TestAddingAnArtifactAppendsItToTheList(t *testing.T) {
 
 func TestAddingAnArtifactAlreadyTrackedSaysSoInsteadOfDuplicating(t *testing.T) {
 	m := artifactListModel("com.wixpress.a")
-	m.openArtifactListModal()
+	openEditor(m, "com.wixpress.a")
 
 	pressKeys(t, m, "a")
 	pressKeys(t, m, "c", "o", "m", ".", "w", "i", "x", "p", "r", "e", "s", "s", ".", "a")
@@ -85,7 +153,7 @@ func TestAddingAnArtifactAlreadyTrackedSaysSoInsteadOfDuplicating(t *testing.T) 
 
 func TestRemovingAnArtifactKeepsTheSelectionInRange(t *testing.T) {
 	m := artifactListModel("com.a", "com.b")
-	m.openArtifactListModal()
+	openEditor(m, "com.a", "com.b")
 
 	pressKeys(t, m, "down", "d")
 
@@ -102,7 +170,7 @@ func TestRemovingAnArtifactKeepsTheSelectionInRange(t *testing.T) {
 // keystroke would silently change what the board tracks.
 func TestEscapeDiscardsEditsWithoutApplyingThem(t *testing.T) {
 	m := artifactListModel("com.a")
-	m.openArtifactListModal()
+	openEditor(m, "com.a")
 
 	pressKeys(t, m, "d", "esc")
 
@@ -116,7 +184,7 @@ func TestEscapeDiscardsEditsWithoutApplyingThem(t *testing.T) {
 
 func TestArtifactListModalShowsWhatTheListIsFor(t *testing.T) {
 	m := artifactListModel("com.wixpress.web5.ecom-integrations")
-	m.openArtifactListModal()
+	openEditor(m, "com.wixpress.web5.ecom-integrations")
 
 	rendered := renderArtifactListModal(m)
 

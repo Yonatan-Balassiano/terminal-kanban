@@ -102,6 +102,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   backend_type TEXT NOT NULL DEFAULT 'tmux',
   backend_session_id TEXT,
   attach_command TEXT,
+  -- The agent CLI's own conversation id, so relaunching a card resumes the
+  -- conversation instead of starting a blank one. Carried forward across
+  -- session rows for the same task and slot.
+  agent_session_id TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   cwd TEXT,
   branch TEXT,

@@ -328,7 +328,12 @@ func renderArtifactListModal(m *Model) string {
 		"",
 	}
 
-	if len(state.Names) == 0 {
+	// "Nothing tracked yet" is a claim about the config, so it must not be made
+	// while the config is still on its way.
+	if state.Loading {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+			Render("  Loading tracked artifacts..."))
+	} else if len(state.Names) == 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
 			Render("  Nothing tracked yet."))
 	}
@@ -360,6 +365,9 @@ func renderArtifactListModal(m *Model) string {
 	hint := "a add   d remove   enter save   esc cancel"
 	if state.Adding {
 		hint = "enter add   esc cancel"
+	}
+	if state.Loading {
+		hint = "esc cancel"
 	}
 	if state.Applying {
 		hint = "saving..."

@@ -450,10 +450,14 @@ export async function dispatch(
 
       case 'moveTask': {
         const moveParams = p as unknown as MoveTaskParams;
+        // Cleanup is tied to *arriving* at done, not to sitting there. A card
+        // already closed may have had a shell reopened on it deliberately —
+        // reordering it inside the column must not take that shell away again.
+        const wasDone = services.board.getTask?.(moveParams.id)?.trackId === 'done';
         services.board.moveTask(moveParams);
         // Closing a card (moving it to the Done track) releases its worktree,
         // mirroring the automatic cleanup that runs when a PR is merged/closed.
-        if (moveParams.trackId === 'done') {
+        if (moveParams.trackId === 'done' && !wasDone) {
           await services.taskLifecycle.cleanupTaskResources(moveParams.id);
         }
         serverEvents.emit('event', {
@@ -798,21 +802,40 @@ export async function dispatch(
         return { id: req.id, result };
       }
 
-      case 'setTrackedArtifacts': {
-        // Persisted as well as applied, or the change would last only until the
-        // next daemon start and quietly revert.
-        if (!services.artifacts) {
-          throw new Error('No artifacts configured');
-        }
+      case 'getTrackedArtifacts': {
+        // Which artifacts are configured, which is not the same question as
+        // which ones resolved. The editor asks this one: seeding it from the
+        // snapshot dropped every artifact devex could not answer for right
+        // now — including all of them for the moment after a save, while the
+        // refresh is still in flight — and the next save wrote that shortened
+        // list to disk, deleting them for good.
+        return {
+          id: req.id,
+          result: { names: [...(services.artifacts?.getArtifactNames() ?? [])] },
+        };
+      }
 
+      case 'setTrackedArtifacts': {
         const names = (p['names'] as string[] | undefined) ?? [];
         const cleaned = [
           ...new Set(names.map((name) => name.trim()).filter((name) => name.length > 0)),
         ];
 
+        // Persisted as well as applied, or the change would last only until the
+        // next daemon start and quietly revert. This runs before anything reads
+        // the running rail: the rail exists only for a non-empty list, so
+        // requiring it here rejected the one edit that could not have it — the
+        // first artifact — and the list stayed empty forever.
         const { saveArtifactList } = await import('../config/index.js');
         saveArtifactList(cleaned);
-        services.artifacts.setArtifactNames(cleaned);
+
+        if (services.artifacts) {
+          services.artifacts.setArtifactNames(cleaned);
+        } else {
+          // Nothing to bring up for an empty list, and enableArtifacts says so
+          // itself rather than being guarded here.
+          await services.enableArtifacts?.(cleaned);
+        }
 
         return { id: req.id, result: { names: cleaned } };
       }

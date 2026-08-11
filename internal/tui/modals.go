@@ -540,6 +540,9 @@ type artifactListModalState struct {
 	Adding   bool
 	Error    string
 	Applying bool
+	// True until the configured list arrives; edits are refused meanwhile so
+	// the reply cannot overwrite something the user has already typed.
+	Loading bool
 }
 
 // openArtifactListModal edits which artifacts the rail tracks.
@@ -547,21 +550,33 @@ type artifactListModalState struct {
 // The list lives in config.json, which meant adding one needed a text editor and
 // a daemon restart — and until then a merged card touching that artifact read as
 // "nothing to ship".
-func (m *Model) openArtifactListModal() {
+//
+// It opens on the configured list rather than the rail's rows. Those are not the
+// same list: the rail carries only what devex resolved, and it is empty outright
+// for the moment after a save while the refresh is still in flight. Seeding from
+// it silently dropped artifacts the editor then deleted from the config on the
+// next save.
+func (m *Model) openArtifactListModal() tea.Cmd {
 	m.closeModal()
-	names := make([]string, 0, len(m.artifacts.Artifacts))
-	for _, artifact := range m.artifacts.Artifacts {
-		names = append(names, artifact.Name)
-	}
-	m.artifactListModal = &artifactListModalState{Names: names}
+	m.artifactListModal = &artifactListModalState{Loading: true}
 	m.modal = ModalArtifactList
 	m.focus = FocusModal
+	return m.fetchTrackedArtifactsCmd()
 }
 
 func (m *Model) handleArtifactListModalKey(key tea.KeyMsg) tea.Cmd {
 	state := m.artifactListModal
 	if state == nil {
 		m.closeModal()
+		return nil
+	}
+
+	// Nothing may be edited or saved before the real list lands, or a save would
+	// write a list the user never saw.
+	if state.Loading {
+		if key.String() == "esc" || key.String() == "q" {
+			m.closeModal()
+		}
 		return nil
 	}
 

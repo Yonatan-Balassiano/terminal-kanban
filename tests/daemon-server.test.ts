@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatch, serverEvents, shouldForwardEventToSubscriber } from '../src/daemon/server.js';
+import { saveArtifactList } from '../src/config/index.js';
 import type { RepoRecord, TaskBranchRecord, TaskRecord } from '../src/types/index.js';
+
+// Only the writer is replaced: the rest of the module is left alone so no other
+// handler in this file starts reading a stubbed config.
+vi.mock('../src/config/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/config/index.js')>()),
+  saveArtifactList: vi.fn(),
+}));
 
 /**
  * A branch that is ready to merge: open PR, green build, approved.
@@ -318,6 +326,31 @@ describe('daemon moveTask dispatch', () => {
     expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
     expect(cleanupTaskResources).toHaveBeenCalledWith('task-1');
     expect(response).toEqual({ id: 'req-move-done', result: null });
+  });
+
+  it('leaves a card that is already done alone, so a reopened shell survives', async () => {
+    const moveTask = vi.fn();
+    const getTask = vi.fn().mockReturnValue({ id: 'task-1', trackId: 'done' });
+    const cleanupTaskResources = vi.fn().mockResolvedValue(undefined);
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+
+    const response = await dispatch(
+      {
+        id: 'req-move-done-again',
+        method: 'moveTask',
+        params: { id: 'task-1', trackId: 'done' },
+      },
+      {
+        board: { moveTask, getTask },
+        taskLifecycle: { cleanupTaskResources },
+        view: { getBoardSnapshot },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
+    expect(cleanupTaskResources).not.toHaveBeenCalled();
+    expect(response).toEqual({ id: 'req-move-done-again', result: null });
   });
 
   it('does not clean up the worktree when moving to a non-done track', async () => {
@@ -1244,5 +1277,120 @@ describe('legacy card-scoped PR shims', () => {
     // Assert
     expect(mergePR).toHaveBeenCalledWith('/repo', { githubRepo: 'org/proj', prNumber: 7 });
     expect(response).toEqual({ id: 'req-merge-one-pr', result: { merged: true } });
+  });
+});
+
+describe('daemon setTrackedArtifacts dispatch', () => {
+  afterEach(() => {
+    vi.mocked(saveArtifactList).mockClear();
+  });
+
+  it('adds the first artifact when no rail is running', async () => {
+    // The rail is only built for a non-empty list, so this is the one edit that
+    // can never find one already up. Rejecting it left the list empty forever.
+    const enableArtifacts = vi.fn().mockResolvedValue(undefined);
+
+    const response = await dispatch(
+      {
+        id: 'req-first-artifact',
+        method: 'setTrackedArtifacts',
+        params: { names: ['com.wixpress.enterprise.web5.prompt-catalog'] },
+      },
+      { enableArtifacts } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(saveArtifactList).toHaveBeenCalledWith([
+      'com.wixpress.enterprise.web5.prompt-catalog',
+    ]);
+    expect(enableArtifacts).toHaveBeenCalledWith([
+      'com.wixpress.enterprise.web5.prompt-catalog',
+    ]);
+    expect(response).toEqual({
+      id: 'req-first-artifact',
+      result: { names: ['com.wixpress.enterprise.web5.prompt-catalog'] },
+    });
+  });
+
+  it('applies to the running rail rather than building a second one', async () => {
+    const setArtifactNames = vi.fn();
+    const enableArtifacts = vi.fn().mockResolvedValue(undefined);
+
+    await dispatch(
+      {
+        id: 'req-existing-rail',
+        method: 'setTrackedArtifacts',
+        params: { names: ['com.wixpress.a', 'com.wixpress.b'] },
+      },
+      { artifacts: { setArtifactNames }, enableArtifacts } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(setArtifactNames).toHaveBeenCalledWith(['com.wixpress.a', 'com.wixpress.b']);
+    expect(enableArtifacts).not.toHaveBeenCalled();
+  });
+
+  it('persists exactly what it applies, trimmed and de-duplicated', async () => {
+    // A list that reached config.json differing from the one handed to the rail
+    // would come back changed on the next restart.
+    const setArtifactNames = vi.fn();
+
+    const response = await dispatch(
+      {
+        id: 'req-messy-names',
+        method: 'setTrackedArtifacts',
+        params: { names: ['  com.wixpress.a  ', 'com.wixpress.a', '', '   ', 'com.wixpress.b'] },
+      },
+      { artifacts: { setArtifactNames } } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    const cleaned = ['com.wixpress.a', 'com.wixpress.b'];
+    expect(saveArtifactList).toHaveBeenCalledWith(cleaned);
+    expect(setArtifactNames).toHaveBeenCalledWith(cleaned);
+    expect(response).toEqual({ id: 'req-messy-names', result: { names: cleaned } });
+  });
+
+  it('serves the configured list, including artifacts the rail could not resolve', async () => {
+    // The editor opens on this, not on the rail's rows. An artifact devex is
+    // down for is still tracked, and omitting it here is what let the next save
+    // delete it from the config.
+    const configured = ['com.wixpress.resolved', 'com.wixpress.unreachable'];
+
+    const response = await dispatch(
+      { id: 'req-tracked', method: 'getTrackedArtifacts', params: {} },
+      {
+        artifacts: {
+          getArtifactNames: vi.fn().mockReturnValue(configured),
+          // Only one of the two resolved; the snapshot is the shorter list.
+          getSnapshot: vi.fn().mockReturnValue({ artifacts: [{ name: 'com.wixpress.resolved' }] }),
+        },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(response).toEqual({ id: 'req-tracked', result: { names: configured } });
+  });
+
+  it('reports an empty tracked list when no rail is running', async () => {
+    const response = await dispatch(
+      { id: 'req-tracked-none', method: 'getTrackedArtifacts', params: {} },
+      {} as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(response).toEqual({ id: 'req-tracked-none', result: { names: [] } });
+  });
+
+  it('persists an emptied list even with nothing to apply it to', async () => {
+    // Removing the last artifact must still reach disk, or it returns on restart.
+    const response = await dispatch(
+      { id: 'req-empty', method: 'setTrackedArtifacts', params: { names: [] } },
+      {} as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(saveArtifactList).toHaveBeenCalledWith([]);
+    expect(response).toEqual({ id: 'req-empty', result: { names: [] } });
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -32,6 +32,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_BOOTSTRAP_NOTICE="" ' +
         'AGENTBOARD_AGENT_ARGS="" ' +
         'AGENTBOARD_WORKSPACES="" ' +
+        'AGENTBOARD_AGENT_SESSION_ID="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -59,6 +60,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_BOOTSTRAP_NOTICE="Git command failed: git worktree add" ' +
         'AGENTBOARD_AGENT_ARGS="" ' +
         'AGENTBOARD_WORKSPACES="" ' +
+        'AGENTBOARD_AGENT_SESSION_ID="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -188,5 +190,98 @@ describe('session-bootstrap.sh workspace banner', () => {
     // Assert
     expect(stdout).not.toContain('Workspaces for this card');
     expect(stdout).toContain('AGENT_STARTED');
+  });
+});
+
+describe('session-bootstrap.sh agent session resume', () => {
+  const SESSION_ID = '5f3a1c2e-9b47-4d80-a1f6-2c8e7d4b0913';
+
+  /**
+   * Runs the real bootstrap through a real shell with a fake agent that reports
+   * the arguments it was handed, against a throwaway claude config directory.
+   *
+   * `existingConversation` seeds that directory the way claude does once a
+   * conversation has been written, which is what decides resume vs. fresh.
+   */
+  async function runBootstrap({
+    agentCli = 'claude' as const,
+    agentSessionId,
+    existingConversation = false,
+  }: {
+    agentCli?: 'claude' | 'codex';
+    agentSessionId?: string;
+    existingConversation?: boolean;
+  }): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-resume-'));
+    try {
+      const fake = join(dir, agentCli);
+      writeFileSync(fake, '#!/bin/bash\necho "AGENT_ARGS:$*"\n');
+      chmodSync(fake, 0o755);
+
+      const claudeConfig = join(dir, 'claude-config');
+      if (existingConversation) {
+        const project = join(claudeConfig, 'projects', '-some-checkout');
+        mkdirSync(project, { recursive: true });
+        writeFileSync(join(project, `${agentSessionId}.jsonl`), '{}\n');
+      }
+
+      const command = buildNewSessionBootstrapCommand({
+        repoPath: dir,
+        branch: 'ab/api-0001',
+        agentCli,
+        usesWorktree: true,
+        cwd: dir,
+        sessionBootstrapScript: BOOTSTRAP,
+        ...(agentSessionId ? { agentSessionId } : {}),
+      });
+
+      const { stdout } = await execFileAsync('bash', ['-c', command], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env['PATH'] ?? ''}`,
+          CLAUDE_CONFIG_DIR: claudeConfig,
+        },
+      });
+      return stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('resumes the conversation the card already has', async () => {
+    // Act
+    const stdout = await runBootstrap({ agentSessionId: SESSION_ID, existingConversation: true });
+
+    // Assert
+    expect(stdout).toContain(`AGENT_ARGS:--resume ${SESSION_ID}`);
+  });
+
+  it('starts the conversation under the card id when there is nothing to resume', async () => {
+    // Arrange + Act — a card opened and abandoned never wrote a conversation, so
+    // resuming it would fail; claiming the id keeps the next reopen resumable.
+    const stdout = await runBootstrap({ agentSessionId: SESSION_ID });
+
+    // Assert
+    expect(stdout).toContain(`AGENT_ARGS:--session-id ${SESSION_ID}`);
+  });
+
+  it('leaves agents other than claude launching as they always did', async () => {
+    // Act
+    const stdout = await runBootstrap({ agentCli: 'codex', agentSessionId: SESSION_ID });
+
+    // Assert
+    expect(stdout).toContain('AGENT_ARGS:');
+    expect(stdout).not.toContain(SESSION_ID);
+  });
+
+  it('passes no session flags when the daemon supplied no id', async () => {
+    // Act
+    const stdout = await runBootstrap({});
+
+    // Assert
+    expect(stdout).toContain('AGENT_ARGS:');
+    expect(stdout).not.toContain('--session-id');
+    expect(stdout).not.toContain('--resume');
   });
 });
