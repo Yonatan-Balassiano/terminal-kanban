@@ -979,4 +979,185 @@ describe('SyncService', () => {
     // Assert
     expect(board.moveTask).not.toHaveBeenCalled();
   });
+  it('asks GitHub nothing about a pull request that has already finished', async () => {
+    // Arrange — a merged branch whose merge commit is known. Its state, checks
+    // and reviews are frozen, and re-reading them is three GraphQL calls per
+    // poll that can never return anything new. A board of finished cards doing
+    // that is what exhausted the hourly budget.
+    const { board } = makeBoard({ trackId: 'shipping' });
+    board.updateTaskBranchSync('branch-0', {
+      prNumber: 42,
+      prState: 'merged',
+      mergeCommitSha: 'abc123',
+    });
+
+    const github = {
+      findBranchPR: vi.fn(),
+      getPR: vi.fn(),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn(),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(github.findBranchPR).not.toHaveBeenCalled();
+    expect(github.getPR).not.toHaveBeenCalled();
+    // The worktree can still move underneath a merged branch, and reading that
+    // is local and free.
+    expect(git.getWorkspaceStatus).toHaveBeenCalled();
+  });
+
+  it('still asks once for a merged branch whose merge commit is unknown', async () => {
+    // Arrange — release tracking cannot resolve anything without it, so this
+    // one call is the difference between "shipped" and "could not tell".
+    const { board } = makeBoard({ trackId: 'shipping' });
+    board.updateTaskBranchSync('branch-0', { prNumber: 42, prState: 'merged' });
+
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo({ prState: 'merged' })),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue({
+        number: 42,
+        merged: true,
+        mergeCommitSha: 'abc123',
+        mergedAt: '2026-08-09T10:00:00Z',
+        files: [],
+      }),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(github.getMergeInfo).toHaveBeenCalled();
+  });
+
+  it('skips a finished card entirely on a periodic sweep', async () => {
+    // Arrange — the sweep runs every minute forever, and a board is mostly
+    // finished cards.
+    const { board } = makeBoard({ trackId: 'done' });
+    board.updateTaskBranchSync('branch-0', {
+      prNumber: 42,
+      prState: 'merged',
+      mergeCommitSha: 'abc123',
+    });
+
+    const github = {
+      findBranchPR: vi.fn(),
+      getPR: vi.fn(),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn(),
+      findPRsByHeadBranch: vi.fn(),
+    };
+    const git = {
+      defaultBranch: vi.fn(),
+      remoteBranchExists: vi.fn(),
+      getWorkspaceStatus: vi.fn(),
+    };
+    const db = { prepare: vi.fn().mockReturnValue({ get: vi.fn(), all: vi.fn(), run: vi.fn() }) };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act — the periodic sweep, not a manual one.
+    sync.start(60_000);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    sync.stop();
+
+    // Assert — not even the local git read, because the card is not visited.
+    expect(git.getWorkspaceStatus).not.toHaveBeenCalled();
+    expect(github.findBranchPR).not.toHaveBeenCalled();
+  });
+
+  it('still reaches a finished card when the user asks for a sync', async () => {
+    // Arrange — a reopened pull request has to be one keypress away, not
+    // unreachable.
+    const { board } = makeBoard({ trackId: 'done' });
+    board.updateTaskBranchSync('branch-0', {
+      prNumber: 42,
+      prState: 'merged',
+      mergeCommitSha: 'abc123',
+    });
+
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo({ prState: 'merged' })),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert — visited, even though the branch itself is skipped.
+    expect(git.getWorkspaceStatus).toHaveBeenCalled();
+  });
 });

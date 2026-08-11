@@ -2837,7 +2837,7 @@ func kbdHints(focus AppFocus) string {
 	case FocusBoard:
 		// e/E lead: this string already overflows a narrow terminal, and the PR
 		// pane and picker are the only way to act on a card with several PRs.
-		return "e PRs pane  E PR actions  ↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G rollout  T track  1-9 repo  ? help"
+		return "e PRs pane  E PR actions  ↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G roll out  T track  1-9 repo  ? help"
 	case FocusDetail:
 		return "↑↓ branch  ←→ card  E PR actions  e/Esc close"
 	case FocusMissions:

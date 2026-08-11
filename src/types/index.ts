@@ -1034,8 +1034,10 @@ export interface TaskReleaseSummary {
   /** How many gating pull requests have reached production. */
   gaCount: number;
   gatingCount: number;
-  /** The artifact holding the card back, for the badge text. */
+  /** The artifact holding the card back, shortened for the badge text. */
   blockingArtifact?: string;
+  /** Its full project id, which is what a rollout has to name. */
+  blockingArtifactName?: string;
   blockingRcVersion?: string;
   blockingGaVersion?: string;
   checkedAt: number;

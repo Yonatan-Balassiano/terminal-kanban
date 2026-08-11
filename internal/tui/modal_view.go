@@ -395,6 +395,13 @@ func renderArtifactRolloutModal(m *Model) string {
 		fmt.Sprintf("%s  →  %s", artifactVersionOrUnknown(state.CurrentVersion), artifactVersionOrUnknown(state.TargetVersion)),
 	}
 
+	// Opened from a card, so name what is being shipped. A bare version number
+	// is a much weaker thing to confirm than "this ships my change".
+	if state.ShippingCard != "" {
+		lines = append(lines,
+			muted.Render("ships: "+truncateText(state.ShippingCard, 52)))
+	}
+
 	if note := artifactOwnershipNote(state.PendingRcCount, state.MyPendingCount); note != "" {
 		lines = append(lines, artifactOwnedStyle(false).Render(note))
 	}

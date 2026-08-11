@@ -241,10 +241,12 @@ type TaskReleaseSummary struct {
 	GaCount     int    `json:"gaCount"`
 	GatingCount int    `json:"gatingCount"`
 	// The artifact holding the card back, already shortened for a narrow card.
-	BlockingArtifact  string `json:"blockingArtifact"`
-	BlockingRcVersion string `json:"blockingRcVersion"`
-	BlockingGaVersion string `json:"blockingGaVersion"`
-	CheckedAt         int64  `json:"checkedAt"`
+	BlockingArtifact string `json:"blockingArtifact"`
+	// The full project id; the short name above cannot name a rollout target.
+	BlockingArtifactName string `json:"blockingArtifactName"`
+	BlockingRcVersion    string `json:"blockingRcVersion"`
+	BlockingGaVersion    string `json:"blockingGaVersion"`
+	CheckedAt            int64  `json:"checkedAt"`
 }
 
 type MissionRecord struct {

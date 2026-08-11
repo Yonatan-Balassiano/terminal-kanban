@@ -70,6 +70,26 @@ function mergeSyncResults(results: SyncResult[]): SyncResult {
   );
 }
 
+/**
+ * Whether a branch has anything left to learn from GitHub.
+ *
+ * A merged or closed pull request is finished: its state, its checks and its
+ * reviews are all frozen. Re-reading them costs three GraphQL calls per branch
+ * per poll and can never return anything new — which is what exhausted the
+ * hourly GraphQL budget on a board whose cards were nearly all done.
+ */
+function isBranchSettled(branch: TaskBranchRecord): boolean {
+  if (branch.prNumber === undefined) {
+    return false;
+  }
+  if (branch.prState === 'closed') {
+    return true;
+  }
+  // A merged branch is still worth one call until its merge commit is known,
+  // because release tracking cannot resolve anything without it.
+  return branch.prState === 'merged' && branch.mergeCommitSha !== undefined;
+}
+
 function normalizeBaseBranch(value: string | null | undefined): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -335,6 +355,11 @@ export class SyncService {
   private async enqueueAll(opts: ReconcileOptions): Promise<SyncResult> {
     const taskIds = this.board
       .getTasks({ includeArchived: false })
+      // A finished card has nothing left to ask GitHub about, and a board is
+      // mostly finished cards. Polling them anyway is what ran the GraphQL
+      // budget out. A manual sync still reaches them, so a reopened pull
+      // request is one keypress away rather than unreachable.
+      .filter((task) => opts.cause === 'manual' || !this.isTaskSettled(task))
       .map((task) => task.id);
 
     if (taskIds.length === 0) {
@@ -349,6 +374,7 @@ export class SyncService {
     const taskIds = this.board
       .getTasks({ includeArchived: false })
       .filter((task) => task.sessionId != null || task.secondarySessionId != null)
+      .filter((task) => !this.isTaskSettled(task))
       .map((task) => task.id);
 
     if (taskIds.length === 0) {
@@ -502,6 +528,20 @@ export class SyncService {
    * repositories are configured — cheaper, and it also finds repos the card has
    * never touched before.
    */
+  /**
+   * Whether a card is done with GitHub entirely.
+   *
+   * Only a card already in `done` counts: one in `shipping` has landed but may
+   * still gain a follow-up branch, and pulling it back into review depends on
+   * noticing that.
+   */
+  private isTaskSettled(task: TaskRecord): boolean {
+    if (task.trackId !== 'done' || task.branches.length === 0) {
+      return false;
+    }
+    return task.branches.every((branch) => isBranchSettled(branch));
+  }
+
   private async discoverSiblingBranches(
     task: TaskRecord,
     branches: readonly TaskBranchRecord[],
@@ -688,6 +728,17 @@ export class SyncService {
     }
 
     const fullRepo = `${githubOwner}/${githubRepo}`;
+
+    // A finished pull request cannot change, so the three GraphQL calls below
+    // would return exactly what is already stored. The git state is still read:
+    // it is local and the worktree can still move underneath a merged branch.
+    if (isBranchSettled(branch)) {
+      if (gitPatch) {
+        this.board.updateTaskBranchSync(branch.id, gitPatch);
+        result.tasksUpdated += 1;
+      }
+      return result;
+    }
 
     try {
       const prInfo = await this.resolveBranchPR(task, branch, {
