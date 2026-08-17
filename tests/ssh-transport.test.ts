@@ -30,9 +30,8 @@ class FakeRunner implements ExecTransport {
   async exists(): Promise<boolean> {
     throw new Error('not used');
   }
-  async mkdirp(): Promise<void> {
-    throw new Error('not used');
-  }
+  // Used by copyFileFrom to create the local destination directory.
+  async mkdirp(): Promise<void> {}
   async removeDir(): Promise<void> {
     throw new Error('not used');
   }
@@ -230,10 +229,52 @@ describe('SshTransport.writeFileIfChanged', () => {
   });
 });
 
+describe('SshTransport.copyFileTo', () => {
+  it('scp-s to a .part sibling, then renames it into place over ssh', async () => {
+    // Arrange
+    const runner = new FakeRunner(() => ok());
+    const transport = new SshTransport({ host: 'example.host', runner });
+
+    // Act
+    await transport.copyFileTo('/local/transcript.jsonl', '/remote/dir/transcript.jsonl');
+
+    // Assert — scp runs as a direct local process, not wrapped in ssh exec.
+    const scpCall = runner.calls.find((c) => c.argv[0] === 'scp');
+    expect(scpCall).toBeDefined();
+    expect(scpCall!.argv).toContain('/local/transcript.jsonl');
+    expect(scpCall!.argv).toContain('example.host:/remote/dir/transcript.jsonl.part');
+
+    // The rename runs as a remote command, so it shows up wrapped in an ssh call.
+    expect(lastRemoteCommand(runner)).toBe(
+      'mv /remote/dir/transcript.jsonl.part /remote/dir/transcript.jsonl'
+    );
+  });
+});
+
+describe('SshTransport.copyFileFrom', () => {
+  it('scp-s from the remote to a local .part path, then renames it locally', async () => {
+    // Arrange
+    const runner = new FakeRunner(() => ok());
+    const transport = new SshTransport({ host: 'example.host', runner });
+
+    // Act
+    await transport.copyFileFrom('/remote/dir/transcript.jsonl', '/local/transcript.jsonl');
+
+    // Assert — both scp and the rename run as direct local processes here: the
+    // rename target is a local path, so there is nothing to ssh into for it.
+    const scpCall = runner.calls.find((c) => c.argv[0] === 'scp');
+    expect(scpCall).toBeDefined();
+    expect(scpCall!.argv).toContain('example.host:/remote/dir/transcript.jsonl');
+    expect(scpCall!.argv).toContain('/local/transcript.jsonl.part');
+    const mvCall = runner.calls.find((c) => c.argv[0] === 'mv');
+    expect(mvCall!.argv).toEqual(['mv', '/local/transcript.jsonl.part', '/local/transcript.jsonl']);
+  });
+});
+
 describe('SshTransport.reachability', () => {
   it('caches a successful probe instead of re-probing on every call', async () => {
     // Arrange
-    let now = 1_000;
+    const now = 1_000;
     const runner = new FakeRunner(() => ok());
     const transport = new SshTransport({ host: 'example.host', runner, now: () => now });
 

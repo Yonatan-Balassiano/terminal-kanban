@@ -128,6 +128,25 @@ type trackedArtifactsLoadedMsg struct {
 	err   error
 }
 
+// teleportPreflightLoadedMsg carries the check list into the open confirm modal.
+type teleportPreflightLoadedMsg struct {
+	taskID    string
+	direction string
+	checks    []DoctorCheck
+	err       error
+}
+
+// teleportedMsg is the outcome of a completed teleport. board is the fresh
+// snapshot the same way every other board-mutating action refreshes it —
+// separate from whether the terminal pane also needs reattaching, which
+// depends on whether taskID was the one actually open.
+type teleportedMsg struct {
+	taskID    string
+	direction string
+	board     *BoardSnapshot
+	err       error
+}
+
 type spinnerTickMsg struct{}
 type sessionPollTickMsg struct{}
 type artifactsPollTickMsg struct{}
@@ -252,6 +271,7 @@ type Model struct {
 	artifactRolloutModal      *artifactRolloutModalState
 	artifactListModal         *artifactListModalState
 	branchPRListModal         *branchPRListModalState
+	teleportConfirmModal      *teleportConfirmModalState
 }
 
 func NewModel(socketPath string) (*Model, error) {
@@ -370,6 +390,46 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.artifactListModal.Names = msg.names
 		m.artifactListModal.Selected = 0
 		return m, nil
+
+	case teleportPreflightLoadedMsg:
+		// The modal may already be gone (Esc, or the card changed); the reply is
+		// then simply dropped.
+		state := m.teleportConfirmModal
+		if state == nil || state.TaskID != msg.taskID || state.Direction != msg.direction {
+			return m, nil
+		}
+		state.Loading = false
+		if msg.err != nil {
+			state.Error = msg.err.Error()
+			return m, nil
+		}
+		state.Checks = msg.checks
+		return m, nil
+
+	case teleportedMsg:
+		if msg.err != nil {
+			m.statusMessage = msg.err.Error()
+			return m, nil
+		}
+		if msg.board != nil {
+			m.applyBoard(*msg.board)
+		}
+		if msg.direction == TeleportDirectionRemoteToLocal {
+			m.statusMessage = "Teleported to local."
+		} else {
+			m.statusMessage = "Teleported to remote."
+		}
+		commands := []tea.Cmd{m.syncSessionUpdateWatchCmd()}
+		// The card's session just moved to a new backend under it. If this was
+		// the card open in the terminal pane, that pane is now pointed at a
+		// backend session that no longer exists — reattach to the one teleport
+		// just created there, the same way reconnect re-links a revived remote
+		// session. A card that was not open needs nothing: the next Enter on it
+		// opens the already-relinked session naturally.
+		if m.activeTaskID == msg.taskID {
+			commands = append(commands, m.openSessionCmd(msg.taskID, false, SessionSlotPrimary))
+		}
+		return m, tea.Batch(commands...)
 
 	case artifactListAppliedMsg:
 		if msg.err != nil {
@@ -674,6 +734,10 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 
 	if key.String() == "ctrl+r" {
 		return m.reconnectSelectedTaskCmd()
+	}
+
+	if key.String() == "ctrl+t" {
+		return m.teleportSelectedTaskCmd()
 	}
 
 	if m.boardOverviewMode {
@@ -1412,6 +1476,44 @@ func (m *Model) refreshArtifactsCmd() tea.Cmd {
 	return m.artifactsCmd("refreshArtifacts", true)
 }
 
+// fetchTeleportPreflightCmd asks the daemon whether taskID can teleport in the
+// given direction, without doing anything yet — the same checks teleportTask
+// itself runs before touching a single commit.
+func (m *Model) fetchTeleportPreflightCmd(taskID, direction string) tea.Cmd {
+	return func() tea.Msg {
+		var checks []DoctorCheck
+		params := map[string]string{"taskId": taskID, "direction": direction}
+		if err := m.client.Call("teleportTaskPreflight", params, &checks); err != nil {
+			return teleportPreflightLoadedMsg{taskID: taskID, direction: direction, err: err}
+		}
+		return teleportPreflightLoadedMsg{taskID: taskID, direction: direction, checks: checks}
+	}
+}
+
+// teleportTaskCmd runs the teleport the confirm modal already checked. The
+// daemon re-validates from scratch — the confirm-time checks are advisory,
+// not a lease — so a status changing in between surfaces as a normal error
+// here rather than a state the TUI has to reconcile with what it showed.
+// teleportTaskCmd runs the teleport the confirm modal already checked. Not
+// boardActionCmd: the daemon already recreated the session on its new host as
+// part of the teleport, but that alone does not move the TUI's own terminal
+// pane — it is still pointed at the backend session that just died. The
+// board patch handled here plus a reattach (below, if this card was the one
+// actually open) is what actually does that.
+func (m *Model) teleportTaskCmd(taskID, direction string) tea.Cmd {
+	return func() tea.Msg {
+		params := map[string]string{"taskId": taskID, "direction": direction}
+		if err := m.client.Call("teleportTask", params, nil); err != nil {
+			return teleportedMsg{taskID: taskID, direction: direction, err: err}
+		}
+		var board BoardSnapshot
+		if err := m.client.Call("getBoard", nil, &board); err != nil {
+			return teleportedMsg{taskID: taskID, direction: direction, err: err}
+		}
+		return teleportedMsg{taskID: taskID, direction: direction, board: &board}
+	}
+}
+
 func (m *Model) artifactsCmd(method string, manual bool) tea.Cmd {
 	return func() tea.Msg {
 		var snapshot ArtifactsSnapshot
@@ -1566,6 +1668,23 @@ func (m *Model) reconnectSelectedTaskCmd() tea.Cmd {
 		return nil
 	}
 	return m.reconnectSessionCmd(task.ID, SessionSlotPrimary)
+}
+
+// teleportSelectedTaskCmd opens the confirm modal for moving the selected
+// card's live session between agentboard's local host and its remote — the
+// direction follows from where the task already is, not a choice the user
+// makes here.
+func (m *Model) teleportSelectedTaskCmd() tea.Cmd {
+	task := m.selectedTask()
+	if task == nil {
+		m.statusMessage = "Select a task to teleport it."
+		return nil
+	}
+	if task.IsGeneral() {
+		m.statusMessage = "General tasks have no repo to teleport."
+		return nil
+	}
+	return m.openTeleportModal(task)
 }
 
 // Re-link a remote card to the machine its agent runs on, waking the host first

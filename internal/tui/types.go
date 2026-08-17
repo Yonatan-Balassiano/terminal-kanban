@@ -38,6 +38,11 @@ const (
 	TaskLocationRemote = "remote"
 )
 
+const (
+	TeleportDirectionLocalToRemote = "local-to-remote"
+	TeleportDirectionRemoteToLocal = "remote-to-local"
+)
+
 // GeneralScopeID is the board scope that shows only general tasks. It stands in
 // for a repo ID in activeRepoID, which is why it uses a shape no real repo ID
 // can take.
@@ -95,6 +100,7 @@ const (
 	ModalAIChat          ModalType = "ai-chat"
 	ModalSetBranch       ModalType = "set-branch"
 	ModalArtifactRollout ModalType = "artifact-rollout"
+	ModalTeleportConfirm ModalType = "teleport-confirm"
 	ModalHelp            ModalType = "help"
 	ModalNone            ModalType = ""
 )
@@ -348,6 +354,25 @@ type ReconnectSessionResult struct {
 	State   string         `json:"state"`
 	Message string         `json:"message"`
 	Session *SessionRecord `json:"session,omitempty"`
+}
+
+// DoctorCheck is one preflight or health probe result. Status is one of
+// "pass", "warn", or "fail" — only "fail" blocks the action it gates.
+type DoctorCheck struct {
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	Remediation string `json:"remediation,omitempty"`
+}
+
+// TeleportTaskResult is what a completed teleport actually did, distinct from
+// the checks that gated it — WipCommitted and TranscriptCopied are both
+// legitimately false on a clean tree or a card that never opened a session.
+type TeleportTaskResult struct {
+	Checks           []DoctorCheck `json:"checks"`
+	Session          SessionRecord `json:"session"`
+	WipCommitted     bool          `json:"wipCommitted"`
+	TranscriptCopied bool          `json:"transcriptCopied"`
 }
 
 type SavedViewRecord struct {

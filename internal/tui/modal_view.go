@@ -61,6 +61,8 @@ func renderModal(m *Model) string {
 		return renderArtifactListModal(m)
 	case ModalArtifactRollout:
 		return renderArtifactRolloutModal(m)
+	case ModalTeleportConfirm:
+		return renderTeleportConfirmModal(m)
 	case ModalBranchPRList:
 		return renderBranchPRListModal(m)
 	default:
@@ -414,6 +416,65 @@ func renderArtifactRolloutModal(m *Model) string {
 			Render(fmt.Sprintf("type %s to confirm: %s|", artifactRolloutConfirmWord, state.Confirm)),
 		muted.Render("[←/→] graduality  [Enter] confirm  [Esc] cancel"),
 	)
+	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
+}
+
+func doctorCheckTone(status string) string {
+	switch status {
+	case "pass":
+		return "success"
+	case "warn":
+		return "warning"
+	case "fail":
+		return "danger"
+	default:
+		return "muted"
+	}
+}
+
+func renderTeleportConfirmModal(m *Model) string {
+	state := m.teleportConfirmModal
+	if state == nil {
+		return ""
+	}
+
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
+	toRemote := state.Direction == TeleportDirectionLocalToRemote
+	title := ternaryString(toRemote, "TELEPORT TO REMOTE", "TELEPORT TO LOCAL")
+	route := ternaryString(toRemote, "local  →  remote", "remote  →  local")
+
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Accent)).Render(title),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(state.TaskTitle, 52)),
+		muted.Render(route),
+		"",
+	}
+
+	switch {
+	case state.Loading:
+		lines = append(lines, spinnerFrames[m.spinnerIndex]+" checking…")
+	case state.Error != "":
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Danger)).Render(state.Error))
+	default:
+		for _, check := range state.Checks {
+			lines = append(lines, badge(check.Status, doctorCheckTone(check.Status), "", false)+" "+check.Message)
+			if check.Status != "pass" && check.Remediation != "" {
+				lines = append(lines, muted.Render("  → "+check.Remediation))
+			}
+		}
+		if len(state.Checks) == 0 {
+			lines = append(lines, muted.Render("No blockers found."))
+		}
+	}
+
+	footer := muted.Render("[y] confirm  [n/Esc] cancel")
+	if !state.Loading && state.Error == "" && teleportBlocked(state.Checks) {
+		footer = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Danger)).Render("blocked — fix the check above") +
+			muted.Render("  [Esc] close")
+	}
+	lines = append(lines, "", footer)
+
 	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
 }
 
