@@ -11,7 +11,6 @@ import { spawn } from 'child_process';
 
 export interface ServiceContainer {
   board: import('../services/board.js').BoardService;
-  missions: import('../services/missions.js').MissionService;
   workspace: import('../services/workspace.js').WorkspaceService;
   worktrees: import('../services/worktree.js').WorktreeService;
   taskLifecycle: import('../services/task-lifecycle.js').TaskLifecycleService;
@@ -496,7 +495,6 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   // ---- Wire up all services -----------------------------------
   const { BoardService } = await import('../services/board.js');
   const { WorkspaceService } = await import('../services/workspace.js');
-  const { MissionService } = await import('../services/missions.js');
   const { ViewService } = await import('../services/view.js');
   const { GitService } = await import('../services/git.js');
   const { GitHubService } = await import('../services/github.js');
@@ -533,9 +531,8 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const remoteProvider = createRemoteProvider(cfg.remote);
 
   const board = new BoardService(db);
-  const missions = new MissionService(db, board);
   const workspace = new WorkspaceService(db);
-  const view = new ViewService(board, missions);
+  const view = new ViewService(board);
   const git = new GitService();
   const github = new GitHubService();
   const events = new EventLogService(db);
@@ -595,7 +592,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   }
 
   const taskLifecycle = new TaskLifecycleService(db, board, git, session, transports);
-  const sync = new SyncService(board, missions, github, git, db);
+  const sync = new SyncService(board, github, git, db);
   sync.transports = transports;
   // Fires on reaching done, not on a merge: a card whose pull requests have
   // landed but whose change has not shipped still needs its worktrees.
@@ -606,7 +603,6 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const ollama = new ManagedOllamaService(cfg.aiChat);
   const aiChat = new AIChatService({
     board,
-    missions,
     workspace,
     worktrees,
     session,
@@ -681,7 +677,6 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     dbPath: opts.dbPath,
     logError: (message, error) => appendErrorLog(opts.logFile, `[daemon] ${message}`, error),
     board,
-    missions,
     workspace,
     worktrees,
     taskLifecycle,

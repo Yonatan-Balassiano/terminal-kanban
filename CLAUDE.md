@@ -54,7 +54,6 @@ npm run reset-daemon
   - `sync.ts`: Periodic GitHub state sync loop
   - `workspace.ts` / `worktree.ts`: Git worktree management per task
   - `board.ts`: SQLite board state queries
-  - `missions.ts`: Pillar management
 - **`src/cli/`**: Commander-based CLI (`rpc.ts` client sends commands to daemon)
 - **`src/config/`**: Config loading (macOS: `~/Library/Application Support/AgentBoard`, Linux: XDG paths)
 

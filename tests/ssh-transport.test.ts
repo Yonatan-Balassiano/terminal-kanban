@@ -233,7 +233,7 @@ describe('SshTransport.writeFileIfChanged', () => {
 describe('SshTransport.reachability', () => {
   it('caches a successful probe instead of re-probing on every call', async () => {
     // Arrange
-    let now = 1_000;
+    const now = 1_000;
     const runner = new FakeRunner(() => ok());
     const transport = new SshTransport({ host: 'example.host', runner, now: () => now });
 

@@ -194,114 +194,6 @@ describe('daemon createTask dispatch', () => {
   });
 });
 
-describe('daemon createMission dispatch', () => {
-  it('returns the mission without waiting on the board patch snapshot', async () => {
-    vi.useFakeTimers();
-    try {
-      const mission = {
-        id: 'mission-1',
-        title: 'Cross-repo rollout',
-        sortKey: 1000,
-        createdAt: 1,
-        updatedAt: 1,
-      };
-      const createMission = vi.fn().mockReturnValue(mission);
-      const getBoardSnapshot = vi.fn().mockReturnValue({ missions: [mission] });
-
-      const boardPatchEvent = new Promise<unknown>((resolve) => {
-        serverEvents.once('event', resolve);
-      });
-
-      const response = await dispatch(
-        {
-          id: 'req-mission',
-          method: 'createMission',
-          params: {
-            title: 'Cross-repo rollout',
-          },
-        },
-        {
-          missions: { createMission },
-          view: { getBoardSnapshot },
-        } as never,
-        '/tmp/agentboard.sock',
-      );
-
-      expect(createMission).toHaveBeenCalledWith({
-        title: 'Cross-repo rollout',
-      });
-      expect(response).toEqual({
-        id: 'req-mission',
-        result: mission,
-      });
-      expect(getBoardSnapshot).not.toHaveBeenCalled();
-
-      await vi.runAllTimersAsync();
-
-      expect(getBoardSnapshot).toHaveBeenCalledTimes(1);
-      await expect(boardPatchEvent).resolves.toEqual({
-        type: 'board_patch',
-        payload: { missions: [mission] },
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe('daemon deleteMission dispatch', () => {
-  it('deletes mission tasks through the lifecycle service and emits a board patch asynchronously', async () => {
-    vi.useFakeTimers();
-    try {
-      const deleteTask = vi.fn().mockResolvedValue(undefined);
-      const deleteMission = vi.fn().mockImplementation(async (_missionId, taskDeleter) => {
-        await taskDeleter('task-1');
-        await taskDeleter('task-2');
-      });
-      const getBoardSnapshot = vi.fn().mockReturnValue({ missions: [] });
-
-      const boardPatchEvent = new Promise<unknown>((resolve) => {
-        serverEvents.once('event', resolve);
-      });
-
-      const response = await dispatch(
-        {
-          id: 'req-delete-mission',
-          method: 'deleteMission',
-          params: {
-            missionId: 'mission-1',
-          },
-        },
-        {
-          missions: { deleteMission },
-          taskLifecycle: { deleteTask },
-          view: { getBoardSnapshot },
-        } as never,
-        '/tmp/agentboard.sock',
-      );
-
-      expect(deleteMission).toHaveBeenCalledWith('mission-1', expect.any(Function));
-      expect(deleteTask).toHaveBeenCalledTimes(2);
-      expect(deleteTask).toHaveBeenNthCalledWith(1, 'task-1');
-      expect(deleteTask).toHaveBeenNthCalledWith(2, 'task-2');
-      expect(response).toEqual({
-        id: 'req-delete-mission',
-        result: null,
-      });
-      expect(getBoardSnapshot).not.toHaveBeenCalled();
-
-      await vi.runAllTimersAsync();
-
-      expect(getBoardSnapshot).toHaveBeenCalledTimes(1);
-      await expect(boardPatchEvent).resolves.toEqual({
-        type: 'board_patch',
-        payload: { missions: [] },
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
 
 describe('daemon moveTask dispatch', () => {
   it('cleans up the worktree when a card is closed (moved to the done track)', async () => {
@@ -989,7 +881,6 @@ describe('daemon mergeTaskBranchPR dispatch', () => {
     const updateTaskSync = vi.fn();
     const moveTask = vi.fn();
     const mergePR = vi.fn().mockResolvedValue(undefined);
-    const reconcileTaskCompletion = vi.fn();
 
     // Act
     const response = await dispatch(
@@ -1012,7 +903,6 @@ describe('daemon mergeTaskBranchPR dispatch', () => {
           ),
         },
         github: { mergePR },
-        missions: { reconcileTaskCompletion },
         sync: { trigger: vi.fn().mockResolvedValue(undefined) },
         view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [task] }) },
       } as never,
@@ -1029,7 +919,6 @@ describe('daemon mergeTaskBranchPR dispatch', () => {
     // The card still has two open pull requests, so it is not done.
     expect(moveTask).not.toHaveBeenCalled();
     expect(updateTaskSync).not.toHaveBeenCalled();
-    expect(reconcileTaskCompletion).not.toHaveBeenCalled();
   });
 
   it('reads the merge guards from the branch, not the card rollup', async () => {
@@ -1197,7 +1086,6 @@ describe('legacy card-scoped PR shims', () => {
     // Arrange
     const updateTaskBranchSync = vi.fn();
     const moveTask = vi.fn();
-    const reconcileTaskCompletion = vi.fn();
     const mergePR = vi.fn().mockResolvedValue(undefined);
 
     // Act
@@ -1219,7 +1107,6 @@ describe('legacy card-scoped PR shims', () => {
           ),
         },
         github: { mergePR },
-        missions: { reconcileTaskCompletion },
         sync: { trigger: vi.fn().mockResolvedValue(undefined) },
         view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [] }) },
       } as never,
@@ -1234,7 +1121,6 @@ describe('legacy card-scoped PR shims', () => {
       prDraft: false,
     });
     expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
-    expect(reconcileTaskCompletion).toHaveBeenCalledWith('task-1');
   });
 
   it('mergeTaskPR merges the only PR on a card whose other branches carry none', async () => {
@@ -1267,7 +1153,6 @@ describe('legacy card-scoped PR shims', () => {
           getRepo: vi.fn().mockReturnValue(makeRepo({ githubOwner: 'org', githubRepo: 'proj' })),
         },
         github: { mergePR },
-        missions: { reconcileTaskCompletion: vi.fn() },
         sync: { trigger: vi.fn().mockResolvedValue(undefined) },
         view: { getBoardSnapshot: vi.fn().mockReturnValue({ tasks: [] }) },
       } as never,

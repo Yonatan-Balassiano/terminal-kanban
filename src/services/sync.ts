@@ -11,7 +11,6 @@ import { allBranchesResolved } from './task-branches.js';
 import { GitHubServiceError, type GitHubService, type PRInfo } from './github.js';
 import { GitService } from './git.js';
 import { TransportRegistry } from './transport/index.js';
-import type { MissionService } from './missions.js';
 
 function buildAutoPRTitle(taskId: string, taskTitle: string): string {
   return `[auto|${taskId}] ${taskTitle}`;
@@ -101,7 +100,6 @@ function normalizeBaseBranch(value: string | null | undefined): string | undefin
 
 export class SyncService {
   private board: BoardService;
-  private missions?: Pick<MissionService, 'reconcileTaskCompletion'>;
   onTaskMergedOrClosed?: (taskId: string) => Promise<void>;
   /**
    * Whether every merged pull request on a card has actually reached production.
@@ -133,31 +131,16 @@ export class SyncService {
 
   constructor(
     board: BoardService,
-    missionsOrGithub: MissionService | GitHubService,
-    githubOrGit: GitHubService | GitService,
-    gitOrDb: GitService | Db,
-    dbOrWait?: Db | typeof sleep,
-    maybeWait = sleep,
+    github: GitHubService,
+    git: GitService,
+    db: Db,
+    wait: typeof sleep = sleep,
   ) {
     this.board = board;
-
-    if (this.isMissionService(missionsOrGithub)) {
-      this.missions = missionsOrGithub;
-      this.github = githubOrGit as GitHubService;
-      this.git = gitOrDb as GitService;
-      this.db = dbOrWait as Db;
-      this.wait = maybeWait;
-      return;
-    }
-
-    this.github = missionsOrGithub as GitHubService;
-    this.git = githubOrGit as GitService;
-    this.db = gitOrDb as Db;
-    this.wait = (dbOrWait as typeof sleep | undefined) ?? sleep;
-  }
-
-  private isMissionService(value: MissionService | GitHubService): value is MissionService {
-    return typeof (value as MissionService).reconcileTaskCompletion === 'function';
+    this.github = github;
+    this.git = git;
+    this.db = db;
+    this.wait = wait;
   }
 
   start(intervalMs: number, activeIntervalMs = 15_000): void {
@@ -647,14 +630,10 @@ export class SyncService {
       return 0;
     }
 
-    // Everything has landed. Downstream cards are unblocked now — they were
-    // waiting on the code, not on the rollout.
-    const releasedTaskIds = this.missions?.reconcileTaskCompletion(taskId) ?? [];
-
     const released = this.isFullyReleased?.(taskId) ?? true;
     const nextTrack = released ? 'done' : 'shipping';
     if (task.trackId === nextTrack) {
-      return releasedTaskIds.length;
+      return 0;
     }
 
     this.board.moveTask({ id: taskId, trackId: nextTrack });
@@ -666,7 +645,7 @@ export class SyncService {
       void this.onTaskMergedOrClosed?.(taskId);
     }
 
-    return 1 + releasedTaskIds.length;
+    return 1;
   }
 
   /** Reconciles one branch: its git state, its pull request, its checks. */

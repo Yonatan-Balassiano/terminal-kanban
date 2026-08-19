@@ -10,13 +10,11 @@ import type {
   ChatTurnParams,
   ChatTurnResult,
   FilterModel,
-  MissionSnapshot,
   RepoRecord,
   TaskRecord,
   TrackRecord,
 } from '../types/index.js';
 import type { BoardService } from './board.js';
-import type { MissionService } from './missions.js';
 import type { WorkspaceService } from './workspace.js';
 import type { WorktreeService } from './worktree.js';
 import type { SessionManager } from './session-manager.js';
@@ -47,19 +45,6 @@ const createTaskArgsSchema = z.object({
   track: optionalToolString,
   /** A general task belongs to no repo: just a title and an agent session. */
   general: z.boolean().optional(),
-});
-
-const createMissionArgsSchema = z.object({
-  title: toolString,
-});
-
-const addMissionTaskArgsSchema = z.object({
-  mission: toolString,
-  title: toolString,
-  repo: optionalToolString,
-  pillar: optionalToolString,
-  agentCli: z.enum(['claude', 'codex']).optional(),
-  blockers: z.array(z.string().trim().min(1)).optional(),
 });
 
 const moveTaskArgsSchema = z.object({
@@ -94,11 +79,6 @@ const findTasksArgsSchema = z.object({
   limit: optionalPositiveInt,
 });
 
-const findMissionsArgsSchema = z.object({
-  query: optionalToolString,
-  limit: optionalPositiveInt,
-});
-
 const getRecentTerminalOutputArgsSchema = z.object({
   task: optionalToolString,
   lineCount: optionalPositiveInt,
@@ -110,7 +90,6 @@ const requiredTaskRefArgsSchema = z.object({
 
 interface AIChatServiceDeps {
   board: BoardService;
-  missions: MissionService;
   workspace: WorkspaceService;
   worktrees: WorktreeService;
   session: Pick<SessionManager, 'openSession' | 'inspectSessionState' | 'getBuffer'>;
@@ -330,25 +309,16 @@ export class AIChatService {
       snapshot.repos.map((repo) => this.describeRepoForPrompt(repo)).join('; ') ||
       'none';
     const boardTaskLines = this.describeBoardTasksForPrompt(snapshot);
-    const missionLines = this.describeMissionsForPrompt(snapshot);
     const pillarNames = snapshot.pillars.map((pillar) => pillar.label).join(', ') || 'none';
     const trackNames = snapshot.tracks.map((track) => track.label).join(', ') || 'none';
     const currentRepo = this.resolveCurrentRepo(context, snapshot);
     const defaultRepo = currentRepo ?? (snapshot.repos.length === 1 ? snapshot.repos[0] : null);
     const defaultPillar = defaultRepo ? this.defaultPillarForRepo(defaultRepo, snapshot) : null;
-    const selectedTaskRef = context.selectedTaskId ?? context.selectedMissionTaskId;
+    const selectedTaskRef = context.selectedTaskId;
     const selectedTask = selectedTaskRef ? this.findTaskById(selectedTaskRef, snapshot) : null;
     const activeTask = context.activeTaskId
       ? this.findTaskById(context.activeTaskId, snapshot)
       : null;
-    const selectedMissionContext = context.selectedMissionTaskId
-      ? this.missionTaskContextForTask(context.selectedMissionTaskId, snapshot)
-      : selectedTask
-        ? this.missionTaskContextForTask(selectedTask.id, snapshot)
-        : null;
-    const selectedMission = context.selectedMissionId
-      ? snapshot.missions.find((mission) => mission.id === context.selectedMissionId) ?? selectedMissionContext?.mission ?? null
-      : selectedMissionContext?.mission ?? null;
 
     const parts = [
       this.deps.config.systemPrompt?.trim() ?? '',
@@ -360,12 +330,9 @@ export class AIChatService {
       `Pillars: ${pillarNames}.`,
       `Tracks: ${trackNames}.`,
       `Board tasks:\n${boardTaskLines.length > 0 ? boardTaskLines.map((line) => `- ${line}`).join('\n') : '- none'}`,
-      `Missions:\n${missionLines.length > 0 ? missionLines.map((line) => `- ${line}`).join('\n') : '- none'}`,
       `Selected task: ${selectedTask?.title ?? selectedTaskRef ?? 'none'}.`,
       `Selected task context: ${selectedTask ? this.describeSelectedTaskContextForPrompt(selectedTask.id, snapshot) : 'none'}.`,
       `Active task: ${activeTask?.title ?? context.activeTaskId ?? 'none'}.`,
-      `Selected mission: ${selectedMission?.title ?? context.selectedMissionId ?? 'none'}.`,
-      `Selected mission task: ${selectedMissionContext?.missionTask.task.title ?? context.selectedMissionTaskId ?? 'none'}.`,
     ];
 
     if (context.filters) {
@@ -377,7 +344,7 @@ export class AIChatService {
 
   private initialContextMessage(context: ChatContext, snapshot: BoardSnapshot): string {
     return [
-      'Structured runtime context for this AI chat conversation. Use it as ground truth before asking repo, task, or mission follow-up questions.',
+      'Structured runtime context for this AI chat conversation. Use it as ground truth before asking repo or task follow-up questions.',
       JSON.stringify(this.buildCurrentContextPayload({ context, snapshot })),
     ].join('\n');
   }
@@ -443,19 +410,6 @@ export class AIChatService {
         handler: async (args, ctx) => this.findTasks(args, ctx),
       },
       {
-        name: 'find_missions',
-        description: 'Find missions by title.',
-        parameters: {
-          type: 'object',
-          properties: {
-            query: { type: 'string' },
-            limit: { type: 'integer', minimum: 1 },
-          },
-        },
-        schema: findMissionsArgsSchema,
-        handler: async (args, ctx) => this.findMissions(args, ctx),
-      },
-      {
         name: 'get_task_session_state',
         description: 'Inspect the selected or named task session activity.',
         parameters: {
@@ -499,37 +453,6 @@ export class AIChatService {
         },
         schema: createTaskArgsSchema,
         handler: async (args, ctx) => this.createTask(args, ctx),
-      },
-      {
-        name: 'create_mission',
-        description: 'Create a new mission.',
-        parameters: {
-          type: 'object',
-          properties: {
-            title: { type: 'string' },
-          },
-          required: ['title'],
-        },
-        schema: createMissionArgsSchema,
-        handler: async (args, ctx) => this.createMission(args, ctx),
-      },
-      {
-        name: 'add_mission_task',
-        description: 'Add a task to a mission, optionally blocked by other mission tasks.',
-        parameters: {
-          type: 'object',
-          properties: {
-            mission: { type: 'string' },
-            title: { type: 'string' },
-            repo: { type: 'string' },
-            pillar: { type: 'string' },
-            agentCli: { type: 'string', enum: ['claude', 'codex'] },
-            blockers: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['mission', 'title'],
-        },
-        schema: addMissionTaskArgsSchema,
-        handler: async (args, ctx) => this.addMissionTask(args, ctx),
       },
       {
         name: 'move_task',
@@ -685,21 +608,13 @@ export class AIChatService {
   }
 
   private buildCurrentContextPayload(ctx: ToolContext): Record<string, unknown> {
-    const selectedTaskRef = ctx.context.selectedTaskId ?? ctx.context.selectedMissionTaskId;
+    const selectedTaskRef = ctx.context.selectedTaskId;
     const selectedTask = selectedTaskRef
       ? this.findTaskById(selectedTaskRef, ctx.snapshot)
       : null;
     const activeTask = ctx.context.activeTaskId
       ? this.findTaskById(ctx.context.activeTaskId, ctx.snapshot)
       : null;
-    const selectedMissionTask = ctx.context.selectedMissionTaskId
-      ? this.missionTaskContextForTask(ctx.context.selectedMissionTaskId, ctx.snapshot)
-      : selectedTask
-        ? this.missionTaskContextForTask(selectedTask.id, ctx.snapshot)
-        : null;
-    const selectedMission = ctx.context.selectedMissionId
-      ? ctx.snapshot.missions.find((mission) => mission.id === ctx.context.selectedMissionId) ?? selectedMissionTask?.mission ?? null
-      : selectedMissionTask?.mission ?? null;
     const currentRepo = this.resolveCurrentRepo(ctx.context, ctx.snapshot);
     const defaultRepo = currentRepo ?? (ctx.snapshot.repos.length === 1 ? ctx.snapshot.repos[0] : null);
     const defaultPillar = defaultRepo ? this.defaultPillarForRepo(defaultRepo, ctx.snapshot) : null;
@@ -712,11 +627,6 @@ export class AIChatService {
     const selectedTaskPillar = selectedTask?.pillarId
       ? ctx.snapshot.pillars.find((candidate) => candidate.id === selectedTask.pillarId) ?? null
       : null;
-    const selectedTaskMissionTitles = selectedTask
-      ? ctx.snapshot.missions
-          .filter((mission) => mission.tasks.some((missionTask) => missionTask.taskId === selectedTask.id))
-          .map((mission) => mission.title)
-      : [];
 
     return {
       currentRepo: currentRepo
@@ -756,20 +666,6 @@ export class AIChatService {
             pillarId: selectedTask.pillarId ?? null,
             pillarLabel: selectedTaskPillar?.label ?? null,
             agentCli: selectedTask.agentCli,
-            missionTitles: selectedTaskMissionTitles,
-            mission: selectedMissionTask
-              ? {
-                  id: selectedMissionTask.mission.id,
-                  title: selectedMissionTask.mission.title,
-                  status: selectedMissionTask.missionTask.status,
-                  isBlocked: selectedMissionTask.missionTask.isBlocked,
-                  releasedToBoard: selectedMissionTask.missionTask.releasedToBoard,
-                  blockerTaskIds: selectedMissionTask.missionTask.blockerTaskIds,
-                  blockerTaskTitles: selectedMissionTask.blockerTitles,
-                  blockedTaskIds: selectedMissionTask.missionTask.blockedTaskIds,
-                  blockedTaskTitles: selectedMissionTask.blockedTaskTitles,
-                }
-              : null,
           }
         : null,
       activeTask: activeTask
@@ -778,27 +674,6 @@ export class AIChatService {
             title: activeTask.title,
             trackId: activeTask.trackId,
             branchName: activeTask.branchName ?? null,
-          }
-        : null,
-      selectedMission: selectedMission
-        ? {
-            id: selectedMission.id,
-            title: selectedMission.title,
-          }
-        : null,
-      selectedMissionTask: selectedMissionTask
-        ? {
-            missionId: selectedMissionTask.mission.id,
-            missionTitle: selectedMissionTask.mission.title,
-            taskId: selectedMissionTask.missionTask.taskId,
-            title: selectedMissionTask.missionTask.task.title,
-            status: selectedMissionTask.missionTask.status,
-            isBlocked: selectedMissionTask.missionTask.isBlocked,
-            releasedToBoard: selectedMissionTask.missionTask.releasedToBoard,
-            blockerTaskIds: selectedMissionTask.missionTask.blockerTaskIds,
-            blockerTaskTitles: selectedMissionTask.blockerTitles,
-            blockedTaskIds: selectedMissionTask.missionTask.blockedTaskIds,
-            blockedTaskTitles: selectedMissionTask.blockedTaskTitles,
           }
         : null,
       repos: ctx.snapshot.repos.map((repo) => ({
@@ -815,9 +690,6 @@ export class AIChatService {
         const pillar = task.pillarId
           ? ctx.snapshot.pillars.find((candidate) => candidate.id === task.pillarId)
           : null;
-        const missionTitles = ctx.snapshot.missions
-          .filter((mission) => mission.tasks.some((missionTask) => missionTask.taskId === task.id))
-          .map((mission) => mission.title);
 
         return {
           id: task.id,
@@ -829,40 +701,10 @@ export class AIChatService {
           pillarId: task.pillarId ?? null,
           pillarLabel: pillar?.label ?? null,
           agentCli: task.agentCli,
-          missionTitles,
           prState: task.prState,
           ciState: task.ciState,
         };
       }),
-      missions: ctx.snapshot.missions.map((mission) => ({
-        id: mission.id,
-        title: mission.title,
-        counts: mission.counts,
-        tasks: mission.tasks.map((missionTask) => {
-          const repo = ctx.snapshot.repos.find((candidate) => candidate.id === missionTask.task.repoId);
-          const track = ctx.snapshot.tracks.find((candidate) => candidate.id === missionTask.task.trackId);
-          const blockerTaskTitles = missionTask.blockerTaskIds.map(
-            (taskId) => this.findTaskById(taskId, ctx.snapshot)?.title ?? taskId,
-          );
-          const blockedTaskTitles = missionTask.blockedTaskIds.map(
-            (taskId) => this.findTaskById(taskId, ctx.snapshot)?.title ?? taskId,
-          );
-
-          return {
-            id: missionTask.taskId,
-            title: missionTask.task.title,
-            status: missionTask.status,
-            isBlocked: missionTask.isBlocked,
-            releasedToBoard: missionTask.releasedToBoard,
-            blockerTaskIds: missionTask.blockerTaskIds,
-            blockerTaskTitles,
-            blockedTaskIds: missionTask.blockedTaskIds,
-            blockedTaskTitles,
-            repoLabel: repo?.label ?? null,
-            trackLabel: track?.label ?? null,
-          };
-        }),
-      })),
       pillars: ctx.snapshot.pillars.map((pillar) => ({
         id: pillar.id,
         label: pillar.label,
@@ -925,32 +767,6 @@ export class AIChatService {
     return {
       summary: limited.length === 0 ? 'No matching tasks found.' : `Found ${limited.length} matching task(s).`,
       payload: { tasks: limited },
-      snapshot: ctx.snapshot,
-    };
-  }
-
-  private async findMissions(
-    args: z.infer<typeof findMissionsArgsSchema>,
-    ctx: ToolContext,
-  ): Promise<ToolOutcome> {
-    const missions = ctx.snapshot.missions.filter((mission) => {
-      if (!args.query) {
-        return true;
-      }
-      return normalizeRef(mission.title).includes(normalizeRef(args.query));
-    });
-
-    const limited = missions.slice(0, Math.min(args.limit ?? 8, 20)).map((mission) => ({
-      id: mission.id,
-      title: mission.title,
-      taskCount: mission.tasks.length,
-      counts: mission.counts,
-    }));
-
-    return {
-      summary:
-        limited.length === 0 ? 'No matching missions found.' : `Found ${limited.length} mission(s).`,
-      payload: { missions: limited },
       snapshot: ctx.snapshot,
     };
   }
@@ -1036,62 +852,6 @@ export class AIChatService {
           pillarId: task.pillarId ?? null,
           trackId: task.trackId,
           agentCli: task.agentCli,
-        },
-      },
-      snapshot,
-    };
-  }
-
-  private async createMission(
-    args: z.infer<typeof createMissionArgsSchema>,
-    ctx: ToolContext,
-  ): Promise<ToolOutcome> {
-    const mission = this.deps.missions.createMission({ title: args.title });
-    const snapshot = this.deps.view.getBoardSnapshot();
-
-    return {
-      summary: `Created mission ${mission.title}.`,
-      payload: {
-        mission: {
-          id: mission.id,
-          title: mission.title,
-        },
-      },
-      snapshot,
-    };
-  }
-
-  private async addMissionTask(
-    args: z.infer<typeof addMissionTaskArgsSchema>,
-    ctx: ToolContext,
-  ): Promise<ToolOutcome> {
-    const mission = this.resolveMissionRef(args.mission, ctx.context, ctx.snapshot);
-    const repo = this.resolveRepoRef(args.repo, ctx.context, ctx.snapshot);
-    const pillar = args.pillar
-      ? this.resolvePillarRef(args.pillar, ctx.snapshot)
-      : this.defaultPillarForRepo(repo, ctx.snapshot);
-    const blockerTaskIds =
-      args.blockers?.map((blocker) => this.resolveMissionTaskRef(blocker, mission).taskId) ?? [];
-
-    const missionTask = this.deps.missions.addMissionTask({
-      missionId: mission.id,
-      title: args.title,
-      repoId: repo.id,
-      pillarId: pillar?.id,
-      agentCli: (args.agentCli ?? 'claude') as AgentCLI,
-      blockerTaskIds,
-    });
-    const snapshot = this.deps.view.getBoardSnapshot();
-
-    return {
-      summary: `Added task ${missionTask.task.title} to mission ${mission.title}.`,
-      payload: {
-        missionTask: {
-          missionId: missionTask.missionId,
-          taskId: missionTask.taskId,
-          title: missionTask.task.title,
-          releasedToBoard: missionTask.releasedToBoard,
-          blockerTaskIds: missionTask.blockerTaskIds,
         },
       },
       snapshot,
@@ -1274,7 +1034,6 @@ export class AIChatService {
     if (task.trackId !== 'done') {
       this.deps.board.moveTask({ id: task.id, trackId: 'done' });
     }
-    this.deps.missions.reconcileTaskCompletion(task.id);
     void this.deps.sync.trigger().catch(() => {});
 
     return {
@@ -1290,7 +1049,7 @@ export class AIChatService {
     };
   }
 
-  private async triggerSync(ctx: ToolContext): Promise<ToolOutcome> {
+  private async triggerSync(_ctx: ToolContext): Promise<ToolOutcome> {
     const result = await this.deps.sync.trigger();
     const snapshot = this.deps.view.getBoardSnapshot();
     return {
@@ -1528,43 +1287,14 @@ export class AIChatService {
   }
 
   private describeBoardTasksForPrompt(snapshot: BoardSnapshot): string[] {
-    const missionTitlesByTaskId = new Map<string, string[]>();
-    for (const mission of snapshot.missions) {
-      for (const missionTask of mission.tasks) {
-        const titles = missionTitlesByTaskId.get(missionTask.taskId) ?? [];
-        titles.push(mission.title);
-        missionTitlesByTaskId.set(missionTask.taskId, titles);
-      }
-    }
-
     return this.allTasks(snapshot).map((task) => {
       const repo = snapshot.repos.find((candidate) => candidate.id === task.repoId);
       const track = snapshot.tracks.find((candidate) => candidate.id === task.trackId);
       const pillar = task.pillarId
         ? snapshot.pillars.find((candidate) => candidate.id === task.pillarId)
         : null;
-      const missionTitles = missionTitlesByTaskId.get(task.id) ?? [];
 
-      return `${task.title} [id=${task.id}, repo=${repo?.label ?? task.repoId}, track=${track?.label ?? task.trackId}, pillar=${pillar?.label ?? 'none'}, agent=${task.agentCli}, mission=${missionTitles.length > 0 ? missionTitles.join('|') : 'none'}, pr=${task.prState}, ci=${task.ciState}]`;
-    });
-  }
-
-  private describeMissionsForPrompt(snapshot: BoardSnapshot): string[] {
-    return snapshot.missions.map((mission) => {
-      const taskSummary = mission.tasks.map((missionTask) => {
-        const repo = snapshot.repos.find((candidate) => candidate.id === missionTask.task.repoId);
-        const track = snapshot.tracks.find((candidate) => candidate.id === missionTask.task.trackId);
-        const blockerTitles = missionTask.blockerTaskIds.map(
-          (taskId) => this.findTaskById(taskId, snapshot)?.title ?? taskId,
-        );
-        const blockedTaskTitles = missionTask.blockedTaskIds.map(
-          (taskId) => this.findTaskById(taskId, snapshot)?.title ?? taskId,
-        );
-
-        return `${missionTask.task.title}{status=${missionTask.status}, blocked=${missionTask.isBlocked ? 'yes' : 'no'}, released=${missionTask.releasedToBoard ? 'yes' : 'no'}, repo=${repo?.label ?? missionTask.task.repoId}, track=${track?.label ?? missionTask.task.trackId}, blockers=${blockerTitles.length > 0 ? blockerTitles.join('|') : 'none'}, blocks=${blockedTaskTitles.length > 0 ? blockedTaskTitles.join('|') : 'none'}}`;
-      });
-
-      return `${mission.title} [id=${mission.id}, backlog=${mission.counts.backlog}, inProgress=${mission.counts.inProgress}, pr=${mission.counts.pr}, merged=${mission.counts.merged}] tasks: ${taskSummary.length > 0 ? taskSummary.join('; ') : 'none'}`;
+      return `${task.title} [id=${task.id}, repo=${repo?.label ?? task.repoId}, track=${track?.label ?? task.trackId}, pillar=${pillar?.label ?? 'none'}, agent=${task.agentCli}, pr=${task.prState}, ci=${task.ciState}]`;
     });
   }
 
@@ -1592,69 +1322,12 @@ export class AIChatService {
     return resolveOne(ref, tasks, (task) => [task.id, task.title], 'task');
   }
 
-  private resolveMissionRef(
-    ref: string,
-    context: ChatContext,
-    snapshot: BoardSnapshot,
-  ): MissionSnapshot {
-    if (!ref && context.selectedMissionId) {
-      const selectedMission = snapshot.missions.find((mission) => mission.id === context.selectedMissionId);
-      if (selectedMission) {
-        return selectedMission;
-      }
-    }
-    return resolveOne(ref, snapshot.missions, (mission) => [mission.id, mission.title], 'mission');
-  }
-
-  private resolveMissionTaskRef(ref: string, mission: MissionSnapshot) {
-    return resolveOne(
-      ref,
-      mission.tasks,
-      (missionTask) => [missionTask.taskId, missionTask.task.title],
-      'mission task',
-    );
-  }
-
   private allTasks(snapshot: BoardSnapshot): TaskRecord[] {
-    const byId = new Map<string, TaskRecord>();
-    for (const task of snapshot.tasks) {
-      byId.set(task.id, task);
-    }
-    for (const mission of snapshot.missions) {
-      for (const missionTask of mission.tasks) {
-        if (!byId.has(missionTask.taskId)) {
-          byId.set(missionTask.taskId, missionTask.task);
-        }
-      }
-    }
-    return Array.from(byId.values());
+    return snapshot.tasks;
   }
 
   private findTaskById(taskId: string, snapshot: BoardSnapshot): TaskRecord | null {
     return this.allTasks(snapshot).find((task) => task.id === taskId) ?? null;
-  }
-
-  private missionTaskContextForTask(taskId: string, snapshot: BoardSnapshot) {
-    for (const mission of snapshot.missions) {
-      for (const missionTask of mission.tasks) {
-        if (missionTask.taskId !== taskId) {
-          continue;
-        }
-
-        return {
-          mission,
-          missionTask,
-          blockerTitles: missionTask.blockerTaskIds.map(
-            (blockerTaskId) => this.findTaskById(blockerTaskId, snapshot)?.title ?? blockerTaskId,
-          ),
-          blockedTaskTitles: missionTask.blockedTaskIds.map(
-            (blockedTaskId) => this.findTaskById(blockedTaskId, snapshot)?.title ?? blockedTaskId,
-          ),
-        };
-      }
-    }
-
-    return null;
   }
 
   private describeSelectedTaskContextForPrompt(taskId: string, snapshot: BoardSnapshot): string {
@@ -1668,29 +1341,12 @@ export class AIChatService {
     const pillar = task.pillarId
       ? snapshot.pillars.find((candidate) => candidate.id === task.pillarId)
       : null;
-    const missionTaskContext = this.missionTaskContextForTask(task.id, snapshot);
-    const parts = [
+
+    return [
       `repo=${repo?.label ?? task.repoId}`,
       `track=${track?.label ?? task.trackId}`,
       `pillar=${pillar?.label ?? 'none'}`,
-    ];
-
-    if (!missionTaskContext) {
-      parts.push('mission=none');
-      return parts.join(', ');
-    }
-
-    parts.push(`mission=${missionTaskContext.mission.title}`);
-    parts.push(`missionStatus=${missionTaskContext.missionTask.status}`);
-    parts.push(`released=${missionTaskContext.missionTask.releasedToBoard ? 'yes' : 'no'}`);
-    parts.push(`blocked=${missionTaskContext.missionTask.isBlocked ? 'yes' : 'no'}`);
-    parts.push(
-      `blockedBy=${missionTaskContext.blockerTitles.length > 0 ? missionTaskContext.blockerTitles.join('|') : 'none'}`,
-    );
-    parts.push(
-      `blocks=${missionTaskContext.blockedTaskTitles.length > 0 ? missionTaskContext.blockedTaskTitles.join('|') : 'none'}`,
-    );
-    return parts.join(', ');
+    ].join(', ');
   }
 }
 

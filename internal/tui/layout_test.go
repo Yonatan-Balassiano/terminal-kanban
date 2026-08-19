@@ -20,7 +20,7 @@ func TestBoardRenderWidthMatchesRenderedTrackColumns(t *testing.T) {
 	}
 
 	got := model.boardRenderWidth()
-	want := missionRailCollapsedWidth + (4 * trackColumnRenderWidth)
+	want := 4 * trackColumnRenderWidth
 	if got != want {
 		t.Fatalf("boardRenderWidth() = %d, want %d", got, want)
 	}
@@ -28,7 +28,7 @@ func TestBoardRenderWidthMatchesRenderedTrackColumns(t *testing.T) {
 
 func TestTerminalContentWidthUsesMinimumWhenBoardCanCollapse(t *testing.T) {
 	model := &Model{
-		width:               180,
+		width:               170,
 		terminalPaneVisible: true,
 		activeTaskID:        "task-1",
 		tracks: []TrackRecord{
@@ -82,7 +82,7 @@ func TestRenderBoardCollapsesDoneTrackWhenPaneIsNarrow(t *testing.T) {
 		},
 	}
 
-	boardWidth := missionRailCollapsedWidth + (3 * trackColumnRenderWidth) + collapsedTrackRenderWidth
+	boardWidth := (3 * trackColumnRenderWidth) + collapsedTrackRenderWidth
 	plain := ansiPattern.ReplaceAllString(renderBoard(model, 12, boardWidth), "")
 	if !strings.Contains(plain, "hidden") {
 		t.Fatalf("renderBoard() = %q, want collapsed marker", plain)
@@ -116,7 +116,7 @@ func TestRenderBoardKeepsSelectedColumnVisibleAcrossWidths(t *testing.T) {
 		},
 	}
 
-	wideWidth := missionRailCollapsedWidth + len(model.tracks)*trackColumnRenderWidth
+	wideWidth := len(model.tracks) * trackColumnRenderWidth
 	wide := renderBoard(model, 14, wideWidth)
 	assertRenderedLinesWithinWidth(t, wide, wideWidth)
 	for _, want := range []string{"Backlog task", "Progress task", "Review task", "Verify selected", "Done task"} {
@@ -125,7 +125,7 @@ func TestRenderBoardKeepsSelectedColumnVisibleAcrossWidths(t *testing.T) {
 		}
 	}
 
-	mediumWidth := missionRailCollapsedWidth + 2*trackColumnRenderWidth
+	mediumWidth := 2 * trackColumnRenderWidth
 	medium := renderBoard(model, 14, mediumWidth)
 	assertRenderedLinesWithinWidth(t, medium, mediumWidth)
 	if !strings.Contains(stripANSI(medium), "Verify selected") {
@@ -139,9 +139,6 @@ func TestRenderBoardKeepsSelectedColumnVisibleAcrossWidths(t *testing.T) {
 	if !strings.Contains(plainNarrow, "Verify selected") {
 		t.Fatalf("narrow render = %q, want selected task visible", plainNarrow)
 	}
-	if strings.Contains(plainNarrow, "MISS") {
-		t.Fatalf("narrow render = %q, want mission rail hidden", plainNarrow)
-	}
 }
 
 func assertRenderedLinesWithinWidth(t *testing.T, value string, width int) {
@@ -150,99 +147,6 @@ func assertRenderedLinesWithinWidth(t *testing.T, value string, width int) {
 		if got := plainWidth(line); got > width {
 			t.Fatalf("rendered line width = %d, want <= %d: %q", got, width, stripANSI(line))
 		}
-	}
-}
-
-func TestRenderMissionRailExpandedShowsTaskStates(t *testing.T) {
-	model := &Model{
-		height:                   20,
-		focus:                    FocusMissions,
-		missionsPaneExpanded:     true,
-		selectedMissionIndex:     0,
-		selectedMissionTaskIndex: 0,
-		missions: []MissionSnapshot{
-			{
-				ID:    "mission-1",
-				Title: "Cross-repo rollout",
-				Counts: MissionStatusCounts{
-					Backlog:    1,
-					InProgress: 0,
-					PR:         0,
-					Merged:     1,
-				},
-				Tasks: []MissionTaskRecord{
-					{
-						MissionID:       "mission-1",
-						TaskID:          "task-1",
-						ReleasedToBoard: false,
-						Status:          "backlog",
-						Task:            TaskRecord{ID: "task-1", Title: "Prepare follow-up"},
-					},
-					{
-						MissionID:       "mission-1",
-						TaskID:          "task-2",
-						ReleasedToBoard: true,
-						Status:          "merged",
-						Task:            TaskRecord{ID: "task-2", Title: "Land base PR"},
-					},
-				},
-			},
-		},
-	}
-
-	plain := ansiPattern.ReplaceAllString(renderMissionRail(model, 10), "")
-	if !strings.Contains(plain, "Cross-repo rollout") {
-		t.Fatalf("renderMissionRail() = %q, want mission title", plain)
-	}
-	if !strings.Contains(plain, "hold") {
-		t.Fatalf("renderMissionRail() = %q, want unreleased marker", plain)
-	}
-	if !strings.Contains(plain, "done") {
-		t.Fatalf("renderMissionRail() = %q, want done marker", plain)
-	}
-}
-
-func TestRenderMissionRailExpandedShowsEmptyMissionPlaceholder(t *testing.T) {
-	model := &Model{
-		height:                   20,
-		focus:                    FocusMissions,
-		missionsPaneExpanded:     true,
-		selectedMissionIndex:     0,
-		selectedMissionTaskIndex: missionSummaryRowTaskIndex,
-		missions: []MissionSnapshot{
-			{
-				ID:    "mission-1",
-				Title: "Empty mission",
-			},
-		},
-	}
-
-	plain := ansiPattern.ReplaceAllString(renderMissionRail(model, 10), "")
-	if !strings.Contains(plain, "Empty mission") {
-		t.Fatalf("renderMissionRail() = %q, want mission title", plain)
-	}
-	if !strings.Contains(plain, "No tasks yet") {
-		t.Fatalf("renderMissionRail() = %q, want empty placeholder", plain)
-	}
-	if !strings.Contains(plain, "n add") {
-		t.Fatalf("renderMissionRail() = %q, want add hint", plain)
-	}
-}
-
-func TestHandleKeyUTogglesMissionRail(t *testing.T) {
-	model := &Model{
-		focus: FocusBoard,
-	}
-
-	cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
-	if !model.missionsPaneExpanded {
-		t.Fatal("missionsPaneExpanded = false, want true")
-	}
-	if model.focus != FocusMissions {
-		t.Fatalf("focus = %q, want %q", model.focus, FocusMissions)
-	}
-	if cmd == nil {
-		t.Fatal("handleKey(u) returned nil cmd")
 	}
 }
 
@@ -268,65 +172,6 @@ func TestHandleKeyEnterOnActiveTmuxTaskAttachesWithoutOpeningSession(t *testing.
 	msg := cmd()
 	if _, ok := msg.(tmuxPaneAttachedMsg); !ok {
 		t.Fatalf("handleKey(enter) msg = %T, want tmuxPaneAttachedMsg", msg)
-	}
-}
-
-func TestHandleMissionKeyNWithNoMissionsOpensCreateMissionModal(t *testing.T) {
-	model := &Model{
-		focus:                FocusMissions,
-		missionsPaneExpanded: true,
-	}
-
-	cmd := model.handleMissionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	if cmd != nil {
-		t.Fatal("handleMissionKey(n) returned cmd, want nil")
-	}
-	if model.modal != ModalCreateMission {
-		t.Fatalf("modal = %q, want %q", model.modal, ModalCreateMission)
-	}
-	if model.createMissionModal == nil {
-		t.Fatal("createMissionModal = nil, want state")
-	}
-	if model.focus != FocusModal {
-		t.Fatalf("focus = %q, want %q", model.focus, FocusModal)
-	}
-}
-
-func TestBoardActionMsgKeepsMissionPaneOpenAfterMissionCreate(t *testing.T) {
-	model := &Model{
-		focus:                FocusBoard,
-		missionsPaneExpanded: false,
-	}
-
-	board := BoardSnapshot{
-		Missions: []MissionSnapshot{
-			{
-				ID:    "mission-1",
-				Title: "New mission",
-			},
-		},
-		UIState: UIStateRecord{},
-	}
-
-	updatedModel, cmd := model.Update(boardActionMsg{
-		board:            &board,
-		status:           "Created mission.",
-		selectMissionID:  "mission-1",
-		openMissionsPane: true,
-	})
-	if cmd != nil {
-		t.Fatal("Update(boardActionMsg) returned cmd, want nil")
-	}
-
-	next := updatedModel.(*Model)
-	if !next.missionsPaneExpanded {
-		t.Fatal("missionsPaneExpanded = false, want true")
-	}
-	if next.focus != FocusMissions {
-		t.Fatalf("focus = %q, want %q", next.focus, FocusMissions)
-	}
-	if next.selectedMission() == nil || next.selectedMission().ID != "mission-1" {
-		t.Fatalf("selectedMission() = %#v, want mission-1", next.selectedMission())
 	}
 }
 
@@ -369,45 +214,6 @@ func TestTaskCardFitsTrackContentWidth(t *testing.T) {
 
 	if got := lipgloss.Width(card); got != trackColumnStyleWidth {
 		t.Fatalf("task card width = %d, want %d", got, trackColumnStyleWidth)
-	}
-}
-
-func TestRenderTaskCardShowsMissionContext(t *testing.T) {
-	model := &Model{
-		missions: []MissionSnapshot{
-			{
-				ID:    "mission-1",
-				Title: "Cross-repo rollout",
-				Tasks: []MissionTaskRecord{
-					{
-						MissionID:       "mission-1",
-						TaskID:          "task-1",
-						ReleasedToBoard: true,
-						Task:            TaskRecord{ID: "task-1", Title: "Ship follow-up"},
-					},
-				},
-			},
-		},
-	}
-
-	card := renderTaskCard(
-		model,
-		TaskRecord{
-			ID:         "task-1",
-			Title:      "Ship follow-up",
-			RepoID:     "repo-1",
-			BranchName: "feat/ship-follow-up",
-			UpdatedAt:  1,
-		},
-		false,
-		false,
-		nil,
-		"web5.0-poc",
-	)
-
-	plain := ansiPattern.ReplaceAllString(card, "")
-	if !strings.Contains(plain, "Mission: Cross-repo rollout") {
-		t.Fatalf("renderTaskCard() = %q, want mission context", plain)
 	}
 }
 
@@ -1381,21 +1187,6 @@ func TestContentHeightLeavesRoomForBothFooterRows(t *testing.T) {
 
 	if got, want := model.contentHeight(), 40-headerHeight-artifactFooterHeight-statusBarHeight; got != want {
 		t.Fatalf("contentHeight() = %d, want %d", got, want)
-	}
-}
-
-func TestRenderMissionRailKeepsTheSideColumnForMissionsOnly(t *testing.T) {
-	model := artifactFooterTestModel(200, []ArtifactRecord{
-		{ShortName: "ecom-integrations", Status: ArtifactStatusDrift, GAVersion: "1.0.0", LatestRCVersion: "1.1.0"},
-	})
-	model.missions = []MissionSnapshot{{ID: "mission-1", Title: "Cross-repo rollout"}}
-
-	plain := stripANSI(renderMissionRail(model, 12))
-	if !strings.Contains(plain, "MISSIONS") {
-		t.Fatalf("renderMissionRail() = %q, want the mission rail", plain)
-	}
-	if strings.Contains(plain, artifactFooterLabel) {
-		t.Fatalf("renderMissionRail() = %q, want artifacts kept out of the side column", plain)
 	}
 }
 

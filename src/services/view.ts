@@ -5,7 +5,6 @@ import type {
   TaskReleaseSummary,
 } from '../types/index.js';
 import type { BoardService } from './board.js';
-import type { MissionService } from './missions.js';
 import { rowToRepo } from './workspace.js';
 
 export class ViewService {
@@ -19,10 +18,7 @@ export class ViewService {
    */
   releaseSummaryFor?: (taskId: string) => TaskReleaseSummary | null;
 
-  constructor(
-    private board: BoardService,
-    private missions: MissionService,
-  ) {}
+  constructor(private board: BoardService) {}
 
   applyFilter(tasks: TaskRecord[], filter: FilterModel): TaskRecord[] {
     return tasks.filter((task) => {
@@ -88,7 +84,6 @@ export class ViewService {
     const labels = this.board.getLabels();
     const savedViews = this.board.getSavedViews();
     const uiState = this.board.getUIState();
-    const missions = this.missions.listMissions();
 
     // Tasks: already filtered by repoId; apply additional filter if provided
     let tasks = this.board.getTasks({ repoId, includeArchived: filter?.includeArchived });
@@ -135,7 +130,6 @@ export class ViewService {
       labels,
       tracks,
       tasks,
-      missions,
       savedViews,
       uiState,
     };
