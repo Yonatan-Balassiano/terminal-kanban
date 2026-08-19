@@ -15,7 +15,6 @@ type GitState string
 type TerminalLayoutMode string
 type SessionActivityKind string
 type AgentCLI string
-type MissionTaskStatus string
 type ArtifactStatus string
 type ArtifactMode string
 
@@ -73,16 +72,11 @@ const (
 	FocusFilterBar AppFocus = "filterbar"
 	FocusModal     AppFocus = "modal"
 	FocusSearch    AppFocus = "search"
-	FocusMissions  AppFocus = "missions"
 )
 
 const (
 	ModalCreateTask      ModalType = "create-task"
-	ModalCreateMission   ModalType = "create-mission"
-	ModalAddMissionTask  ModalType = "add-mission-task"
 	ModalCommandPalette  ModalType = "command-palette"
-	ModalMissionDeps     ModalType = "mission-dependencies"
-	ModalDeleteMission   ModalType = "delete-mission-confirm"
 	ModalRenameTask      ModalType = "rename-task"
 	ModalTaskDescription ModalType = "task-description"
 	ModalPRComment       ModalType = "pr-comment"
@@ -249,46 +243,6 @@ type TaskReleaseSummary struct {
 	CheckedAt            int64  `json:"checkedAt"`
 }
 
-type MissionRecord struct {
-	ID          string  `json:"id"`
-	Title       string  `json:"title"`
-	SortKey     float64 `json:"sortKey"`
-	CompletedAt *int64  `json:"completedAt"`
-	CreatedAt   int64   `json:"createdAt"`
-	UpdatedAt   int64   `json:"updatedAt"`
-}
-
-type MissionStatusCounts struct {
-	Backlog    int `json:"backlog"`
-	InProgress int `json:"inProgress"`
-	PR         int `json:"pr"`
-	Merged     int `json:"merged"`
-}
-
-type MissionTaskRecord struct {
-	MissionID       string            `json:"missionId"`
-	TaskID          string            `json:"taskId"`
-	SortKey         float64           `json:"sortKey"`
-	ReleasedToBoard bool              `json:"releasedToBoard"`
-	ReleasedAt      *int64            `json:"releasedAt"`
-	BlockerTaskIDs  []string          `json:"blockerTaskIds"`
-	BlockedTaskIDs  []string          `json:"blockedTaskIds"`
-	Status          MissionTaskStatus `json:"status"`
-	IsBlocked       bool              `json:"isBlocked"`
-	Task            TaskRecord        `json:"task"`
-}
-
-type MissionSnapshot struct {
-	ID          string              `json:"id"`
-	Title       string              `json:"title"`
-	SortKey     float64             `json:"sortKey"`
-	CompletedAt *int64              `json:"completedAt"`
-	CreatedAt   int64               `json:"createdAt"`
-	UpdatedAt   int64               `json:"updatedAt"`
-	Counts      MissionStatusCounts `json:"counts"`
-	Tasks       []MissionTaskRecord `json:"tasks"`
-}
-
 type ArtifactRecord struct {
 	Name      string       `json:"name"`
 	ShortName string       `json:"shortName"`
@@ -359,18 +313,15 @@ type SavedViewRecord struct {
 }
 
 type UIStateRecord struct {
-	ActiveRepoID          string             `json:"activeRepoId"`
-	ActiveViewID          string             `json:"activeViewId"`
-	Filters               *FilterModel       `json:"filters"`
-	SelectedTrackID       string             `json:"selectedTrackId"`
-	SelectedTaskID        string             `json:"selectedTaskId"`
-	SelectedMissionID     string             `json:"selectedMissionId"`
-	SelectedMissionTaskID string             `json:"selectedMissionTaskId"`
-	TerminalPaneVisible   *bool              `json:"terminalPaneVisible"`
-	TerminalLayoutMode    TerminalLayoutMode `json:"terminalLayoutMode"`
-	TerminalPaneWidth     *int               `json:"terminalPaneWidth"`
-	MissionsPaneExpanded  *bool              `json:"missionsPaneExpanded"`
-	ThemeMode             ThemeMode          `json:"themeMode"`
+	ActiveRepoID        string             `json:"activeRepoId"`
+	ActiveViewID        string             `json:"activeViewId"`
+	Filters             *FilterModel       `json:"filters"`
+	SelectedTrackID     string             `json:"selectedTrackId"`
+	SelectedTaskID      string             `json:"selectedTaskId"`
+	TerminalPaneVisible *bool              `json:"terminalPaneVisible"`
+	TerminalLayoutMode  TerminalLayoutMode `json:"terminalLayoutMode"`
+	TerminalPaneWidth   *int               `json:"terminalPaneWidth"`
+	ThemeMode           ThemeMode          `json:"themeMode"`
 }
 
 type FilterModel struct {
@@ -391,7 +342,6 @@ type BoardSnapshot struct {
 	Labels     []LabelRecord     `json:"labels"`
 	Tracks     []TrackRecord     `json:"tracks"`
 	Tasks      []TaskRecord      `json:"tasks"`
-	Missions   []MissionSnapshot `json:"missions"`
 	SavedViews []SavedViewRecord `json:"savedViews"`
 	UIState    UIStateRecord     `json:"uiState"`
 }
@@ -443,12 +393,10 @@ type ChatToolExecution struct {
 }
 
 type ChatContext struct {
-	ActiveRepoID          string       `json:"activeRepoId"`
-	SelectedTaskID        string       `json:"selectedTaskId"`
-	SelectedMissionID     string       `json:"selectedMissionId"`
-	SelectedMissionTaskID string       `json:"selectedMissionTaskId"`
-	ActiveTaskID          string       `json:"activeTaskId"`
-	Filters               *FilterModel `json:"filters"`
+	ActiveRepoID   string       `json:"activeRepoId"`
+	SelectedTaskID string       `json:"selectedTaskId"`
+	ActiveTaskID   string       `json:"activeTaskId"`
+	Filters        *FilterModel `json:"filters"`
 }
 
 type ChatTurnResult struct {

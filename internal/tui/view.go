@@ -325,9 +325,6 @@ func renderBoard(m *Model, height int, width int) string {
 	tracks := m.sortedTracks()
 	plan := planBoardRender(m, width, tracks)
 	parts := []string{}
-	if plan.showMissionRail {
-		parts = append(parts, renderMissionRail(m, height))
-	}
 
 	if len(m.repos) == 0 {
 		board := fitHeight(
@@ -369,7 +366,6 @@ func renderBoard(m *Model, height int, width int) string {
 }
 
 type boardRenderPlan struct {
-	showMissionRail   bool
 	compactTracks     bool
 	trackStart        int
 	trackEnd          int
@@ -381,7 +377,6 @@ func planBoardRender(m *Model, width int, tracks []TrackRecord) boardRenderPlan 
 	trackCount := len(tracks)
 	if trackCount == 0 {
 		return boardRenderPlan{
-			showMissionRail:   width >= missionRailCollapsedWidth,
 			trackRenderWidth:  trackColumnRenderWidth,
 			collapsedTrackIDs: map[string]bool{},
 		}
@@ -392,7 +387,6 @@ func planBoardRender(m *Model, width int, tracks []TrackRecord) boardRenderPlan 
 	delete(collapsedTrackIDs, tracks[selectedTrackIndex].ID)
 	if width >= boardRenderWidthWithCollapsed(m, collapsedTrackIDs) {
 		return boardRenderPlan{
-			showMissionRail:   true,
 			trackStart:        0,
 			trackEnd:          trackCount,
 			trackRenderWidth:  trackColumnRenderWidth,
@@ -400,17 +394,7 @@ func planBoardRender(m *Model, width int, tracks []TrackRecord) boardRenderPlan 
 		}
 	}
 
-	railWidth := m.missionRailWidth()
-	showMissionRail := width >= railWidth+trackColumnRenderWidth
 	trackBudget := width
-	if showMissionRail {
-		trackBudget -= railWidth
-	}
-	if trackBudget < 1 {
-		showMissionRail = false
-		trackBudget = width
-	}
-
 	compactTracks := trackBudget < trackColumnRenderWidth
 	trackRenderWidth := trackColumnRenderWidth
 	visibleTrackCount := 1
@@ -423,154 +407,12 @@ func planBoardRender(m *Model, width int, tracks []TrackRecord) boardRenderPlan 
 	trackStart := selectedTrackIndex - visibleTrackCount/2
 	trackStart = clamp(trackStart, 0, max(0, trackCount-visibleTrackCount))
 	return boardRenderPlan{
-		showMissionRail:   showMissionRail,
 		compactTracks:     compactTracks,
 		trackStart:        trackStart,
 		trackEnd:          min(trackCount, trackStart+visibleTrackCount),
 		trackRenderWidth:  trackRenderWidth,
 		collapsedTrackIDs: map[string]bool{},
 	}
-}
-
-func renderMissionRail(m *Model, height int) string {
-	width := m.missionRailWidth()
-	contentWidth := max(1, width-4)
-	header := joinSpaceBetween(
-		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(m.focus == FocusMissions, uiChrome.Accent, uiChrome.Text))).Render("MISSIONS"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(fmt.Sprintf("%d", len(m.missions))),
-		contentWidth,
-	)
-
-	rows := m.missionRows()
-	lines := []string{}
-	if len(rows) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No missions"))
-	} else {
-		selectionIndex := 0
-		for index, row := range rows {
-			if row.MissionIndex == m.selectedMissionIndex && row.TaskIndex == m.selectedMissionTaskIndex {
-				selectionIndex = index
-				break
-			}
-		}
-		itemHeights := make([]int, len(rows))
-		for index := range itemHeights {
-			itemHeights[index] = 1
-		}
-		windowStart, windowEnd := visibleWindow(itemHeights, selectionIndex, max(1, height-3))
-		for _, row := range rows[windowStart:windowEnd] {
-			if row.TaskIndex == missionSummaryRowTaskIndex {
-				lines = append(lines, renderMissionSummaryRow(m, row.MissionIndex, contentWidth))
-				continue
-			}
-			if row.TaskIndex == missionEmptyRowTaskIndex {
-				lines = append(lines, renderMissionEmptyRow(m, row.MissionIndex, contentWidth))
-				continue
-			}
-			lines = append(lines, renderMissionTaskRow(m, row.MissionIndex, row.TaskIndex, contentWidth))
-		}
-	}
-
-	border := lipgloss.NormalBorder()
-	if m.focus == FocusMissions {
-		border = lipgloss.RoundedBorder()
-	}
-
-	return fitHeight(
-		lipgloss.NewStyle().
-			Width(width).
-			Height(height).
-			Border(border).
-			BorderForeground(lipgloss.Color(ternaryString(m.focus == FocusMissions, uiChrome.Accent, uiChrome.Line))).
-			Render(header+"\n"+strings.Join(lines, "\n")),
-		height,
-	)
-}
-
-func renderMissionSummaryRow(m *Model, missionIndex int, width int) string {
-	if missionIndex < 0 || missionIndex >= len(m.missions) {
-		return ""
-	}
-	mission := m.missions[missionIndex]
-	selected := m.focus == FocusMissions && m.selectedMissionIndex == missionIndex && m.selectedMissionTaskIndex == missionSummaryRowTaskIndex
-	prefix := ternaryString(selected, "▸ ", "  ")
-	title := truncateText(mission.Title, max(1, width-12))
-	counts := fmt.Sprintf("%d/%d/%d/%d", mission.Counts.Backlog, mission.Counts.InProgress, mission.Counts.PR, mission.Counts.Merged)
-	row := joinSpaceBetween(prefix+title, counts, width)
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
-	if mission.CompletedAt != nil {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Success))
-	}
-	if selected {
-		style = style.Bold(true).Foreground(lipgloss.Color(uiChrome.Accent))
-	}
-	return style.Render(row)
-}
-
-func renderMissionEmptyRow(m *Model, missionIndex int, width int) string {
-	if missionIndex < 0 || missionIndex >= len(m.missions) {
-		return ""
-	}
-	selected := m.focus == FocusMissions && m.selectedMissionIndex == missionIndex && m.selectedMissionTaskIndex == missionEmptyRowTaskIndex
-	label := "No tasks yet"
-	right := "n add"
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
-	if selected {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent))
-	}
-	return style.Render(joinSpaceBetween("    "+label, right, width))
-}
-
-func renderMissionTaskRow(m *Model, missionIndex, taskIndex, width int) string {
-	if missionIndex < 0 || missionIndex >= len(m.missions) {
-		return ""
-	}
-	mission := m.missions[missionIndex]
-	if taskIndex < 0 || taskIndex >= len(mission.Tasks) {
-		return ""
-	}
-	missionTask := mission.Tasks[taskIndex]
-	selected := m.focus == FocusMissions && m.selectedMissionIndex == missionIndex && m.selectedMissionTaskIndex == taskIndex
-	statusIcon := "○"
-	statusColor := uiChrome.Muted
-	switch missionTask.Status {
-	case "in-progress":
-		statusIcon = "●"
-		statusColor = uiChrome.Accent
-	case "pr":
-		statusIcon = "↗"
-		statusColor = uiChrome.Warning
-	case "merged":
-		statusIcon = "✓"
-		statusColor = uiChrome.Success
-	}
-	if missionTask.IsBlocked && missionTask.Status != "merged" {
-		statusIcon = "×"
-		statusColor = uiChrome.Danger
-	}
-
-	label := truncateText(missionTask.Task.Title, max(1, width-12))
-	right := ""
-	switch {
-	case !missionTask.ReleasedToBoard:
-		right = "hold"
-	case missionTask.IsBlocked && missionTask.Status != "merged":
-		right = "blk"
-	case missionTask.Status == "merged":
-		right = "done"
-	}
-	left := ternaryString(selected, "▸ ", "  ") + statusIcon + " " + label
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor))
-	if missionTask.Status != "merged" {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
-	}
-	if selected {
-		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(uiChrome.Accent))
-	}
-	if missionTask.Status == "merged" {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Success))
-	}
-	return style.Render(joinSpaceBetween(left, right, width))
 }
 
 // The footer is the only always-visible surface for artifact state, so it spans
@@ -902,7 +744,7 @@ func collapsedTrackIDsForBoardWidth(m *Model, width int) map[string]bool {
 }
 
 func boardRenderWidthWithCollapsed(m *Model, collapsed map[string]bool) int {
-	width := m.missionRailWidth()
+	width := 0
 	for _, track := range m.sortedTracks() {
 		if collapsed[track.ID] {
 			width += collapsedTrackRenderWidth
@@ -1041,7 +883,6 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 	headerStatus := headerStatusModel(m, task, activity, isActiveSession)
 	activeSessionIcon := headerStatus.Icon
 	descriptionLines := descriptionLinesForWidth(task.Description, contentWidth)
-	missionPreview := taskMissionLine(m, task.ID)
 	titleText := task.Title
 	if task.SessionAttentionNeeded {
 		titleText = "⚠ " + titleText
@@ -1111,9 +952,6 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 	}
 	for _, dl := range descriptionLines {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(dl))
-	}
-	if missionPreview != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Accent)).Render(truncateText(missionPreview, contentWidth)))
 	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(strings.Repeat("─", contentWidth)))
 
@@ -1668,14 +1506,6 @@ func renderStatusBar(m *Model) string {
 	}
 	if m.statusMessage != "" {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(m.statusMessage, max(1, m.width/2))))
-	} else if m.focus == FocusMissions {
-		if missionTask := m.selectedMissionTask(); missionTask != nil {
-			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Mission task: "+missionTask.Task.Title))
-		} else if mission := m.selectedMission(); mission != nil {
-			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Mission: "+mission.Title))
-		} else {
-			leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Ready"))
-		}
 	} else if contextTask != nil {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Selected: "+contextTask.Title))
 	} else {
@@ -1693,14 +1523,13 @@ func renderStatusBar(m *Model) string {
 func renderHelpModal() string {
 	sections := [][]string{
 		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "a or A opens the local AI chat modal", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
-		{"Missions", "u opens the mission rail and closes it when you are done", "Inside the mission rail: j/k or arrows move and Enter jumps to a released task on the board", "u releases the selected hidden mission task into backlog", "N creates a mission, n adds a task, b edits blockers, d deletes the selected mission"},
 		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar, D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell"},
 		{"Remote", "Remote tasks run their agent in tmux on another machine", "Ctrl+R reconnects the selected remote card to that machine", "It keeps the running agent when the remote session survived, and starts the host first when it is switched off", "R recreates instead: it always throws the running agent away"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Multi-PR cards", "A card can span several repos and PRs; its badge sums them up", "e opens the PR pane beside the board and stays open while you move", "E opens the PR picker: o open, v checks, j comment, m merge that PR", "c/j/m on the card itself stand down once there are several PRs"},
 		{"Artifacts", "The footer strip tracks GA versus latest RC for every artifact", "S refreshes it now, ▲N marks how far the latest RC is ahead of GA", "; moves the footer selection, G rolls the selected drifting artifact out to production", "Chips dim when the data is stale; run agentboard mcp login if it asks for auth"},
 		{"Views", "f opens filters, g changes board / terminal layout", "Shift+Left/Right resizes the side-by-side terminal split", ", and . switch active repo, ? toggles this help"},
-		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Shift+Left/Right resizes the split, Esc returns focus to the board"},
+		{"Terminal", "Shift+Tab switches focus between the main and dev panes", "Tab then hjkl or arrows switches to the neighboring task shell", "Ctrl+C interrupts the running command inside the focused terminal", "PgUp/PgDn or Shift+Up/Down scroll terminal history", "Shift+Left/Right resizes the split, Esc returns focus to the board", "Ctrl+H also returns focus to the board, without clearing input or exiting fullscreen"},
 		{"Setup", "If worktree setup fails because the repo uses master, run:", "agentboard repos set-default-base-branch <repo-id> master"},
 	}
 
@@ -1905,30 +1734,7 @@ func taskCardHeightForWidth(m *Model, task TaskRecord, contentWidth int, compact
 	// Counted, not tested for emptiness: a description wraps to two lines at this
 	// width, and assuming one silently desynchronised the scroll window.
 	height += len(descriptionLinesForWidth(task.Description, contentWidth))
-	if taskMissionLine(m, task.ID) != "" {
-		height++
-	}
 	return height
-}
-
-func taskMissionLine(m *Model, taskID string) string {
-	if m == nil {
-		return ""
-	}
-	mission, missionTask := m.missionForTask(taskID)
-	if mission == nil || missionTask == nil {
-		return ""
-	}
-
-	label := "Mission: " + mission.Title
-	switch {
-	case !missionTask.ReleasedToBoard:
-		return label + " | hold"
-	case missionTask.IsBlocked && missionTask.Status != "merged":
-		return label + " | blocked"
-	default:
-		return label
-	}
 }
 
 func taskTitleLines(title string) []string {
@@ -2840,10 +2646,8 @@ func kbdHints(focus AppFocus) string {
 		return "e PRs pane  E PR actions  ↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G roll out  T track  1-9 repo  ? help"
 	case FocusDetail:
 		return "↑↓ branch  ←→ card  E PR actions  e/Esc close"
-	case FocusMissions:
-		return "j/k move  a/A ai chat  u release-or-close  n add task  N new mission  b blockers  d delete mission  Enter board  Esc close"
 	case FocusTerminal:
-		return "Shift+Tab pane  Shift+←/→ resize  Tab+h/j/k/l switch shell  PgUp/PgDn scroll  Esc board"
+		return "Shift+Tab pane  Shift+←/→ resize  Tab+h/j/k/l switch shell  PgUp/PgDn scroll  Ctrl+H board  Esc board"
 	case FocusModal:
 		return "Enter confirm  Esc cancel"
 	case FocusFilterBar, FocusSearch:

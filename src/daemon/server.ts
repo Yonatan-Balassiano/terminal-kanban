@@ -14,11 +14,6 @@ import type {
   BoardSnapshot,
   DaemonStatus,
   UIStateRecord,
-  CreateMissionParams,
-  DeleteMissionParams,
-  AddMissionTaskParams,
-  SetMissionTaskDependenciesParams,
-  ReleaseMissionTaskToBoardParams,
   CreateTaskParams,
   CreatePillarParams,
   MoveTaskParams,
@@ -115,7 +110,6 @@ function makePlaceholderBoard(): BoardSnapshot {
     labels: [],
     tracks: [],
     tasks: [],
-    missions: [],
     savedViews: [],
     uiState: {},
   };
@@ -347,46 +341,6 @@ export async function dispatch(
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
         });
-        return { id: req.id, result: null };
-      }
-
-      // ---- mission mutations ----------------------------------
-      case 'createMission': {
-        const mission = services.missions.createMission(p as unknown as CreateMissionParams);
-        emitBoardPatchAsync(services);
-        return { id: req.id, result: mission };
-      }
-
-      case 'deleteMission': {
-        await services.missions.deleteMission(
-          (p as unknown as DeleteMissionParams).missionId,
-          async (taskId) => {
-            await services.taskLifecycle.deleteTask(taskId);
-          },
-        );
-        emitBoardPatchAsync(services);
-        return { id: req.id, result: null };
-      }
-
-      case 'addMissionTask': {
-        const missionTask = services.missions.addMissionTask(p as unknown as AddMissionTaskParams);
-        emitBoardPatchAsync(services);
-        return { id: req.id, result: missionTask };
-      }
-
-      case 'setMissionTaskDependencies': {
-        services.missions.setMissionTaskDependencies(
-          p as unknown as SetMissionTaskDependenciesParams,
-        );
-        emitBoardPatchAsync(services);
-        return { id: req.id, result: null };
-      }
-
-      case 'releaseMissionTaskToBoard': {
-        services.missions.releaseMissionTaskToBoard(
-          (p as unknown as ReleaseMissionTaskToBoardParams).taskId,
-        );
-        emitBoardPatchAsync(services);
         return { id: req.id, result: null };
       }
 
@@ -739,11 +693,8 @@ export async function dispatch(
         // branch is still being written has no PR on it yet, and closing the
         // card here would abandon that work. Anything else is left to the sync
         // loop, which decides from every branch at once.
-        if (task.branches.length === 1) {
-          if (task.trackId !== 'done') {
-            services.board.moveTask({ id: taskId, trackId: 'done' });
-          }
-          services.missions?.reconcileTaskCompletion(taskId);
+        if (task.branches.length === 1 && task.trackId !== 'done') {
+          services.board.moveTask({ id: taskId, trackId: 'done' });
         }
 
         serverEvents.emit('event', {

@@ -49,12 +49,6 @@ describe('database schema bootstrap', () => {
         .get();
       expect(versionRow?.value).toBe(CURRENT_SCHEMA_VERSION);
 
-      const missionTaskColumns = db
-        .prepare<[], { name: string }>('PRAGMA table_info(mission_tasks)')
-        .all()
-        .map((column) => column.name);
-      expect(missionTaskColumns).toContain('released_to_board');
-
       const taskColumns = db
         .prepare<[], { name: string }>('PRAGMA table_info(tasks)')
         .all()

@@ -138,7 +138,7 @@ describe('general tasks', () => {
     it('excludes general tasks when a repo filter is active', () => {
       board.createTask({ title: 'General card', kind: 'general' });
       board.createTask({ title: 'Repo card', repoId: 'repo-1' });
-      const view = new ViewService(board, { listMissions: () => [] } as never);
+      const view = new ViewService(board);
 
       const filtered = view.getBoardSnapshot(undefined, { repoIds: ['repo-1'] });
       const unfiltered = view.getBoardSnapshot();
