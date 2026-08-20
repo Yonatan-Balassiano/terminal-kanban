@@ -643,17 +643,52 @@ export class GitHubService {
     org: string,
     branch: string,
   ): Promise<DiscoveredPR[]> {
+    return this.searchPRIssues(repoPath, `type:pr org:${org} head:${branch}`);
+  }
+
+  /**
+   * Every pull request in an org whose body or title names another one.
+   *
+   * A card's repositories do not always share a branch name — an agent
+   * working a change that spans repos often names each branch after what it
+   * does locally, not after the card. What they do share is GitHub's own
+   * `repo#123` cross-reference shorthand, which stacked or dependent PRs use
+   * to point back at the PR that started the work. Searching for that exact
+   * token is precise where searching for the bare PR number is not: a bare
+   * number matches any coincidental digit run (a version, a changelog line),
+   * while the shorthand only matches an actual reference.
+   *
+   * `reference` must be the bare `repo#123` form, not `owner/repo#123` — the
+   * owner-qualified form sits in a PR body as inert text; GitHub does not
+   * auto-link or index it, so a search for it returns nothing even scoped
+   * correctly with `org:`.
+   */
+  async findPRsReferencing(repoPath: string, org: string, reference: string): Promise<DiscoveredPR[]> {
+    return this.searchPRIssues(repoPath, `type:pr org:${org} ${reference}`);
+  }
+
+  /**
+   * The branch a pull request was opened from.
+   *
+   * Search results carry no head-branch field at all, so a PR found by
+   * `findPRsReferencing` needs this follow-up call before it can be recorded
+   * as a task branch.
+   */
+  async getPRHeadBranch(repoPath: string, prNumber: number, githubRepo: string): Promise<string | null> {
     const raw = await this.ghAsync(
-      [
-        'api',
-        '-X',
-        'GET',
-        'search/issues',
-        '-f',
-        `q=type:pr org:${org} head:${branch}`,
-        '-f',
-        'per_page=20',
-      ],
+      ['pr', 'view', String(prNumber), '--repo', githubRepo, '--json', 'headRefName'],
+      repoPath,
+    );
+    if (raw.length === 0) {
+      return null;
+    }
+    const data = JSON.parse(raw) as { headRefName?: string };
+    return data.headRefName ?? null;
+  }
+
+  private async searchPRIssues(repoPath: string, query: string): Promise<DiscoveredPR[]> {
+    const raw = await this.ghAsync(
+      ['api', '-X', 'GET', 'search/issues', '-f', `q=${query}`, '-f', 'per_page=20'],
       repoPath,
     );
 
