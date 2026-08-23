@@ -34,6 +34,7 @@ import type {
   AcknowledgeSessionAttentionParams,
   OpenSessionParams,
   ReconnectSessionParams,
+  TeleportTaskParams,
   SendInputParams,
   GetBufferParams,
   PrepareTaskWorkspaceParams,
@@ -567,6 +568,22 @@ export async function dispatch(
       case 'reconnectSession': {
         const params = p as unknown as ReconnectSessionParams;
         const result = await services.session.reconnectSession(params.taskId, params.slot);
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        return { id: req.id, result };
+      }
+
+      case 'teleportTaskPreflight': {
+        const params = p as unknown as TeleportTaskParams;
+        const checks = await services.teleport.preflight(params.taskId, params.direction);
+        return { id: req.id, result: checks };
+      }
+
+      case 'teleportTask': {
+        const params = p as unknown as TeleportTaskParams;
+        const result = await services.teleport.run(params.taskId, params.direction);
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),

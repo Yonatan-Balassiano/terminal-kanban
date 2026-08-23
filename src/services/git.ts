@@ -1,4 +1,7 @@
 import { execFileSync } from 'child_process';
+import { randomBytes } from 'crypto';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { GitState } from '../types/index.js';
 import type { Db } from '../db/index.js';
 import { LocalTransport } from './transport/local.js';
@@ -226,6 +229,15 @@ export class GitService {
     return this.run(gitArgv(repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'), repoPath);
   }
 
+  async currentHead(repoPath: string): Promise<string> {
+    return this.run(gitArgv(repoPath, 'rev-parse', 'HEAD'), repoPath);
+  }
+
+  /** Used to unwind a WIP commit a failed teleport already made. */
+  async resetHard(repoPath: string, ref: string): Promise<void> {
+    await this.run(gitArgv(repoPath, 'reset', '--hard', ref), repoPath, LONG_RUNNING_TIMEOUT_MS);
+  }
+
   async remoteBranchExists(repoPath: string, branch: string, remote = 'origin'): Promise<boolean> {
     try {
       await this.run(
@@ -320,6 +332,21 @@ export class GitService {
     baseBranch: string,
   ): Promise<void> {
     const reuseBranch = await this.branchExistsAsync(repoPath, branch);
+
+    // A branch pushed from another host is invisible here until it is fetched:
+    // this clone has no local ref for it, only `origin` does. Without this, a
+    // teleported task's worktree would silently start a fresh branch from
+    // baseBranch instead of picking up the pushed commits.
+    if (!reuseBranch && (await this.remoteBranchExists(repoPath, branch))) {
+      await this.run(gitArgv(repoPath, 'fetch', 'origin', branch), repoPath, LONG_RUNNING_TIMEOUT_MS);
+      await this.run(
+        gitArgv(repoPath, 'worktree', 'add', '-b', branch, worktreePath, `origin/${branch}`),
+        repoPath,
+        LONG_RUNNING_TIMEOUT_MS,
+      );
+      return;
+    }
+
     await this.run(
       worktreeAddArgv(repoPath, worktreePath, branch, baseBranch, reuseBranch),
       repoPath,
@@ -384,12 +411,54 @@ export class GitService {
     branch: string,
     remote = 'origin',
     setUpstream = true,
+    force = false,
   ): Promise<void> {
     const args = ['push'];
+    if (force) {
+      args.push('--force');
+    }
     if (setUpstream) {
       args.push('--set-upstream');
     }
     args.push(remote, branch);
     await this.run(gitArgv(repoPath, ...args), repoPath, LONG_RUNNING_TIMEOUT_MS);
+  }
+
+  /**
+   * `git add -A` and commit, skipping anything that looks like a secret.
+   *
+   * Applies a temporary `core.excludesFile` for the one `git add`, rather than
+   * writing to `.git/info/exclude`, so a concurrent operation on the same repo
+   * never sees the exclusion and nothing is left behind if this is interrupted.
+   * Returns null when nothing was staged — an already-clean tree has no WIP
+   * commit to make.
+   */
+  async stageAndCommitWip(repoPath: string, message: string): Promise<string | null> {
+    const excludePatterns = [
+      '.env',
+      '.env.*',
+      '*.pem',
+      '*.key',
+      'id_rsa',
+      'id_ed25519',
+      '*credentials*.json',
+    ];
+    const excludeFile = join(tmpdir(), `agentboard-wip-exclude-${randomBytes(6).toString('hex')}`);
+    await this.transport.writeFileIfChanged(excludeFile, excludePatterns.join('\n') + '\n');
+    try {
+      await this.run(
+        gitArgv(repoPath, '-c', `core.excludesFile=${excludeFile}`, 'add', '-A'),
+        repoPath,
+        LONG_RUNNING_TIMEOUT_MS,
+      );
+      const status = await this.run(gitArgv(repoPath, 'status', '--porcelain'), repoPath);
+      if (status.length === 0) {
+        return null;
+      }
+      await this.run(gitArgv(repoPath, 'commit', '-m', message), repoPath, LONG_RUNNING_TIMEOUT_MS);
+      return this.run(gitArgv(repoPath, 'rev-parse', 'HEAD'), repoPath);
+    } finally {
+      await this.transport.removeDir(excludeFile).catch(() => undefined);
+    }
   }
 }

@@ -150,6 +150,19 @@ type artifactRolloutModalState struct {
 	ShippingCard string
 }
 
+type teleportConfirmModalState struct {
+	TaskID    string
+	TaskTitle string
+	Direction string
+	// True until the preflight reply arrives; y is refused meanwhile so a fast
+	// double-press cannot confirm a teleport before its checks are even read.
+	Loading bool
+	Checks  []DoctorCheck
+	// Set only when the preflight call itself failed — a dead daemon, say —
+	// as opposed to a normal check reporting fail in Checks.
+	Error string
+}
+
 type createTaskPillarOption struct {
 	ID    string
 	Label string
@@ -269,6 +282,7 @@ func (m *Model) closeModal() {
 	m.artifactRolloutModal = nil
 	m.artifactListModal = nil
 	m.branchPRListModal = nil
+	m.teleportConfirmModal = nil
 }
 
 func (m *Model) openHelpModal() {
@@ -637,6 +651,44 @@ func artifactRolloutBlockerReason(artifact ArtifactRecord) string {
 	}
 }
 
+// teleportDirectionFor is which way a teleport would move task — the direction
+// follows entirely from where it already is, never a choice offered here.
+func teleportDirectionFor(task *TaskRecord) string {
+	if task.Location == TaskLocationRemote {
+		return TeleportDirectionRemoteToLocal
+	}
+	return TeleportDirectionLocalToRemote
+}
+
+func (m *Model) openTeleportModal(task *TaskRecord) tea.Cmd {
+	if task == nil || task.IsGeneral() {
+		return nil
+	}
+	direction := teleportDirectionFor(task)
+	m.closeModal()
+	m.modal = ModalTeleportConfirm
+	m.focus = FocusModal
+	m.teleportConfirmModal = &teleportConfirmModalState{
+		TaskID:    task.ID,
+		TaskTitle: task.Title,
+		Direction: direction,
+		Loading:   true,
+	}
+	return m.fetchTeleportPreflightCmd(task.ID, direction)
+}
+
+// teleportBlocked reports whether any preflight check failed outright — the
+// same bar teleportTask itself gates on, so confirming here can never race a
+// call the daemon was always going to refuse.
+func teleportBlocked(checks []DoctorCheck) bool {
+	for _, check := range checks {
+		if check.Status == "fail" {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) openDeleteConfirmModal(task *TaskRecord) {
 	if task == nil {
 		m.statusMessage = "Select a task to delete it."
@@ -805,6 +857,8 @@ func (m *Model) handleModalKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleArtifactListModalKey(key)
 	case ModalArtifactRollout:
 		return m.handleArtifactRolloutModalKey(key)
+	case ModalTeleportConfirm:
+		return m.handleTeleportConfirmModalKey(key)
 	case ModalBranchPRList:
 		return m.handleBranchPRListModalKey(key)
 	default:
@@ -1195,6 +1249,37 @@ func (m *Model) handleDeleteConfirmModalKey(key tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) handleTeleportConfirmModalKey(key tea.KeyMsg) tea.Cmd {
+	state := m.teleportConfirmModal
+	if state == nil {
+		m.closeModal()
+		return nil
+	}
+	if key.Type == tea.KeyEsc || key.String() == "n" || key.String() == "N" {
+		m.closeModal()
+		return nil
+	}
+	if key.String() == "y" || key.String() == "Y" {
+		if state.Loading {
+			m.statusMessage = "Still checking — wait for the preflight to finish."
+			return nil
+		}
+		if state.Error != "" {
+			m.statusMessage = "Preflight failed: " + state.Error
+			return nil
+		}
+		if teleportBlocked(state.Checks) {
+			m.statusMessage = "Teleport is blocked — see the failing check above."
+			return nil
+		}
+		taskID, direction := state.TaskID, state.Direction
+		m.closeModal()
+		m.statusMessage = "Teleporting…"
+		return m.teleportTaskCmd(taskID, direction)
+	}
+	return nil
+}
+
 func (m *Model) handleCreatePillarModalKey(key tea.KeyMsg) tea.Cmd {
 	state := m.createPillarModal
 	if state == nil {
@@ -1562,6 +1647,8 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 			return m.reconnectSessionCmd(contextTask.ID, SessionSlotPrimary)
 		}
 		return nil
+	case "teleport":
+		return m.openTeleportModal(contextTask)
 	case "toggle-dual-shell":
 		m.closeModal()
 		if contextTask != nil {
@@ -1675,6 +1762,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "open-shell", Title: "Open task shell", Section: "Session", Detail: "Start or attach the session for the current task.", Shortcut: "Enter", Keywords: []string{"terminal", "session", "shell"}, Disabled: contextTask == nil, DisabledReason: "Select a task to open its shell."},
 		{ID: "recreate-shell", Title: "Recreate task shell", Section: "Session", Detail: "Recreate the current task shell with the native backend.", Shortcut: "R", Keywords: []string{"terminal", "session", "restart"}, Disabled: contextTask == nil, DisabledReason: "Select a task to recreate its shell."},
 		{ID: "reconnect-remote", Title: "Reconnect remote session", Section: "Session", Detail: "Re-link the current card to its remote machine, starting it if it is off.", Shortcut: "Ctrl+R", Keywords: []string{"remote", "ssh", "reattach", "reconnect", "workspace", "coder"}, Disabled: contextTask == nil || contextTask.Location != TaskLocationRemote, DisabledReason: "Reconnect applies to remote tasks."},
+		{ID: "teleport", Title: ternaryString(contextTask != nil && contextTask.Location == TaskLocationRemote, "Teleport to local", "Teleport to remote"), Section: "Session", Detail: detailOrFallback(contextTask, "Move %s's live session and working tree to the other host", "Move the current card's live session and working tree to the other host."), Shortcut: "Ctrl+T", Keywords: []string{"remote", "ssh", "move", "teleport", "worktree"}, Disabled: contextTask == nil || contextTask.IsGeneral(), DisabledReason: "General tasks have no repo to teleport."},
 		{ID: "toggle-dual-shell", Title: "Toggle dual shell", Section: "Session", Detail: detailOrFallback(contextTask, ternaryString(contextTask != nil && contextTask.SecondarySessionID != "", "Close the lower terminal for %s", "Open a lower dev terminal for %s"), "Open or close the secondary shell for the current task."), Shortcut: "B", Keywords: []string{"terminal", "dual", "secondary", "dev"}, Disabled: contextTask == nil, DisabledReason: "Select a task to toggle its dual shell."},
 		{ID: "focus-terminal", Title: "Focus terminal pane", Section: "Session", Detail: "Jump into the embedded terminal pane.", Shortcut: "t", Keywords: []string{"terminal", "pane"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before focusing the terminal pane."},
 		{ID: "fullscreen-terminal", Title: "Expand terminal workspace", Section: "Session", Detail: "Make the terminal take over the workspace.", Shortcut: "z", Keywords: []string{"terminal", "fullscreen", "expand"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before expanding the terminal."},

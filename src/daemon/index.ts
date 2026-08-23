@@ -15,6 +15,7 @@ export interface ServiceContainer {
   worktrees: import('../services/worktree.js').WorktreeService;
   taskLifecycle: import('../services/task-lifecycle.js').TaskLifecycleService;
   session: import('../services/session-manager.js').SessionManager;
+  teleport: import('../services/teleport.js').TeleportService;
   git: import('../services/git.js').GitService;
   github: import('../services/github.js').GitHubService;
   sync: import('../services/sync.js').SyncService;
@@ -565,6 +566,8 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     cfg.agentArgs,
     remoteProvider,
   );
+  const { TeleportService } = await import('../services/teleport.js');
+  const teleport = new TeleportService(db, board, session, worktrees, git, transports, cfg.remote);
   // A remote host can take minutes to wake, long after the reconnect RPC has
   // answered. This is how the finished result reaches the board.
   session.onSessionsChanged = () => {
@@ -681,6 +684,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     worktrees,
     taskLifecycle,
     session,
+    teleport,
     git,
     github,
     sync,

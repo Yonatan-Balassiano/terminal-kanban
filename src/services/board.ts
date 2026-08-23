@@ -732,6 +732,14 @@ export class BoardService {
       .run(worktreePath, Date.now(), taskId);
   }
 
+  setTaskLocation(taskId: string, location: TaskLocation): void {
+    this.db
+      .prepare<[string, number, string], void>(
+        'UPDATE tasks SET location = ?, updated_at = ? WHERE id = ?',
+      )
+      .run(location, Date.now(), taskId);
+  }
+
   setTaskLastSessionCwd(taskId: string, cwd: string | null): void {
     this.db
       .prepare<[string | null, number, string], void>(

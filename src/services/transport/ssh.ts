@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { LocalTransport } from './local.js';
 import { shellJoin, shellQuote } from '../shell-quote.js';
 import {
@@ -24,6 +24,8 @@ const SERVER_ALIVE_INTERVAL_SECONDS = 15;
 const REACHABLE_CACHE_MS = 5_000;
 const UNREACHABLE_CACHE_MS = 10_000;
 const REACHABILITY_PROBE_TIMEOUT_MS = 8_000;
+/** A conversation transcript can run multi-MB; the default command timeout is sized for a shell command, not a transfer. */
+const COPY_TIMEOUT_MS = 300_000;
 
 export interface SshTransportOptions {
   host: string;
@@ -227,6 +229,41 @@ export class SshTransport implements ExecTransport {
       await this.exec(['chmod', mode.toString(8), path]);
     }
     return true;
+  }
+
+  /**
+   * Copy a local file to the remote host over real `scp`, not the base64
+   * exec shim `writeFileIfChanged` uses — that shim round-trips the payload
+   * through a shell command line, which a multi-MB conversation transcript
+   * would blow past. Rides the same ControlMaster socket as `exec`, so it
+   * pays no extra authentication.
+   *
+   * Lands at a `.part` sibling first and renames into place on the remote
+   * host, so nothing reading `remotePath` mid-transfer ever sees a partial
+   * file.
+   */
+  async copyFileTo(localPath: string, remotePath: string): Promise<void> {
+    const partPath = `${remotePath}.part`;
+    const parentDir = remotePath.replace(/\/[^/]*$/, '');
+    if (parentDir && parentDir !== remotePath) {
+      await this.mkdirp(parentDir);
+    }
+    await this.runner.exec(
+      ['scp', ...this.baseSshOptions(), localPath, `${this.host}:${partPath}`],
+      { timeoutMs: COPY_TIMEOUT_MS }
+    );
+    await this.exec(['mv', partPath, remotePath], { timeoutMs: COPY_TIMEOUT_MS });
+  }
+
+  /** The reverse of {@link copyFileTo}: remote file to a local path, same atomic landing. */
+  async copyFileFrom(remotePath: string, localPath: string): Promise<void> {
+    const partPath = `${localPath}.part`;
+    await this.runner.mkdirp(dirname(localPath));
+    await this.runner.exec(
+      ['scp', ...this.baseSshOptions(), `${this.host}:${remotePath}`, partPath],
+      { timeoutMs: COPY_TIMEOUT_MS }
+    );
+    await this.runner.exec(['mv', partPath, localPath], { timeoutMs: COPY_TIMEOUT_MS });
   }
 
   private async readFileOrNull(path: string): Promise<string | null> {

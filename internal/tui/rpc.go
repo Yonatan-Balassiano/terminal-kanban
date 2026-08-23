@@ -271,6 +271,12 @@ func rpcTimeout(method string) time.Duration {
 		// Cold SSH connect to a just-woken host, then a wrapper rebuild. The
 		// workspace-start path answers immediately and finishes in the background.
 		return 45 * time.Second
+	case "teleportTask":
+		// A WIP commit, a push, a worktree create, an scp of the transcript, and
+		// a session recreate, all over one SSH connection.
+		return 120 * time.Second
+	case "teleportTaskPreflight":
+		return 20 * time.Second
 	default:
 		return 10 * time.Second
 	}

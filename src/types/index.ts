@@ -420,6 +420,8 @@ export type RPCMethod =
   | 'openSession'
   | 'recreateSession'
   | 'reconnectSession'
+  | 'teleportTaskPreflight'
+  | 'teleportTask'
   | 'setDualSessionMode'
   | 'acknowledgeSessionAttention'
   | 'sendInput'
@@ -597,6 +599,21 @@ export interface ReconnectSessionResult {
   state: ReconnectSessionState;
   message: string;
   session?: SessionRecord;
+}
+
+export type TeleportDirection = 'local-to-remote' | 'remote-to-local';
+
+export interface TeleportTaskParams {
+  taskId: string;
+  direction: TeleportDirection;
+}
+export type TeleportTaskPreflightResult = DoctorCheck[];
+
+export interface TeleportTaskResult {
+  checks: DoctorCheck[];
+  session: SessionRecord;
+  wipCommitted: boolean;
+  transcriptCopied: boolean;
 }
 
 export interface SetDualSessionModeParams {

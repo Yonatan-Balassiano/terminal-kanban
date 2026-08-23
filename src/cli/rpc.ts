@@ -28,6 +28,12 @@ function rpcTimeoutMs(method: RPCMethod): number {
       // Cold SSH connect to a just-woken host, then a wrapper rebuild. The
       // workspace-start path answers immediately and finishes in the background.
       return 45_000;
+    case 'teleportTask':
+      // A WIP commit, a push, a worktree create, an scp of the transcript, and
+      // a session recreate, all over one SSH connection.
+      return 120_000;
+    case 'teleportTaskPreflight':
+      return 20_000;
     default:
       return 10_000;
   }
