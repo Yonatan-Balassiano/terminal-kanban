@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb, type Db } from '../src/db/index.js';
 import { BoardService } from '../src/services/board.js';
-import { MissionService } from '../src/services/missions.js';
 import { ViewService } from '../src/services/view.js';
 import { WorkspaceService } from '../src/services/workspace.js';
 
@@ -13,7 +12,7 @@ describe('board snapshot repo fields', () => {
   beforeEach(() => {
     db = openDb(':memory:');
     const board = new BoardService(db);
-    view = new ViewService(board, new MissionService(db, board));
+    view = new ViewService(board);
     workspace = new WorkspaceService(db);
     db.prepare(
       `INSERT INTO repos

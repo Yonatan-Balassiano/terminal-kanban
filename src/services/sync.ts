@@ -8,10 +8,9 @@ import type {
 } from '../types/index.js';
 import type { BoardService } from './board.js';
 import { allBranchesResolved } from './task-branches.js';
-import { GitHubServiceError, type GitHubService, type PRInfo } from './github.js';
+import { GitHubServiceError, type GitHubService, type PRInfo, type DiscoveredPR } from './github.js';
 import { GitService } from './git.js';
 import { TransportRegistry } from './transport/index.js';
-import type { MissionService } from './missions.js';
 
 function buildAutoPRTitle(taskId: string, taskTitle: string): string {
   return `[auto|${taskId}] ${taskTitle}`;
@@ -101,7 +100,6 @@ function normalizeBaseBranch(value: string | null | undefined): string | undefin
 
 export class SyncService {
   private board: BoardService;
-  private missions?: Pick<MissionService, 'reconcileTaskCompletion'>;
   onTaskMergedOrClosed?: (taskId: string) => Promise<void>;
   /**
    * Whether every merged pull request on a card has actually reached production.
@@ -133,31 +131,16 @@ export class SyncService {
 
   constructor(
     board: BoardService,
-    missionsOrGithub: MissionService | GitHubService,
-    githubOrGit: GitHubService | GitService,
-    gitOrDb: GitService | Db,
-    dbOrWait?: Db | typeof sleep,
-    maybeWait = sleep,
+    github: GitHubService,
+    git: GitService,
+    db: Db,
+    wait: typeof sleep = sleep,
   ) {
     this.board = board;
-
-    if (this.isMissionService(missionsOrGithub)) {
-      this.missions = missionsOrGithub;
-      this.github = githubOrGit as GitHubService;
-      this.git = gitOrDb as GitService;
-      this.db = dbOrWait as Db;
-      this.wait = maybeWait;
-      return;
-    }
-
-    this.github = missionsOrGithub as GitHubService;
-    this.git = githubOrGit as GitService;
-    this.db = gitOrDb as Db;
-    this.wait = (dbOrWait as typeof sleep | undefined) ?? sleep;
-  }
-
-  private isMissionService(value: MissionService | GitHubService): value is MissionService {
-    return typeof (value as MissionService).reconcileTaskCompletion === 'function';
+    this.github = github;
+    this.git = git;
+    this.db = db;
+    this.wait = wait;
   }
 
   start(intervalMs: number, activeIntervalMs = 15_000): void {
@@ -521,12 +504,18 @@ export class SyncService {
   }
 
   /**
-   * Adopts pull requests opened on this card's branch name in other repos.
+   * Adopts pull requests opened on this card's branch name in other repos, plus
+   * any pull request elsewhere in the org that cross-references a PR this card
+   * already carries.
    *
-   * A feature spanning several repositories is worked on under one branch name,
-   * so one org-wide search finds every sibling regardless of how many
-   * repositories are configured — cheaper, and it also finds repos the card has
-   * never touched before.
+   * A feature spanning several repositories is worked on under one branch name
+   * *when the same hand names both branches*, so the first search catches that
+   * case cheaply — one org-wide query regardless of how many repositories are
+   * configured. It misses the case where each repo's branch is named for what
+   * it does locally rather than for the card, which is common when an agent
+   * works each side of a cross-repo change independently. The second search
+   * catches that instead, via the `repo#123` shorthand a stacked or dependent
+   * PR uses to point back at the PR that started the work.
    */
   /**
    * Whether a card is done with GitHub entirely.
@@ -575,9 +564,79 @@ export class SyncService {
           branchName: task.branchName,
         });
       }
+
+      await this.discoverReferencingBranches(task, branches, reposBySlug, org, repoPath, known);
     } catch {
       // Discovery is an enhancement. A rate limit or an unreachable search must
       // never stop the branches we already know about from syncing.
+    }
+  }
+
+  /**
+   * The second half of {@link discoverSiblingBranches}: finds PRs that name a
+   * PR this card already carries, rather than sharing its branch name.
+   *
+   * Each already-known PR is searched for by itself, and adopting one updates
+   * `known`/`knownPRs` in place so a reference search run later in the same
+   * pass — or a second known PR pointing at the same sibling — cannot add the
+   * same branch twice.
+   */
+  private async discoverReferencingBranches(
+    task: TaskRecord,
+    branches: readonly TaskBranchRecord[],
+    reposBySlug: Map<string, string>,
+    org: string,
+    repoPath: string,
+    known: Set<string>,
+  ): Promise<void> {
+    const slugByRepoId = new Map(Array.from(reposBySlug, ([slug, id]) => [id, slug]));
+    const knownPRs = new Set(
+      branches
+        .filter((branch) => branch.prNumber !== undefined)
+        .map((branch) => `${branch.repoId}#${branch.prNumber}`),
+    );
+
+    for (const branch of branches) {
+      if (branch.prNumber === undefined) {
+        continue;
+      }
+      const slug = slugByRepoId.get(branch.repoId);
+      const repoName = slug?.split('/')[1];
+      if (!repoName) {
+        continue;
+      }
+
+      let referencing: DiscoveredPR[];
+      try {
+        // GitHub only auto-links (and indexes) the bare `repo#123` shorthand,
+        // not the owner-qualified `owner/repo#123` form — a reference written
+        // the second way sits in the body as inert text and a search for it
+        // returns nothing, even scoped correctly with `org:`.
+        referencing = await this.github.findPRsReferencing(
+          repoPath,
+          org,
+          `${repoName}#${branch.prNumber}`,
+        );
+      } catch {
+        // One reference search failing must not stop the others.
+        continue;
+      }
+
+      for (const pr of referencing) {
+        const repoId = reposBySlug.get(pr.repoSlug);
+        if (!repoId || knownPRs.has(`${repoId}#${pr.number}`)) {
+          continue;
+        }
+
+        const branchName = await this.github.getPRHeadBranch(repoPath, pr.number, pr.repoSlug);
+        if (!branchName || known.has(`${repoId}#${branchName}`)) {
+          continue;
+        }
+
+        this.board.addTaskBranch({ taskId: task.id, repoId, branchName });
+        known.add(`${repoId}#${branchName}`);
+        knownPRs.add(`${repoId}#${pr.number}`);
+      }
     }
   }
 
@@ -647,14 +706,10 @@ export class SyncService {
       return 0;
     }
 
-    // Everything has landed. Downstream cards are unblocked now — they were
-    // waiting on the code, not on the rollout.
-    const releasedTaskIds = this.missions?.reconcileTaskCompletion(taskId) ?? [];
-
     const released = this.isFullyReleased?.(taskId) ?? true;
     const nextTrack = released ? 'done' : 'shipping';
     if (task.trackId === nextTrack) {
-      return releasedTaskIds.length;
+      return 0;
     }
 
     this.board.moveTask({ id: taskId, trackId: nextTrack });
@@ -666,7 +721,7 @@ export class SyncService {
       void this.onTaskMergedOrClosed?.(taskId);
     }
 
-    return 1 + releasedTaskIds.length;
+    return 1;
   }
 
   /** Reconciles one branch: its git state, its pull request, its checks. */

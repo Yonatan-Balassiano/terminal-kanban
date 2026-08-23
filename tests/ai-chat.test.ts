@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../src/db/index.js';
 import { BoardService } from '../src/services/board.js';
-import { MissionService } from '../src/services/missions.js';
 import { ViewService } from '../src/services/view.js';
 import { WorkspaceService } from '../src/services/workspace.js';
 import { EventLogService } from '../src/services/events.js';
@@ -39,7 +38,6 @@ class RecordingChatClient extends FakeChatClient {
 describe('AIChatService', () => {
   let db: Db;
   let board: BoardService;
-  let missions: MissionService;
   let view: ViewService;
   let workspace: WorkspaceService;
   let events: EventLogService;
@@ -48,8 +46,7 @@ describe('AIChatService', () => {
   beforeEach(() => {
     db = openDb(':memory:');
     board = new BoardService(db);
-    missions = new MissionService(db, board);
-    view = new ViewService(board, missions);
+    view = new ViewService(board);
     workspace = new WorkspaceService(db);
     events = new EventLogService(db);
     aiChatConfig = {
@@ -119,7 +116,6 @@ describe('AIChatService', () => {
 
     const service = new AIChatService({
       board,
-      missions,
       workspace,
       worktrees: {
         prepareTaskWorkspace(taskId: string) {
@@ -223,45 +219,6 @@ describe('AIChatService', () => {
     });
 
     expect(ensureModelReady).toHaveBeenCalledTimes(1);
-  });
-
-  it('creates a mission with multiple tasks through tool calls', async () => {
-    const { service, context } = makeService(
-      new FakeChatClient([
-        {
-          content: '',
-          toolCalls: [{ id: '1', name: 'create_mission', arguments: { title: 'Launch' } }],
-        },
-        {
-          content: '',
-          toolCalls: [{ id: '2', name: 'add_mission_task', arguments: { mission: 'Launch', title: 'api', repo: 'Repo' } }],
-        },
-        {
-          content: '',
-          toolCalls: [{ id: '3', name: 'add_mission_task', arguments: { mission: 'Launch', title: 'ui', repo: 'Repo' } }],
-        },
-        {
-          content: '',
-          toolCalls: [{ id: '4', name: 'add_mission_task', arguments: { mission: 'Launch', title: 'qa', repo: 'Repo' } }],
-        },
-        {
-          content: 'Mission created.',
-          toolCalls: [],
-        },
-      ]),
-    );
-
-    const result = await service.chatTurn({
-      prompt: 'create a mission with tasks api ui qa',
-      context,
-    });
-
-    const snapshot = view.getBoardSnapshot();
-    expect(snapshot.missions).toHaveLength(1);
-    expect(snapshot.missions[0].title).toBe('Launch');
-    expect(snapshot.missions[0].tasks.map((task) => task.task.title)).toEqual(['api', 'ui', 'qa']);
-    expect(result.executions).toHaveLength(4);
-    expect(result.executions.every((execution) => execution.status === 'completed')).toBe(true);
   });
 
   it('creates a task in the current repo with a pillar match and codex agent', async () => {
@@ -442,12 +399,6 @@ describe('AIChatService', () => {
       'repo-1',
     );
     const boardTask = board.createTask({ title: 'Ship CLI', repoId: 'repo-1', trackId: 'in-progress' });
-    const mission = missions.createMission({ title: 'CLI rollout' });
-    missions.addMissionTask({
-      missionId: mission.id,
-      title: 'Publish docs',
-      repoId: 'repo-1',
-    });
     db.prepare(
       `INSERT INTO repos
          (id, label, path, github_owner, github_repo, default_base_branch,
@@ -481,17 +432,14 @@ describe('AIChatService', () => {
     expect(systemMessage?.content).toContain('strip scaffolding or type words');
     expect(systemMessage?.content).toContain("if runtime context shows a repo alias 'vmr'");
     expect(systemMessage?.content).toContain('infer a short faithful title from the request');
-    expect(systemMessage?.content).toContain('find_tasks or find_missions');
+    expect(systemMessage?.content).toContain('find_tasks tool');
     expect(systemMessage?.content).toContain('Board tasks:');
     expect(systemMessage?.content).toContain(boardTask.title);
     expect(systemMessage?.content).toContain('repo=Command Center');
     expect(systemMessage?.content).toContain('track=In Progress');
-    expect(systemMessage?.content).toContain('Missions:');
-    expect(systemMessage?.content).toContain('CLI rollout');
-    expect(systemMessage?.content).toContain('Publish docs');
   });
 
-  it('injects structured repos, tasks, and missions context on the first chat turn', async () => {
+  it('injects structured repos and tasks context on the first chat turn', async () => {
     aiChatConfig.systemPrompt = DEFAULT_AI_CHAT_SYSTEM_PROMPT;
     db.prepare('UPDATE repos SET label = ?, path = ?, github_repo = ? WHERE id = ?').run(
       'Backend',
@@ -499,12 +447,6 @@ describe('AIChatService', () => {
       'wix-vmr-repo',
       'repo-1',
     );
-    const mission = missions.createMission({ title: 'Launch wave' });
-    missions.addMissionTask({
-      missionId: mission.id,
-      title: 'Backend API',
-      repoId: 'repo-1',
-    });
     board.createTask({ title: 'Board task', repoId: 'repo-1', trackId: 'in-progress' });
 
     const client = new RecordingChatClient([
@@ -527,53 +469,9 @@ describe('AIChatService', () => {
     expect(structuredContextMessage?.content).toContain('Structured runtime context for this AI chat conversation');
     expect(structuredContextMessage?.content).toContain('"repos"');
     expect(structuredContextMessage?.content).toContain('"tasks"');
-    expect(structuredContextMessage?.content).toContain('"missions"');
     expect(structuredContextMessage?.content).toContain('"aliases"');
     expect(structuredContextMessage?.content).toContain('"vmr"');
-    expect(structuredContextMessage?.content).toContain('Launch wave');
     expect(structuredContextMessage?.content).toContain('Board task');
-  });
-
-  it('describes selected task mission dependency context in the runtime system prompt', async () => {
-    aiChatConfig.systemPrompt = DEFAULT_AI_CHAT_SYSTEM_PROMPT;
-    const mission = missions.createMission({ title: 'Launch wave' });
-    const blocker = missions.addMissionTask({
-      missionId: mission.id,
-      title: 'Backend API',
-      repoId: 'repo-1',
-    });
-    missions.addMissionTask({
-      missionId: mission.id,
-      title: 'Frontend UI',
-      repoId: 'repo-1',
-      blockerTaskIds: [blocker.taskId],
-    });
-
-    const client = new RecordingChatClient([
-      {
-        content: 'Ready.',
-        toolCalls: [],
-      },
-    ]);
-    const { service, context } = makeService(client, {
-      selectedTaskId: blocker.taskId,
-    });
-
-    await service.chatTurn({
-      prompt: 'what task am i on?',
-      context,
-    });
-
-    const systemMessage = client.calls[0]?.messages[0];
-    expect(systemMessage?.role).toBe('system');
-    expect(systemMessage?.content).toContain('Selected task: Backend API');
-    expect(systemMessage?.content).toContain('Selected task context:');
-    expect(systemMessage?.content).toContain('mission=Launch wave');
-    expect(systemMessage?.content).toContain('blocked=no');
-    expect(systemMessage?.content).toContain('blockedBy=none');
-    expect(systemMessage?.content).toContain('blocks=Frontend UI');
-    expect(systemMessage?.content).toContain('Selected mission: Launch wave');
-    expect(systemMessage?.content).toContain('blockers=Backend API');
   });
 
   it('runs rebase and push in the task workspace and schedules post-push sync', async () => {

@@ -25,10 +25,6 @@ func renderModal(m *Model) string {
 		return renderHelpModal()
 	case ModalCreateTask:
 		return renderCreateTaskModal(m)
-	case ModalCreateMission:
-		return renderCreateMissionModal(m)
-	case ModalAddMissionTask:
-		return renderAddMissionTaskModal(m)
 	case ModalRenameTask:
 		return renderRenameTaskModal(m)
 	case ModalSetBranch:
@@ -37,8 +33,6 @@ func renderModal(m *Model) string {
 		return renderTaskDescriptionModal(m)
 	case ModalPRComment:
 		return renderPRCommentModal(m)
-	case ModalDeleteMission:
-		return renderDeleteMissionConfirmModal(m)
 	case ModalDeleteConfirm:
 		return renderDeleteConfirmModal(m)
 	case ModalCreatePillar:
@@ -55,8 +49,6 @@ func renderModal(m *Model) string {
 		return renderCommandPaletteModal(m)
 	case ModalAIChat:
 		return renderAIChatModal(m)
-	case ModalMissionDeps:
-		return renderMissionDependenciesModal(m)
 	case ModalArtifactList:
 		return renderArtifactListModal(m)
 	case ModalArtifactRollout:
@@ -120,114 +112,6 @@ func renderCreateTaskModal(m *Model) string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
 	}
 
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
-func renderCreateMissionModal(m *Model) string {
-	state := m.createMissionModal
-	if state == nil {
-		return ""
-	}
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Render("Create Mission"),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")).Render("Title: ") + state.Value + "|",
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[Enter] create  [Esc] cancel"),
-	}
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
-func renderAddMissionTaskModal(m *Model) string {
-	state := m.addMissionTaskModal
-	if state == nil {
-		return ""
-	}
-	if state.Stage == addMissionTaskStageBlockers {
-		return renderAddMissionTaskBlockerModal(m)
-	}
-
-	selectedRepo := "None"
-	if len(m.repos) > 0 {
-		selectedRepo = m.repos[clamp(state.RepoIndex, 0, len(m.repos)-1)].Label
-	}
-
-	selectedPillar := "None"
-	options := m.createTaskPillarOptions()
-	if len(options) > 0 {
-		selectedPillar = options[clamp(state.PillarIndex, 0, len(options)-1)].Label
-	}
-	selectedAgent := createTaskAgentOptionAt(state.AgentIndex).Label
-	missionTitle := state.MissionID
-	if mission := m.selectedMission(); mission != nil && mission.ID == state.MissionID {
-		missionTitle = mission.Title
-	}
-
-	linePrefix := func(line createTaskLine) string {
-		if state.ActiveLine == line {
-			return "▸"
-		}
-		return " "
-	}
-	lineColor := func(line createTaskLine) lipgloss.Style {
-		if state.ActiveLine == line {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("cyan"))
-		}
-		return lipgloss.NewStyle()
-	}
-	blockedLabel := ternaryString(state.WantsBlocked, "Yes", "No")
-	if state.WantsBlocked && len(state.SelectedBlockerTaskIDs) > 0 {
-		blockedLabel = fmt.Sprintf("Yes (%d selected)", len(state.SelectedBlockerTaskIDs))
-	}
-	actionLabel := "add"
-	if state.WantsBlocked {
-		actionLabel = "next"
-	}
-
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Render("Add Mission Task"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(missionTitle, 48)),
-		"",
-		lineColor(createTaskTitleLine).Render(fmt.Sprintf("%s Title: %s%s", linePrefix(createTaskTitleLine), state.Value, ternaryString(state.ActiveLine == createTaskTitleLine, "|", ""))),
-		lineColor(createTaskRepoLine).Render(fmt.Sprintf("%s Repo: %s", linePrefix(createTaskRepoLine), selectedRepo)),
-		lineColor(createTaskPillarLine).Render(fmt.Sprintf("%s Pillar: %s", linePrefix(createTaskPillarLine), selectedPillar)),
-		lineColor(createTaskAgentLine).Render(fmt.Sprintf("%s Agent: %s", linePrefix(createTaskAgentLine), selectedAgent)),
-		lineColor(createTaskBlockedLine).Render(fmt.Sprintf("%s Blocked: %s", linePrefix(createTaskBlockedLine), blockedLabel)),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[↑/↓ lines]  [←/→ change current field]"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(fmt.Sprintf("[Enter] %s  [Esc] cancel", actionLabel)),
-	}
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
-func renderAddMissionTaskBlockerModal(m *Model) string {
-	state := m.addMissionTaskModal
-	if state == nil {
-		return ""
-	}
-
-	options := m.missionDependencyOptions(state.MissionID, "")
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Render("Mission Blockers"),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(state.Value, 52)),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Select blocker tasks before creating."),
-		"",
-	}
-	if len(options) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No other mission tasks available."))
-	} else {
-		for index, option := range options {
-			selected := index == state.BlockerIndex
-			checked := slices.Contains(state.SelectedBlockerTaskIDs, option.ID)
-			style := lipgloss.NewStyle()
-			if selected {
-				style = style.Foreground(lipgloss.Color("cyan")).Bold(true)
-			}
-			lines = append(lines, style.Render(fmt.Sprintf("%s [%s] %s", ternaryString(selected, "▸", " "), ternaryString(checked, "x", " "), truncateText(option.Label, 48))))
-		}
-	}
-	lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑↓ move  [space] toggle blocker  [Enter] create  [Esc] back"))
 	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
 }
 
@@ -508,29 +392,6 @@ func renderDeleteConfirmModal(m *Model) string {
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("red")).Render("Delete Task"),
 		"",
 		fmt.Sprintf("Delete task '%s'?", title),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
-	}
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
-func renderDeleteMissionConfirmModal(m *Model) string {
-	state := m.deleteMissionConfirmModal
-	if state == nil {
-		return ""
-	}
-	title := state.MissionID
-	if mission := m.selectedMission(); mission != nil && mission.ID == state.MissionID {
-		title = mission.Title
-	}
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("red")).Render("Delete Mission"),
-		"",
-		fmt.Sprintf("Delete mission '%s'?", title),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("red")).Render(
-			fmt.Sprintf("This will also delete %d task%s in this mission.", state.TaskCount, ternaryString(state.TaskCount == 1, "", "s")),
-		),
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("[y] confirm  [n/Esc] cancel"),
 	}
@@ -829,41 +690,6 @@ func renderBranchPRRow(m *Model, task TaskRecord, branch TaskBranchRecord, selec
 		)
 }
 
-func renderMissionDependenciesModal(m *Model) string {
-	state := m.missionDependenciesModal
-	if state == nil {
-		return ""
-	}
-
-	taskTitle := state.TaskID
-	if missionTask := m.selectedMissionTask(); missionTask != nil && missionTask.TaskID == state.TaskID {
-		taskTitle = missionTask.Task.Title
-	}
-	options := m.missionDependencyOptions(state.MissionID, state.TaskID)
-
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Render("Mission Blockers"),
-		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(taskTitle, 52)),
-		"",
-	}
-	if len(options) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("No other mission tasks available."))
-	} else {
-		for index, option := range options {
-			selected := index == state.Index
-			checked := slices.Contains(state.SelectedBlockerTaskIDs, option.ID)
-			style := lipgloss.NewStyle()
-			if selected {
-				style = style.Foreground(lipgloss.Color("cyan")).Bold(true)
-			}
-			lines = append(lines, style.Render(fmt.Sprintf("%s [%s] %s", ternaryString(selected, "▸", " "), ternaryString(checked, "x", " "), truncateText(option.Label, 48))))
-		}
-	}
-	lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑↓ move  [space] toggle blocker  [Enter] save  [Esc] cancel"))
-	return modalBox(lipgloss.RoundedBorder(), strings.Join(lines, "\n"))
-}
-
 func renderAIChatModal(m *Model) string {
 	state := m.aiChatModal
 	if state == nil {
@@ -888,7 +714,7 @@ func renderAIChatModal(m *Model) string {
 			Padding(1).
 			Render(
 				lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render("Ask AgentBoard to create or operate on tasks.")+"\n"+
-					lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Example: create a mission with tasks api, ui, qa"),
+					lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Example: create tasks for api, ui, and qa"),
 			),
 		)
 	} else {

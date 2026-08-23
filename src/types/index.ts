@@ -38,7 +38,6 @@ export type AgentCLI = 'claude' | 'codex';
  * session where nobody is watching to approve each step.
  */
 export type AgentPermissionMode = 'default' | 'bypass';
-export type MissionTaskStatus = 'backlog' | 'in-progress' | 'pr' | 'merged';
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export type EventType =
@@ -214,40 +213,6 @@ export interface TaskRecord {
   updatedAt: number;
 }
 
-export interface MissionRecord {
-  id: string;
-  title: string;
-  sortKey: number;
-  completedAt?: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface MissionStatusCounts {
-  backlog: number;
-  inProgress: number;
-  pr: number;
-  merged: number;
-}
-
-export interface MissionTaskRecord {
-  missionId: string;
-  taskId: string;
-  sortKey: number;
-  releasedToBoard: boolean;
-  releasedAt?: number;
-  blockerTaskIds: string[];
-  blockedTaskIds: string[];
-  status: MissionTaskStatus;
-  isBlocked: boolean;
-  task: TaskRecord;
-}
-
-export interface MissionSnapshot extends MissionRecord {
-  counts: MissionStatusCounts;
-  tasks: MissionTaskRecord[];
-}
-
 export interface SessionRecord {
   id: string;
   taskId: string;
@@ -290,12 +255,9 @@ export interface UIStateRecord {
   filters?: FilterModel;
   selectedTrackId?: string;
   selectedTaskId?: string;
-  selectedMissionId?: string;
-  selectedMissionTaskId?: string;
   terminalPaneVisible?: boolean;
   terminalLayoutMode?: TerminalLayoutMode;
   terminalPaneWidth?: number;
-  missionsPaneExpanded?: boolean;
   themeMode?: ThemeMode;
 }
 
@@ -321,7 +283,6 @@ export interface BoardSnapshot {
   labels: LabelRecord[];
   tracks: TrackRecord[];
   tasks: TaskRecord[];
-  missions: MissionSnapshot[];
   savedViews: SavedViewRecord[];
   uiState: UIStateRecord;
 }
@@ -438,11 +399,6 @@ export interface RPCEvent {
 export type RPCMethod =
   | 'getBoard'
   | 'setUIState'
-  | 'createMission'
-  | 'deleteMission'
-  | 'addMissionTask'
-  | 'setMissionTaskDependencies'
-  | 'releaseMissionTaskToBoard'
   | 'createTask'
   | 'renameTask'
   | 'updateTaskDescription'
@@ -510,35 +466,6 @@ export type SetUIStateParams = Partial<UIStateRecord>;
 
 export interface WatchSessionUpdatesParams {
   taskId?: string;
-}
-
-export interface CreateMissionParams {
-  title: string;
-}
-export type CreateMissionResult = MissionRecord;
-
-export interface DeleteMissionParams {
-  missionId: string;
-}
-
-export interface AddMissionTaskParams {
-  missionId: string;
-  title: string;
-  repoId: string;
-  agentCli?: AgentCLI;
-  pillarId?: string;
-  blockerTaskIds?: string[];
-}
-export type AddMissionTaskResult = MissionTaskRecord;
-
-export interface SetMissionTaskDependenciesParams {
-  missionId: string;
-  taskId: string;
-  blockerTaskIds: string[];
-}
-
-export interface ReleaseMissionTaskToBoardParams {
-  taskId: string;
 }
 
 export interface CreateTaskParams {
@@ -759,8 +686,6 @@ export interface ChatMessage {
 export interface ChatContext {
   activeRepoId?: string;
   selectedTaskId?: string;
-  selectedMissionId?: string;
-  selectedMissionTaskId?: string;
   activeTaskId?: string;
   filters?: FilterModel;
 }
