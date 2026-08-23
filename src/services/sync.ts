@@ -8,7 +8,7 @@ import type {
 } from '../types/index.js';
 import type { BoardService } from './board.js';
 import { allBranchesResolved } from './task-branches.js';
-import { GitHubServiceError, type GitHubService, type PRInfo } from './github.js';
+import { GitHubServiceError, type GitHubService, type PRInfo, type DiscoveredPR } from './github.js';
 import { GitService } from './git.js';
 import { TransportRegistry } from './transport/index.js';
 
@@ -504,12 +504,18 @@ export class SyncService {
   }
 
   /**
-   * Adopts pull requests opened on this card's branch name in other repos.
+   * Adopts pull requests opened on this card's branch name in other repos, plus
+   * any pull request elsewhere in the org that cross-references a PR this card
+   * already carries.
    *
-   * A feature spanning several repositories is worked on under one branch name,
-   * so one org-wide search finds every sibling regardless of how many
-   * repositories are configured — cheaper, and it also finds repos the card has
-   * never touched before.
+   * A feature spanning several repositories is worked on under one branch name
+   * *when the same hand names both branches*, so the first search catches that
+   * case cheaply — one org-wide query regardless of how many repositories are
+   * configured. It misses the case where each repo's branch is named for what
+   * it does locally rather than for the card, which is common when an agent
+   * works each side of a cross-repo change independently. The second search
+   * catches that instead, via the `repo#123` shorthand a stacked or dependent
+   * PR uses to point back at the PR that started the work.
    */
   /**
    * Whether a card is done with GitHub entirely.
@@ -558,9 +564,79 @@ export class SyncService {
           branchName: task.branchName,
         });
       }
+
+      await this.discoverReferencingBranches(task, branches, reposBySlug, org, repoPath, known);
     } catch {
       // Discovery is an enhancement. A rate limit or an unreachable search must
       // never stop the branches we already know about from syncing.
+    }
+  }
+
+  /**
+   * The second half of {@link discoverSiblingBranches}: finds PRs that name a
+   * PR this card already carries, rather than sharing its branch name.
+   *
+   * Each already-known PR is searched for by itself, and adopting one updates
+   * `known`/`knownPRs` in place so a reference search run later in the same
+   * pass — or a second known PR pointing at the same sibling — cannot add the
+   * same branch twice.
+   */
+  private async discoverReferencingBranches(
+    task: TaskRecord,
+    branches: readonly TaskBranchRecord[],
+    reposBySlug: Map<string, string>,
+    org: string,
+    repoPath: string,
+    known: Set<string>,
+  ): Promise<void> {
+    const slugByRepoId = new Map(Array.from(reposBySlug, ([slug, id]) => [id, slug]));
+    const knownPRs = new Set(
+      branches
+        .filter((branch) => branch.prNumber !== undefined)
+        .map((branch) => `${branch.repoId}#${branch.prNumber}`),
+    );
+
+    for (const branch of branches) {
+      if (branch.prNumber === undefined) {
+        continue;
+      }
+      const slug = slugByRepoId.get(branch.repoId);
+      const repoName = slug?.split('/')[1];
+      if (!repoName) {
+        continue;
+      }
+
+      let referencing: DiscoveredPR[];
+      try {
+        // GitHub only auto-links (and indexes) the bare `repo#123` shorthand,
+        // not the owner-qualified `owner/repo#123` form — a reference written
+        // the second way sits in the body as inert text and a search for it
+        // returns nothing, even scoped correctly with `org:`.
+        referencing = await this.github.findPRsReferencing(
+          repoPath,
+          org,
+          `${repoName}#${branch.prNumber}`,
+        );
+      } catch {
+        // One reference search failing must not stop the others.
+        continue;
+      }
+
+      for (const pr of referencing) {
+        const repoId = reposBySlug.get(pr.repoSlug);
+        if (!repoId || knownPRs.has(`${repoId}#${pr.number}`)) {
+          continue;
+        }
+
+        const branchName = await this.github.getPRHeadBranch(repoPath, pr.number, pr.repoSlug);
+        if (!branchName || known.has(`${repoId}#${branchName}`)) {
+          continue;
+        }
+
+        this.board.addTaskBranch({ taskId: task.id, repoId, branchName });
+        known.add(`${repoId}#${branchName}`);
+        knownPRs.add(`${repoId}#${pr.number}`);
+      }
     }
   }
 
