@@ -151,4 +151,42 @@ describe('database schema bootstrap', () => {
       db.close();
     }
   });
+
+  it('adds the opening-prompt column to a board that predates it, keeping the cards', () => {
+    // Arrange — a database at the current version whose tasks table predates
+    // initial_prompt. Bumping the schema version would drop the user's board.
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-db-'));
+    const dbPath = join(dir, 'agentboard.db');
+    tempDirs.push(dir);
+
+    let db: Db = openDb(dbPath);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, default_base_branch, health, worktree_mode, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('repo-1', 'Repo', '/tmp/repo-1', 'main', 'ok', 'auto', 1, 1);
+    db.prepare(
+      `INSERT INTO tasks (id, title, repo_id, track_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('task-1', 'Existing card', 'repo-1', 'backlog', 1, 1);
+    db.exec('ALTER TABLE tasks DROP COLUMN initial_prompt');
+    db.close();
+
+    // Act
+    db = openDb(dbPath);
+
+    // Assert
+    try {
+      const columns = db
+        .prepare<[], { name: string }>('PRAGMA table_info(tasks)')
+        .all()
+        .map((row) => row.name);
+      expect(columns).toContain('initial_prompt');
+
+      const tasks = db.prepare<[], { count: number }>('SELECT COUNT(*) AS count FROM tasks').get();
+      expect(tasks.count).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
 });

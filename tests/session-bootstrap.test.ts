@@ -33,6 +33,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_AGENT_ARGS="" ' +
         'AGENTBOARD_WORKSPACES="" ' +
         'AGENTBOARD_AGENT_SESSION_ID="" ' +
+        'AGENTBOARD_INITIAL_PROMPT_B64="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -61,6 +62,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_AGENT_ARGS="" ' +
         'AGENTBOARD_WORKSPACES="" ' +
         'AGENTBOARD_AGENT_SESSION_ID="" ' +
+        'AGENTBOARD_INITIAL_PROMPT_B64="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -283,5 +285,125 @@ describe('session-bootstrap.sh agent session resume', () => {
     expect(stdout).toContain('AGENT_ARGS:');
     expect(stdout).not.toContain('--session-id');
     expect(stdout).not.toContain('--resume');
+  });
+});
+
+describe('session-bootstrap.sh opening prompt', () => {
+  const SESSION_ID = '7c1d9a44-3e21-4b6f-9c05-8ad2e1f36b70';
+
+  /**
+   * Runs the real command line through a real shell, with a fake agent that
+   * writes each argument it was handed on its own line.
+   *
+   * One argument per line is the point: a brief that arrived split across
+   * several arguments, or with its `$` and backticks expanded by the shell, is
+   * exactly the corruption the base64 round trip exists to prevent.
+   */
+  async function runBootstrap({
+    initialPrompt,
+    agentSessionId,
+    existingConversation = false,
+    agentCli = 'claude' as const,
+  }: {
+    initialPrompt?: string;
+    agentSessionId?: string;
+    existingConversation?: boolean;
+    agentCli?: 'claude' | 'codex';
+  }): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-prompt-'));
+    try {
+      const fake = join(dir, agentCli);
+      writeFileSync(fake, '#!/bin/bash\nfor a in "$@"; do printf "ARG<%s>\\n" "$a"; done\n');
+      chmodSync(fake, 0o755);
+
+      const claudeConfig = join(dir, 'claude-config');
+      if (existingConversation) {
+        const project = join(claudeConfig, 'projects', '-some-checkout');
+        mkdirSync(project, { recursive: true });
+        writeFileSync(join(project, `${agentSessionId}.jsonl`), '{}\n');
+      }
+
+      const command = buildNewSessionBootstrapCommand({
+        repoPath: dir,
+        branch: 'ab/api-0001',
+        agentCli,
+        usesWorktree: true,
+        cwd: dir,
+        sessionBootstrapScript: BOOTSTRAP,
+        ...(initialPrompt ? { initialPrompt } : {}),
+        ...(agentSessionId ? { agentSessionId } : {}),
+      });
+
+      const { stdout } = await execFileAsync('bash', ['-c', command], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env['PATH'] ?? ''}`,
+          CLAUDE_CONFIG_DIR: claudeConfig,
+        },
+      });
+      return stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('base64s the brief rather than quoting it into the command line', () => {
+    // Arrange — every character here is one the shell would otherwise act on.
+    const command = buildNewSessionBootstrapCommand({
+      repoPath: '/repo',
+      branch: 'ab/api-0001',
+      agentCli: 'claude',
+      sessionBootstrapScript: '/s.sh',
+      initialPrompt: 'Fix $HOME and `date`\nsecond line',
+    });
+
+    // Assert — the encoded form carries no shell metacharacters at all.
+    const encoded = Buffer.from('Fix $HOME and `date`\nsecond line', 'utf8').toString('base64');
+    expect(command).toContain(`AGENTBOARD_INITIAL_PROMPT_B64="${encoded}"`);
+    expect(command).not.toContain('$HOME');
+    expect(command).not.toMatch(/[\t\n]/);
+  });
+
+  it('hands the brief to the agent as a single argument, byte for byte', async () => {
+    // Arrange — quotes, `$`, backticks and a newline all in one brief.
+    const prompt = 'Fix $HOME "now" and `date`\nsecond line';
+
+    // Act
+    const stdout = await runBootstrap({ initialPrompt: prompt });
+
+    // Assert — one argument, with nothing expanded or split along the way.
+    expect(stdout).toContain(`ARG<${prompt}>`);
+  });
+
+  it('sends the brief when the card is claiming a fresh conversation id', async () => {
+    // Act
+    const stdout = await runBootstrap({ initialPrompt: 'Ship the thing', agentSessionId: SESSION_ID });
+
+    // Assert
+    expect(stdout).toContain(`ARG<--session-id>`);
+    expect(stdout).toContain('ARG<Ship the thing>');
+  });
+
+  it('withholds the brief from a resumed conversation', async () => {
+    // Arrange + Act — the agent already did this work; replaying the brief would
+    // start it over.
+    const stdout = await runBootstrap({
+      initialPrompt: 'Ship the thing',
+      agentSessionId: SESSION_ID,
+      existingConversation: true,
+    });
+
+    // Assert
+    expect(stdout).toContain('ARG<--resume>');
+    expect(stdout).not.toContain('ARG<Ship the thing>');
+  });
+
+  it('launches exactly as before when the card carries no brief', async () => {
+    // Act
+    const stdout = await runBootstrap({});
+
+    // Assert — the agent runs, and receives no arguments at all.
+    expect(stdout).not.toContain('ARG<');
   });
 });

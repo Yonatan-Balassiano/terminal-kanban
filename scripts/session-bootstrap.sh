@@ -13,6 +13,7 @@ bootstrap_notice="${AGENTBOARD_BOOTSTRAP_NOTICE:-}"
 agent_args="${AGENTBOARD_AGENT_ARGS:-}"
 workspaces="${AGENTBOARD_WORKSPACES:-}"
 agent_session_id="${AGENTBOARD_AGENT_SESSION_ID:-}"
+initial_prompt_b64="${AGENTBOARD_INITIAL_PROMPT_B64:-}"
 
 # The card's checkouts, one "label<TAB>branch<TAB>path" row per line.
 #
@@ -87,15 +88,37 @@ fi
 # Only claude is wired up; codex's resume flags are not verified here, so it
 # keeps launching the way it always has.
 session_args=""
+resuming=0
 if [[ -n "$agent_session_id" && "$agent" == "claude" ]]; then
   claude_projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
   if compgen -G "$claude_projects/*/$agent_session_id.jsonl" >/dev/null 2>&1; then
     session_args="--resume $(printf '%q' "$agent_session_id")"
+    resuming=1
   else
     session_args="--session-id $(printf '%q' "$agent_session_id")"
   fi
 fi
 
+# The card's brief, handed to the agent as its opening prompt.
+#
+# Base64 on the way in because a brief is free text — quotes, `$`, backticks and
+# newlines all reach here intact, and none of them would have survived the
+# double-quoted env assignment the daemon builds.
+#
+# Only a fresh conversation gets it: replaying the brief into a --resume would
+# hand the agent work it has already done.
+initial_prompt=""
+if [[ -n "$initial_prompt_b64" && "$resuming" != "1" ]]; then
+  initial_prompt="$(printf '%s' "$initial_prompt_b64" | base64 -d)"
+fi
+
 # agent_args is a shell-quoted argument list built by the daemon, not user
-# free-text, so eval is what re-splits it back into distinct arguments.
-eval "\"\$command_name\" $session_args $agent_args"
+# free-text, so eval is what re-splits it back into distinct arguments. The
+# brief stays out of the eval and is appended afterwards, so nothing in it is
+# ever read as shell syntax.
+eval "set -- $session_args $agent_args"
+if [[ -n "$initial_prompt" ]]; then
+  set -- "$@" "$initial_prompt"
+fi
+
+"$command_name" "$@"

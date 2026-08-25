@@ -30,4 +30,29 @@ describe('BoardService task description', () => {
     board.setTaskDescription(task.id, '');
     expect(board.getTask(task.id)?.description).toBeUndefined();
   });
+
+  it('stores the brief a card was created with as both description and prompt', () => {
+    // Arrange + Act
+    const task = board.createTask({
+      title: 'Add rate limiting',
+      repoId: 'repo-1',
+      description: 'Cap the API at 100 rps.',
+      initialPrompt: 'Cap the API at 100 rps.',
+    });
+
+    // Assert — the card shows the brief, and the agent is handed the same text.
+    const stored = board.getTask(task.id);
+    expect(stored?.description).toBe('Cap the API at 100 rps.');
+    expect(stored?.initialPrompt).toBe('Cap the API at 100 rps.');
+  });
+
+  it('leaves a card created without a brief carrying neither', () => {
+    // Arrange + Act — a card from the TUI, which asks for no context.
+    const task = board.createTask({ title: 'Friday thing', repoId: 'repo-1' });
+
+    // Assert — an empty description must not become an empty opening prompt.
+    const stored = board.getTask(task.id);
+    expect(stored?.description).toBeUndefined();
+    expect(stored?.initialPrompt).toBeUndefined();
+  });
 });

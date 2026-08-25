@@ -194,6 +194,7 @@ export class TmuxBackend implements SessionBackend {
         agentPermissionMode: opts.agentPermissionMode,
         agentArgs: opts.agentArgs,
         agentSessionId: opts.agentSessionId,
+        initialPrompt: opts.initialPrompt,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
     }
