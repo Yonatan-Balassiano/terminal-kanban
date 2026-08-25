@@ -79,6 +79,7 @@ export class PtyBackend implements SessionBackend {
       agentPermissionMode: opts.agentPermissionMode,
       agentArgs: opts.agentArgs,
       agentSessionId: opts.agentSessionId,
+      initialPrompt: opts.initialPrompt,
     })}\n`;
     pty.write(checkoutCmd);
 

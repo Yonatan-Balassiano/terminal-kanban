@@ -245,6 +245,7 @@ function applyAdditiveMigrations(db: Db): void {
   ensureColumn(db, 'tasks', 'pr_open_count', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'tasks', 'pr_merged_count', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'sessions', 'agent_session_id', 'TEXT');
+  ensureColumn(db, 'tasks', 'initial_prompt', 'TEXT');
 
   // Run after the column migrations: both tables have foreign keys into tasks,
   // which the rebuild above may have just replaced.

@@ -195,6 +195,83 @@ function filterListedTasks(tasks: TaskRecord[], archivedOnly: boolean): TaskReco
   return tasks.filter((task) => task.archivedAt !== undefined);
 }
 
+// --------------- task create helpers ------------------------
+
+/**
+ * Resolve a repo or pillar the way a person refers to one: by id, or by the
+ * label they see on the board.
+ *
+ * Ambiguity is an error rather than a coin flip — creating the card against the
+ * wrong repo is only noticed once the agent is already running in it.
+ */
+function resolveRef<T extends { id: string; label: string }>(
+  candidates: T[],
+  ref: string,
+  kind: string,
+): T {
+  const byId = candidates.find((candidate) => candidate.id === ref);
+  if (byId) {
+    return byId;
+  }
+
+  const needle = ref.trim().toLowerCase();
+  const byLabel = candidates.filter((candidate) => candidate.label.toLowerCase() === needle);
+  if (byLabel.length === 1) {
+    return byLabel[0]!;
+  }
+
+  const known = candidates.map((candidate) => `${candidate.id} (${candidate.label})`).join(', ');
+  if (byLabel.length > 1) {
+    throw new Error(`Ambiguous ${kind} "${ref}" — more than one matches. Use an id: ${known}`);
+  }
+  throw new Error(`Unknown ${kind} "${ref}". Known ${kind}s: ${known || 'none'}`);
+}
+
+/**
+ * The brief the card carries: what shows on the card, and what the agent is
+ * handed as its opening prompt.
+ *
+ * The context is passed through verbatim. A plan URL is the one thing that gets
+ * words wrapped around it, because a bare URL on its own is not an instruction —
+ * and the agent, not AgentBoard, is what fetches it.
+ */
+export function composeTaskBrief({
+  description,
+  contextFile,
+  planUrl,
+}: {
+  description?: string;
+  contextFile?: string;
+  planUrl?: string;
+}): string | undefined {
+  const parts: string[] = [];
+
+  if (description) {
+    parts.push(description.trim());
+  }
+
+  if (contextFile) {
+    if (!fs.existsSync(contextFile)) {
+      throw new Error(`Context file not found: ${contextFile}`);
+    }
+    const contents = fs.readFileSync(contextFile, 'utf8').trim();
+    if (contents) {
+      parts.push(contents);
+    }
+  }
+
+  if (planUrl) {
+    parts.push(
+      parts.length === 0
+        ? `Read the plan at ${planUrl} and execute it.`
+        : `Plan: ${planUrl}`,
+    );
+  }
+
+  const brief = parts.join('\n\n').trim();
+  return brief.length > 0 ? brief : undefined;
+}
+
 function printRepoTable(repos: RepoRecord[]): void {
   if (repos.length === 0) {
     console.log('No repos registered.');
@@ -489,6 +566,158 @@ export function buildCli(): Command {
         process.exit(1);
       }
     });
+
+  // ----------------------------------------------------------
+  // task
+  // ----------------------------------------------------------
+  const task = program.command('task').description('Manage tasks on the board');
+
+  task
+    .command('create <title>')
+    .description('Create a task, optionally starting its agent on the context you give it')
+    .option('--repo <ref>', 'Repo id or label the task belongs to')
+    .option('--general', 'Create a task that belongs to no repo')
+    .option('--pillar <ref>', "Pillar id or label (defaults to the repo's default pillar)")
+    .option('--agent <cli>', 'Agent CLI to run: claude or codex', 'claude')
+    .option('--location <where>', 'Where the session runs: local or remote', 'local')
+    .option('--track <id>', 'Board column to create the card in', 'backlog')
+    .option('--description <text>', 'Context for the task, shown on the card')
+    .option('--context-file <path>', 'Read the context from a file')
+    .option('--plan-url <url>', 'URL holding the plan for the agent to read and execute')
+    .option('--start', 'Open a session and hand the context to the agent as its first prompt')
+    .option('--json', 'Output as JSON')
+    .action(
+      async (
+        title: string,
+        opts: {
+          repo?: string;
+          general?: boolean;
+          pillar?: string;
+          agent?: string;
+          location?: string;
+          track?: string;
+          description?: string;
+          contextFile?: string;
+          planUrl?: string;
+          start?: boolean;
+          json?: boolean;
+        },
+      ) => {
+        try {
+          if (opts.general && opts.repo) {
+            throw new Error('--general takes no --repo: a general task belongs to no repo.');
+          }
+          if (opts.agent !== 'claude' && opts.agent !== 'codex') {
+            throw new Error(`Unsupported --agent "${opts.agent}". Use claude or codex.`);
+          }
+          if (opts.location !== 'local' && opts.location !== 'remote') {
+            throw new Error(`Unsupported --location "${opts.location}". Use local or remote.`);
+          }
+          if (opts.general && opts.location === 'remote') {
+            throw new Error('A general task has no checkout to run remotely; use --location local.');
+          }
+
+          // Read the context before touching the daemon, so a bad --context-file
+          // fails without leaving a half-set-up card on the board.
+          const brief = composeTaskBrief({
+            description: opts.description,
+            contextFile: opts.contextFile,
+            planUrl: opts.planUrl,
+          });
+
+          const paths = configPaths();
+          await ensureRunning(daemonOpts(paths));
+          const rpc = await createRPCClient(paths.socketPath);
+
+          try {
+            const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+
+            if (!board.tracks.some((track) => track.id === opts.track)) {
+              throw new Error(
+                `Unknown --track "${opts.track}". Known tracks: ${board.tracks
+                  .map((track) => track.id)
+                  .join(', ')}`,
+              );
+            }
+
+            let repo: RepoRecord | undefined;
+            if (!opts.general) {
+              if (opts.repo) {
+                repo = resolveRef(board.repos, opts.repo, 'repo');
+              } else if (board.repos.length === 1) {
+                // Unambiguous: there is nothing else the card could belong to.
+                repo = board.repos[0];
+              } else {
+                throw new Error(
+                  'Pass --repo <id|label>, or --general for a task with no repo. ' +
+                    `Known repos: ${board.repos.map((r) => `${r.id} (${r.label})`).join(', ') || 'none'}`,
+                );
+              }
+
+              if (opts.location === 'remote' && !repo!.remotePath) {
+                throw new Error(
+                  `Repo ${repo!.id} has no remotePath configured, so it cannot run remotely. ` +
+                    'Set "remotePath" for the repo, or use --location local.',
+                );
+              }
+            }
+
+            const pillarId = opts.pillar
+              ? resolveRef(board.pillars, opts.pillar, 'pillar').id
+              : repo?.defaultPillarId;
+
+            const created = await rpc.call<TaskRecord>('createTask', {
+              title,
+              kind: opts.general ? 'general' : 'repo',
+              repoId: repo?.id,
+              pillarId,
+              agentCli: opts.agent,
+              location: opts.location,
+              trackId: opts.track,
+              description: brief,
+              initialPrompt: brief,
+            });
+
+            // Opening the session is what starts the agent on the brief, and it
+            // also walks the card out of the backlog.
+            const session = opts.start
+              ? await rpc.call<import('../types/index.js').SessionRecord>('openSession', {
+                  taskId: created.id,
+                })
+              : null;
+
+            if (opts.json) {
+              console.log(JSON.stringify({ task: created, session }, null, 2));
+              return;
+            }
+
+            console.log(`Created task ${created.id}: ${created.title}`);
+            if (created.branchName) {
+              console.log(`  branch  ${created.branchName}`);
+            }
+            console.log(`  repo    ${created.repoId ?? '(general)'}`);
+            console.log(`  agent   ${created.agentCli} (${created.location})`);
+            if (brief) {
+              console.log(`  brief   ${brief.split('\n')[0]}`);
+            }
+            if (session) {
+              console.log(
+                session.attachCommand
+                  ? `Session started. Attach with: ${session.attachCommand}`
+                  : `Session started: ${session.id}`,
+              );
+            } else {
+              console.log(`Start it with: agentboard attach ${created.id}`);
+            }
+          } finally {
+            rpc.disconnect();
+          }
+        } catch (err) {
+          console.error(`Error: ${(err as Error).message}`);
+          process.exit(1);
+        }
+      },
+    );
 
   // ----------------------------------------------------------
   // repos

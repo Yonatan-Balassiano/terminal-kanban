@@ -97,11 +97,18 @@ function buildSyncClauses(fields: TaskSyncPatch): {
   return { setClauses, values };
 }
 
+/** Blank text and "no text at all" are the same thing to a nullable column. */
+function emptyToNull(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 function rowToTask(row: Record<string, unknown>): TaskRecord {
   return {
     id: row['id'] as string,
     title: row['title'] as string,
     description: (row['description'] as string | null) ?? undefined,
+    initialPrompt: (row['initial_prompt'] as string | null) ?? undefined,
     kind: (row['kind'] as TaskKind | null) ?? 'repo',
     repoId: (row['repo_id'] as string | null) ?? undefined,
     agentCli: (row['agent_cli'] as 'claude' | 'codex' | null) ?? 'claude',
@@ -419,15 +426,18 @@ export class BoardService {
     this.db
       .prepare<unknown[], void>(
         `INSERT INTO tasks
-           (id, title, kind, repo_id, agent_cli, location, track_id, pillar_id, branch_name, sort_key,
+           (id, title, description, initial_prompt, kind, repo_id, agent_cli, location, track_id,
+            pillar_id, branch_name, sort_key,
             pr_state, pr_draft, ci_state, review_state, unresolved_thread_count,
             github_sync_status, ci_required_total, ci_required_passed, ci_required_failed,
             ci_required_pending, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
       )
       .run(
         id,
         params.title,
+        emptyToNull(params.description),
+        emptyToNull(params.initialPrompt),
         kind,
         isGeneral ? null : params.repoId!,
         agentCli,

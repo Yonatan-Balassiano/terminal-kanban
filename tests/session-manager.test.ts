@@ -247,6 +247,137 @@ describe('SessionManager branch fallback', () => {
     );
   });
 
+  it('hands the card brief to the backend as the session opening prompt', async () => {
+    // Arrange — a card created with context, the way `task create` makes one.
+    const task = board.createTask({
+      title: 'Add rate limiting',
+      repoId: 'repo-1',
+      description: 'Cap the API at 100 rps.',
+      initialPrompt: 'Cap the API at 100 rps.',
+    });
+
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'pty',
+      backendSessionId: 'ab_add_rate_limiting_1234',
+      attachCommand: undefined,
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    // Act
+    await manager.openSession(task.id);
+
+    // Assert
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ initialPrompt: 'Cap the API at 100 rps.' })
+    );
+  });
+
+  it('opens a session with no opening prompt for a card that has no brief', async () => {
+    // Arrange — a card made in the TUI, which never asks for context.
+    const task = board.createTask({ title: 'Friday thing', repoId: 'repo-1' });
+
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'pty',
+      backendSessionId: 'ab_friday_thing_1234',
+      attachCommand: undefined,
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({
+        command: '(embedded PTY — attach not supported)',
+      })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    // Act
+    await manager.openSession(task.id);
+
+    // Assert
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ initialPrompt: undefined })
+    );
+  });
+
   it('passes the stored repo default base branch into new session creation', async () => {
     db.prepare('UPDATE repos SET default_base_branch = ? WHERE id = ?').run('master', 'repo-1');
     const task = board.createTask({ title: 'Use master', repoId: 'repo-1' });

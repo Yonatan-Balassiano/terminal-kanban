@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   unresolved_thread_count INTEGER NOT NULL DEFAULT 0,
   archived_at INTEGER,
   description TEXT,
+  -- The card's brief, handed to the agent as its opening prompt the first time
+  -- a conversation starts. Kept apart from `description` so a card whose notes
+  -- were only ever meant for a human never turns into a prompt.
+  initial_prompt TEXT,
   last_session_cwd TEXT,
   ci_summary TEXT,
   failing_check_name TEXT,

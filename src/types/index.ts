@@ -148,6 +148,11 @@ export interface TaskRecord {
   id: string;
   title: string;
   description?: string;
+  /**
+   * The opening prompt handed to the agent when this card starts a fresh
+   * conversation. Absent on cards that were never given a brief.
+   */
+  initialPrompt?: string;
   kind: TaskKind;
   /** Absent on general tasks, which belong to no repo. */
   repoId?: string;
@@ -336,6 +341,13 @@ export interface CreateSessionOpts {
    * in the directory, which a card's second pane or a sibling task would win.
    */
   agentSessionId?: string;
+  /**
+   * The card's brief, handed to the agent as its opening prompt.
+   *
+   * Only reaches the agent when the conversation is starting fresh: replaying it
+   * into a resumed conversation would re-run work the agent already did.
+   */
+  initialPrompt?: string;
 }
 
 export interface AttachMetadata {
@@ -470,6 +482,10 @@ export interface WatchSessionUpdatesParams {
 
 export interface CreateTaskParams {
   title: string;
+  /** Free-text context shown on the card. */
+  description?: string;
+  /** Opening prompt for the agent's first conversation on this card. */
+  initialPrompt?: string;
   /** Defaults to 'repo'. A 'general' task takes no repoId. */
   kind?: TaskKind;
   /** Required for 'repo' tasks, ignored for 'general' ones. */
