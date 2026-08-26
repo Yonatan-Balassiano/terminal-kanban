@@ -8,9 +8,11 @@ import type {
   CreateSessionOpts,
   SessionBackend,
   SessionRecord,
+  SessionSlot,
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
+import { BRIEF_FILE_MODE, briefRelativePath } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import { shellJoin } from '../shell-quote.js';
 import { buildControlPath, TransportUnreachableError, type SshTransport } from '../transport/index.js';
@@ -138,6 +140,23 @@ export class SshTmuxBackend implements SessionBackend {
     const content = await readFile(localScriptPath, 'utf8');
     await this.transport.writeFileIfChanged(remotePath, content, REMOTE_BOOTSTRAP_MODE);
     this.remoteBootstrapScript = remotePath;
+    return remotePath;
+  }
+
+  /**
+   * Park the card's brief on the remote host and hand back its path.
+   *
+   * Mirrors the local backends: the bootstrap command is typed into the pane
+   * either way, so the brief travels as a path on both sides of the SSH hop.
+   */
+  private async ensureRemoteBrief(
+    taskId: string,
+    slot: SessionSlot,
+    prompt: string
+  ): Promise<string> {
+    const home = await this.resolveRemoteHome();
+    const remotePath = `${home}/.agentboard/${briefRelativePath(taskId, slot)}`;
+    await this.transport.writeFileIfChanged(remotePath, prompt, BRIEF_FILE_MODE);
     return remotePath;
   }
 
@@ -285,6 +304,9 @@ export class SshTmuxBackend implements SessionBackend {
           buildTmuxSurviveDetachArgs(backendSessionId)
         )
       );
+      const remoteBriefFile = opts.initialPrompt
+        ? await this.ensureRemoteBrief(opts.taskId, opts.slot, opts.initialPrompt)
+        : undefined;
       const bootstrapCommand = buildNewSessionBootstrapCommand({
         taskKind: opts.taskKind,
         repoPath: opts.repoPath,
@@ -298,7 +320,7 @@ export class SshTmuxBackend implements SessionBackend {
         agentPermissionMode: opts.agentPermissionMode,
         agentArgs: opts.agentArgs,
         agentSessionId: opts.agentSessionId,
-        initialPrompt: opts.initialPrompt,
+        initialPromptFile: remoteBriefFile,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       this.rememberInspect(backendSessionId, { backendSessionId, status: 'active' });
