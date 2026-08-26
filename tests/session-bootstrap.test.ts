@@ -33,7 +33,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_AGENT_ARGS="" ' +
         'AGENTBOARD_WORKSPACES="" ' +
         'AGENTBOARD_AGENT_SESSION_ID="" ' +
-        'AGENTBOARD_INITIAL_PROMPT_B64="" ' +
+        'AGENTBOARD_INITIAL_PROMPT_FILE="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -62,7 +62,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_AGENT_ARGS="" ' +
         'AGENTBOARD_WORKSPACES="" ' +
         'AGENTBOARD_AGENT_SESSION_ID="" ' +
-        'AGENTBOARD_INITIAL_PROMPT_B64="" ' +
+        'AGENTBOARD_INITIAL_PROMPT_FILE="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -316,6 +316,12 @@ describe('session-bootstrap.sh opening prompt', () => {
       writeFileSync(fake, '#!/bin/bash\nfor a in "$@"; do printf "ARG<%s>\\n" "$a"; done\n');
       chmodSync(fake, 0o755);
 
+      let initialPromptFile: string | undefined;
+      if (initialPrompt !== undefined) {
+        initialPromptFile = join(dir, 'brief.txt');
+        writeFileSync(initialPromptFile, initialPrompt, 'utf8');
+      }
+
       const claudeConfig = join(dir, 'claude-config');
       if (existingConversation) {
         const project = join(claudeConfig, 'projects', '-some-checkout');
@@ -330,7 +336,7 @@ describe('session-bootstrap.sh opening prompt', () => {
         usesWorktree: true,
         cwd: dir,
         sessionBootstrapScript: BOOTSTRAP,
-        ...(initialPrompt ? { initialPrompt } : {}),
+        ...(initialPromptFile ? { initialPromptFile } : {}),
         ...(agentSessionId ? { agentSessionId } : {}),
       });
 
@@ -348,31 +354,48 @@ describe('session-bootstrap.sh opening prompt', () => {
     }
   }
 
-  it('base64s the brief rather than quoting it into the command line', () => {
-    // Arrange — every character here is one the shell would otherwise act on.
+  it('passes the brief by path, never by value', () => {
+    // Arrange
     const command = buildNewSessionBootstrapCommand({
       repoPath: '/repo',
       branch: 'ab/api-0001',
       agentCli: 'claude',
       sessionBootstrapScript: '/s.sh',
-      initialPrompt: 'Fix $HOME and `date`\nsecond line',
+      initialPromptFile: '/tmp/agentboard/briefs/task-1-primary.txt',
     });
 
-    // Assert — the encoded form carries no shell metacharacters at all.
-    const encoded = Buffer.from('Fix $HOME and `date`\nsecond line', 'utf8').toString('base64');
-    expect(command).toContain(`AGENTBOARD_INITIAL_PROMPT_B64="${encoded}"`);
-    expect(command).not.toContain('$HOME');
-    expect(command).not.toMatch(/[\t\n]/);
+    // Assert
+    expect(command).toContain(
+      'AGENTBOARD_INITIAL_PROMPT_FILE="/tmp/agentboard/briefs/task-1-primary.txt"'
+    );
+  });
+
+  it('keeps the command line short no matter how long the brief is', () => {
+    // Arrange — the whole command is typed into the session's pane, which drops
+    // everything past roughly 4 KB and leaves the shell hanging on an
+    // unterminated quote. A brief has no length ceiling, so it must not be able
+    // to push the command anywhere near that.
+    const command = buildNewSessionBootstrapCommand({
+      repoPath: '/repo',
+      branch: 'ab/api-0001',
+      agentCli: 'claude',
+      sessionBootstrapScript: '/s.sh',
+      initialPromptFile: '/tmp/agentboard/briefs/task-1-primary.txt',
+    });
+
+    // Assert — a generous ceiling; the real line is a few hundred bytes.
+    expect(command.length).toBeLessThan(1024);
   });
 
   it('hands the brief to the agent as a single argument, byte for byte', async () => {
-    // Arrange — quotes, `$`, backticks and a newline all in one brief.
-    const prompt = 'Fix $HOME "now" and `date`\nsecond line';
+    // Arrange — quotes, `$`, backticks and a newline all in one brief, plus
+    // enough bulk that it could never have ridden the command line.
+    const prompt = `Fix $HOME "now" and \`date\`\nsecond line\n${'x'.repeat(8000)}`;
 
     // Act
     const stdout = await runBootstrap({ initialPrompt: prompt });
 
-    // Assert — one argument, with nothing expanded or split along the way.
+    // Assert — one argument, with nothing expanded, split or truncated.
     expect(stdout).toContain(`ARG<${prompt}>`);
   });
 

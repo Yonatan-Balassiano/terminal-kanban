@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'fs';
 import {
   buildTmuxAttachCommand,
   buildTmuxSendInputCommands,
@@ -220,5 +221,86 @@ describe('TmuxBackend', () => {
       { args: ['send-keys', '-t', 'ab_task_1234_p', '-l', 'git status'] },
       { args: ['send-keys', '-t', 'ab_task_1234_p', 'Enter'] },
     ]);
+  });
+});
+
+describe('TmuxBackend brief handling', () => {
+  /** Every literal the backend typed into the pane, joined. */
+  async function createWithBrief(initialPrompt: string): Promise<{
+    typed: string;
+    longestLiteral: number;
+  }> {
+    const literals: string[] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      if (args[0] === 'has-session') {
+        throw new Error('missing');
+      }
+      if (args[0] === 'send-keys' && args[3] === '-l') {
+        literals.push(args[4] ?? '');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+    });
+
+    await backend.create({
+      taskId: 'brieftask',
+      taskTitle: 'Long brief',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/long-brief-0001',
+      agentCli: 'claude',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt,
+    });
+
+    return {
+      typed: literals.join(''),
+      longestLiteral: literals.reduce((max, literal) => Math.max(max, literal.length), 0),
+    };
+  }
+
+  it('never types the brief into the pane, however long it is', async () => {
+    // Arrange — a brief far past the roughly 4 KB a pane accepts. Sending it
+    // inline truncates the command mid-quote, and the shell then waits forever
+    // for the closing quote instead of ever launching the agent.
+    const brief = `Rework the variant matcher.\n\n${'context line\n'.repeat(600)}`;
+    expect(brief.length).toBeGreaterThan(4096);
+
+    // Act
+    const { typed, longestLiteral } = await createWithBrief(brief);
+
+    // Assert — the pane sees a path, and a command line nowhere near the limit.
+    expect(typed).not.toContain('Rework the variant matcher');
+    expect(typed).toContain('AGENTBOARD_INITIAL_PROMPT_FILE=');
+    expect(longestLiteral).toBeLessThan(2048);
+  });
+
+  it('parks the brief where the bootstrap script will find it', async () => {
+    // Arrange
+    const brief = 'Cap the API at 100 rps.';
+
+    // Act
+    const { typed } = await createWithBrief(brief);
+
+    // Assert — the path it named holds exactly the brief.
+    const match = typed.match(/AGENTBOARD_INITIAL_PROMPT_FILE="([^"]+)"/);
+    expect(match).not.toBeNull();
+    expect(readFileSync(match![1]!, 'utf8')).toBe(brief);
+  });
+
+  it('names no brief file for a card that has none', async () => {
+    // Act
+    const { typed } = await createWithBrief('');
+
+    // Assert
+    expect(typed).toContain('AGENTBOARD_INITIAL_PROMPT_FILE=""');
   });
 });

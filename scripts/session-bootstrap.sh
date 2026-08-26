@@ -13,7 +13,7 @@ bootstrap_notice="${AGENTBOARD_BOOTSTRAP_NOTICE:-}"
 agent_args="${AGENTBOARD_AGENT_ARGS:-}"
 workspaces="${AGENTBOARD_WORKSPACES:-}"
 agent_session_id="${AGENTBOARD_AGENT_SESSION_ID:-}"
-initial_prompt_b64="${AGENTBOARD_INITIAL_PROMPT_B64:-}"
+initial_prompt_file="${AGENTBOARD_INITIAL_PROMPT_FILE:-}"
 
 # The card's checkouts, one "label<TAB>branch<TAB>path" row per line.
 #
@@ -101,15 +101,18 @@ fi
 
 # The card's brief, handed to the agent as its opening prompt.
 #
-# Base64 on the way in because a brief is free text — quotes, `$`, backticks and
-# newlines all reach here intact, and none of them would have survived the
-# double-quoted env assignment the daemon builds.
+# Arrives as a path rather than a value: this whole command line is typed into
+# the session's pane, which drops everything past roughly 4 KB — a brief of any
+# real length would truncate the command mid-quote and hang the shell. Reading
+# the file also means quotes, `$`, backticks and newlines need no escaping at
+# all.
 #
 # Only a fresh conversation gets it: replaying the brief into a --resume would
-# hand the agent work it has already done.
+# hand the agent work it has already done. A brief whose file has gone missing
+# is simply not sent, rather than failing the session that was about to start.
 initial_prompt=""
-if [[ -n "$initial_prompt_b64" && "$resuming" != "1" ]]; then
-  initial_prompt="$(printf '%s' "$initial_prompt_b64" | base64 -d)"
+if [[ -n "$initial_prompt_file" && "$resuming" != "1" && -f "$initial_prompt_file" ]]; then
+  initial_prompt="$(cat "$initial_prompt_file")"
 fi
 
 # agent_args is a shell-quoted argument list built by the daemon, not user
