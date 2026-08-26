@@ -35,10 +35,11 @@ export interface SessionBootstrapCommandOptions {
   /** Conversation id to resume, or to start this conversation under. */
   agentSessionId?: string;
   /**
-   * The card's brief, handed to the agent as its opening prompt when the
-   * conversation starts fresh.
+   * Path to the file holding the card's brief, on whichever host the session
+   * runs. Read by the script and handed to the agent as its opening prompt when
+   * the conversation starts fresh.
    */
-  initialPrompt?: string;
+  initialPromptFile?: string;
 }
 
 /**
@@ -74,20 +75,6 @@ function encodeWorkspaces(workspaces: readonly SessionWorkspaceEntry[]): string 
     .join(WORKSPACE_ROW_SEPARATOR);
 }
 
-/**
- * The opening prompt, base64'd for the trip through the command line.
- *
- * Every other env var here is quoted with `shellString`, which is fine for the
- * paths and branch names it was written for. A brief is free text: it routinely
- * carries `$`, backticks and newlines, none of which survive a double-quoted
- * assignment that the tmux backends then send as a single line. Base64 has no
- * characters the shell cares about, so the value arrives byte-for-byte.
- */
-function encodeInitialPrompt(prompt: string | undefined): string {
-  const trimmed = prompt?.trim();
-  return trimmed ? Buffer.from(trimmed, 'utf8').toString('base64') : '';
-}
-
 /** Arguments appended to the agent CLI invocation, in a stable order. */
 export function resolveAgentArgs(
   agentCli: AgentCLI,
@@ -112,7 +99,7 @@ export function buildNewSessionBootstrapCommand({
   agentArgs,
   workspaces = [],
   agentSessionId,
-  initialPrompt,
+  initialPromptFile,
 }: SessionBootstrapCommandOptions): string {
   const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs);
   const envVars: Array<[string, string]> = [
@@ -127,7 +114,10 @@ export function buildNewSessionBootstrapCommand({
     ['AGENTBOARD_AGENT_ARGS', shellJoin(resolvedAgentArgs)],
     ['AGENTBOARD_WORKSPACES', encodeWorkspaces(workspaces)],
     ['AGENTBOARD_AGENT_SESSION_ID', agentSessionId ?? ''],
-    ['AGENTBOARD_INITIAL_PROMPT_B64', encodeInitialPrompt(initialPrompt)],
+    // A path, never the brief itself: the whole command line is typed into the
+    // session's pane, and a long brief would push it past the ~4 KB the pane
+    // accepts, truncating the command mid-quote.
+    ['AGENTBOARD_INITIAL_PROMPT_FILE', initialPromptFile ?? ''],
   ];
 
   return [
