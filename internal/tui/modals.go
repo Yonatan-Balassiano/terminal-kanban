@@ -1681,6 +1681,12 @@ func (m *Model) executeCommandPaletteAction(commandID string) tea.Cmd {
 			return m.revealTaskWorkspaceCmd(contextTask)
 		}
 		return nil
+	case "sync-to-main":
+		m.closeModal()
+		if contextTask != nil {
+			return m.syncTaskToMainCmd(contextTask)
+		}
+		return nil
 	case "create-pr":
 		m.closeModal()
 		if contextTask != nil {
@@ -1768,6 +1774,7 @@ func (m *Model) commandPaletteCommands() []CommandPaletteItem {
 		{ID: "fullscreen-terminal", Title: "Expand terminal workspace", Section: "Session", Detail: "Make the terminal take over the workspace.", Shortcut: "z", Keywords: []string{"terminal", "fullscreen", "expand"}, Disabled: m.activeTaskID == "", DisabledReason: "Open a task shell before expanding the terminal."},
 		{ID: "open-ide", Title: "Open workspace in IDE", Section: "Workspace", Detail: "Open the current task workspace in the configured IDE.", Shortcut: "i", Keywords: []string{"editor", "workspace"}, Disabled: contextTask == nil, DisabledReason: "Select a task to open its workspace."},
 		{ID: "open-workspace", Title: "Reveal workspace", Section: "Workspace", Detail: "Open the current task workspace in Finder or Explorer.", Shortcut: "x", Keywords: []string{"finder", "explorer", "folder"}, Disabled: contextTask == nil, DisabledReason: "Select a task to reveal its workspace."},
+		{ID: "sync-to-main", Title: "Sync task into main checkout", Section: "Workspace", Detail: "Reset the repo's main checkout to this task's branch tip, then layer the worktree's uncommitted and untracked changes on top. Destructive to the main checkout.", Shortcut: "M", Keywords: []string{"worktree", "main", "checkout", "reset", "port", "mirror"}, Disabled: contextTask == nil, DisabledReason: "Select a task to sync its worktree into the main checkout."},
 		{ID: "create-pr", Title: "Create or ensure pull request", Section: "GitHub", Detail: "Create the PR immediately for the current task branch.", Shortcut: "c", Keywords: []string{"github", "pull request"}, Disabled: contextTask == nil || contextTask.IsGeneral(), DisabledReason: "Select a repo task to create a pull request."},
 		{ID: "retry-pushed-pr-creation", Title: "Retry pushed-branch PR creation", Section: "GitHub", Detail: "Restart the background PR creation watcher after a branch push.", Shortcut: "C", Keywords: []string{"github", "pull request", "push", "retry"}, Disabled: contextTask == nil || contextTask.BranchName == "", DisabledReason: "Select a task with a branch to watch for PR creation."},
 		{ID: "comment-pr", Title: "Comment on pull request", Section: "GitHub", Detail: "Open a composer and post a comment with gh CLI.", Shortcut: "j", Keywords: []string{"github", "pull request", "comment"}, Disabled: contextTask == nil || !canCommentOnTaskPR(*contextTask), DisabledReason: prActionDisabledReason(contextTask, "The current task does not have an open or draft pull request.")},

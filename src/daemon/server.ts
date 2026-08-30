@@ -672,6 +672,17 @@ export async function dispatch(
         return { id: req.id, result };
       }
 
+      case 'syncTaskToMain': {
+        const result = await services.worktrees.syncTaskToMain(
+          (p as unknown as { id: string }).id
+        );
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        return { id: req.id, result };
+      }
+
       case 'createTaskPR': {
         const pr = await services.sync.createTaskPR((p as unknown as CreateTaskPRParams).taskId);
         serverEvents.emit('event', {
