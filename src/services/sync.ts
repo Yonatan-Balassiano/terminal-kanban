@@ -110,6 +110,17 @@ export class SyncService {
    * tracking artifacts.
    */
   isFullyReleased?: (taskId: string) => boolean;
+  /**
+   * Fires the first time a subtask's PR appears, so the parent card's own
+   * live session — if it has one — can be told about it directly. Supplied by
+   * the daemon; absent means only the durable board-level alert gets set.
+   */
+  notifyParentOfSubtaskPR?: (
+    parentTaskId: string,
+    childTask: TaskRecord,
+    prNumber: number,
+    prUrl: string,
+  ) => Promise<void>;
   private github: GitHubService;
   private git: GitService;
   private db: Db;
@@ -839,6 +850,18 @@ export class SyncService {
 
       if (prInfo) {
         this.clearDelayedRetry(task.id);
+
+        // A PR just appeared where this branch had none before. If this task
+        // is a subtask, its parent card is the one that needs to know.
+        if (branch.prNumber == null && task.parentTaskId) {
+          this.board.setChildPrAlert?.(task.parentTaskId, task.id);
+          void this.notifyParentOfSubtaskPR?.(
+            task.parentTaskId,
+            task,
+            prInfo.number,
+            prInfo.url,
+          );
+        }
       }
 
       result.prInfo = prInfo;

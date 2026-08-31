@@ -171,6 +171,7 @@ export class SessionManager {
       setTaskLastSessionCwd?: (taskId: string, cwd: string | null) => Promise<void> | void;
       setTaskSessionAttention?: (taskId: string) => boolean;
       clearTaskSessionAttention?: (taskId: string) => boolean;
+      clearChildPrAlert?: (taskId: string) => boolean;
     },
     private worktrees: WorktreeService,
     private buffers: TerminalBufferService,
@@ -799,6 +800,36 @@ export class SessionManager {
 
   acknowledgeSessionAttention(taskId: string): boolean {
     return this.clearTaskAttention(taskId);
+  }
+
+  acknowledgeChildPrAlert(taskId: string): boolean {
+    return this.board.clearChildPrAlert?.(taskId) ?? false;
+  }
+
+  /**
+   * Types a message straight into a card's live session and submits it —
+   * the same thing a human collaborator would do by attaching and typing.
+   *
+   * Unlike the public {@link sendInput}, this is not gated to pty sessions: a
+   * tmux/ssh session's pane is exactly where this message needs to land, since
+   * there is no human already attached to type it themselves. Returns false
+   * rather than throwing when the card has no live session — there is simply
+   * nowhere to deliver an automated notice, and the caller falls back to a
+   * durable board-level flag instead.
+   */
+  async notifyTaskSession(
+    taskId: string,
+    message: string,
+    slot: SessionSlot = 'primary'
+  ): Promise<boolean> {
+    const session = this.getSession(taskId, slot);
+    if (!session?.backendSessionId) {
+      return false;
+    }
+
+    const backend = this.getBackend(session.backendType);
+    await backend.sendInput(session.backendSessionId, `${message}\r`);
+    return true;
   }
 
   async resizeSession(

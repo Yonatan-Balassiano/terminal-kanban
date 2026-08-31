@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 'repo' tasks own a branch and a worktree in repo_id; 'general' tasks carry
   -- none of that, so repo_id is NULL for them.
   kind TEXT NOT NULL DEFAULT 'repo',
+  -- Set when this card was spun off from another one via `agentboard task
+  -- create` run inside the parent's session. NULL for everything else.
+  parent_task_id TEXT,
+  -- The child task whose PR just opened, so this card can flag "review this
+  -- subtask's PR" until acknowledged. NULL when there is nothing to review.
+  child_pr_alert_task_id TEXT,
   repo_id TEXT REFERENCES repos(id) ON DELETE CASCADE,
   track_id TEXT NOT NULL,
   pillar_id TEXT REFERENCES pillars(id) ON DELETE SET NULL,

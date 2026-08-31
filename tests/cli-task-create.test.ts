@@ -105,8 +105,8 @@ function makeTask(patch: Partial<TaskRecord> = {}): TaskRecord {
 }
 
 /** An RPC client whose responses are keyed by method. */
-function stubRpc(handlers: Record<string, unknown> = {}) {
-  const board = makeBoard();
+function stubRpc(handlers: Record<string, unknown> = {}, boardOverride?: BoardSnapshot) {
+  const board = boardOverride ?? makeBoard();
   const call = vi.fn(async (method: string) => {
     if (method in handlers) {
       return handlers[method];
@@ -134,6 +134,7 @@ describe('agentboard task create', () => {
     logSpy.mockClear();
     errorSpy.mockClear();
     exitSpy.mockClear();
+    delete process.env['AGENTBOARD_TASK_ID'];
   });
 
   it('creates a repo task with the defaults the board already implies', async () => {
@@ -220,6 +221,64 @@ describe('agentboard task create', () => {
       'createTask',
       expect.objectContaining({ kind: 'general', repoId: undefined, pillarId: undefined }),
     );
+  });
+
+  it('marks a card as a subtask when --parent is given', async () => {
+    // Arrange
+    const board = makeBoard({ tasks: [makeTask({ id: 'parent-1' })] });
+    const { call } = stubRpc({}, board);
+
+    // Act
+    await run('Add rate limiting', '--parent', 'parent-1');
+
+    // Assert
+    expect(call).toHaveBeenCalledWith(
+      'createTask',
+      expect.objectContaining({ parentTaskId: 'parent-1' }),
+    );
+  });
+
+  it('auto-detects the parent from the session it is run inside', async () => {
+    // Arrange — set by the session bootstrap script, not passed by the user.
+    process.env['AGENTBOARD_TASK_ID'] = 'parent-1';
+    const board = makeBoard({ tasks: [makeTask({ id: 'parent-1' })] });
+    const { call } = stubRpc({}, board);
+
+    // Act
+    await run('Add rate limiting');
+
+    // Assert
+    expect(call).toHaveBeenCalledWith(
+      'createTask',
+      expect.objectContaining({ parentTaskId: 'parent-1' }),
+    );
+  });
+
+  it('an explicit --parent wins over the session it is run inside', async () => {
+    // Arrange
+    process.env['AGENTBOARD_TASK_ID'] = 'parent-1';
+    const board = makeBoard({
+      tasks: [makeTask({ id: 'parent-1' }), makeTask({ id: 'parent-2' })],
+    });
+    const { call } = stubRpc({}, board);
+
+    // Act
+    await run('Add rate limiting', '--parent', 'parent-2');
+
+    // Assert
+    expect(call).toHaveBeenCalledWith(
+      'createTask',
+      expect.objectContaining({ parentTaskId: 'parent-2' }),
+    );
+  });
+
+  it('refuses an unknown --parent rather than creating an orphaned reference', async () => {
+    // Arrange
+    stubRpc();
+
+    // Act + Assert
+    await expect(run('Add rate limiting', '--parent', 'no-such-task')).rejects.toThrow(ExitError);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown --parent'));
   });
 
   it('refuses a remote task on a repo that has no remote path', async () => {

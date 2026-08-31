@@ -15,6 +15,13 @@ export interface SessionWorkspaceEntry {
 }
 
 export interface SessionBootstrapCommandOptions {
+  /**
+   * The card this session belongs to, exported as `AGENTBOARD_TASK_ID` so a
+   * `agentboard task create` run from inside the session can mark whatever it
+   * spins off as this card's subtask without the agent having to know or
+   * guess its own id.
+   */
+  taskId?: string;
   /** Defaults to 'repo'. A 'general' session gets no branch checkout. */
   taskKind?: TaskKind;
   repoPath: string;
@@ -86,6 +93,7 @@ export function resolveAgentArgs(
 }
 
 export function buildNewSessionBootstrapCommand({
+  taskId,
   taskKind = 'repo',
   repoPath,
   branch,
@@ -103,6 +111,7 @@ export function buildNewSessionBootstrapCommand({
 }: SessionBootstrapCommandOptions): string {
   const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs);
   const envVars: Array<[string, string]> = [
+    ['AGENTBOARD_TASK_ID', taskId ?? ''],
     ['AGENTBOARD_TASK_KIND', taskKind],
     ['AGENTBOARD_REPO_PATH', repoPath],
     ['AGENTBOARD_TASK_BRANCH', branch],

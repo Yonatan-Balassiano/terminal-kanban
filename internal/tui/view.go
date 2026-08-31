@@ -942,6 +942,17 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 			true,
 		))
 	}
+	if task.ParentTaskID != "" {
+		lines = append(lines, badge("Subtask", "purple", "↳", false))
+	}
+	if task.ChildPRAlertTaskID != "" {
+		lines = append(lines, badge(
+			truncateText(childPrAlertLabel(m, task), contentWidth-2),
+			"warning",
+			"🔔",
+			false,
+		))
+	}
 	// A card with one branch is the old card and must stay byte-identical, so
 	// the rollup only appears once there is genuinely more than one PR to sum up.
 	if hasMultipleBranches(task) {
@@ -1669,6 +1680,18 @@ func toneColor(tone string) string {
 	}
 }
 
+// childPrAlertLabel names the subtask whose PR is waiting on this card to
+// review. Falls back to the bare id if the child has scrolled out of the
+// board snapshot this render is working from.
+func childPrAlertLabel(m *Model, task TaskRecord) string {
+	for _, other := range m.tasks {
+		if other.ID == task.ChildPRAlertTaskID {
+			return "PR ready: " + other.Title
+		}
+	}
+	return "PR ready: " + task.ChildPRAlertTaskID
+}
+
 func taskCardBorderColor(task TaskRecord, isSelected bool) string {
 	if task.SessionAttentionNeeded {
 		if isSelected {
@@ -1723,6 +1746,13 @@ func taskCardHeightForWidth(m *Model, task TaskRecord, contentWidth int, compact
 	// + 2 borders from lipgloss = 7 base
 	height := 7 + len(titleLines)
 	if githubStatusBadgeModel(task) != nil {
+		height++
+	}
+	// Mirrors the Subtask/PR-alert badge lines in renderTaskCardWithWidth.
+	if task.ParentTaskID != "" {
+		height++
+	}
+	if task.ChildPRAlertTaskID != "" {
 		height++
 	}
 	// Mirrors the rollup badge line and the per-branch glyph strip in

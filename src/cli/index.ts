@@ -577,6 +577,10 @@ export function buildCli(): Command {
     .description('Create a task, optionally starting its agent on the context you give it')
     .option('--repo <ref>', 'Repo id or label the task belongs to')
     .option('--general', 'Create a task that belongs to no repo')
+    .option(
+      '--parent <id>',
+      'Mark this as a subtask of an existing card (defaults to the running session’s own task, if any)',
+    )
     .option('--pillar <ref>', "Pillar id or label (defaults to the repo's default pillar)")
     .option('--agent <cli>', 'Agent CLI to run: claude or codex', 'claude')
     .option('--location <where>', 'Where the session runs: local or remote', 'local')
@@ -592,6 +596,7 @@ export function buildCli(): Command {
         opts: {
           repo?: string;
           general?: boolean;
+          parent?: string;
           pillar?: string;
           agent?: string;
           location?: string;
@@ -640,6 +645,14 @@ export function buildCli(): Command {
               );
             }
 
+            // Falls back to whichever card this command is itself running
+            // inside — set by the session bootstrap script — so a card spun off
+            // from a running session is marked as its subtask with no extra flag.
+            const parentTaskId = opts.parent ?? (process.env['AGENTBOARD_TASK_ID'] || undefined);
+            if (parentTaskId && !board.tasks.some((task) => task.id === parentTaskId)) {
+              throw new Error(`Unknown --parent "${parentTaskId}". No card with that id exists.`);
+            }
+
             let repo: RepoRecord | undefined;
             if (!opts.general) {
               if (opts.repo) {
@@ -669,6 +682,7 @@ export function buildCli(): Command {
             const created = await rpc.call<TaskRecord>('createTask', {
               title,
               kind: opts.general ? 'general' : 'repo',
+              parentTaskId,
               repoId: repo?.id,
               pillarId,
               agentCli: opts.agent,
@@ -697,6 +711,9 @@ export function buildCli(): Command {
             }
             console.log(`  repo    ${created.repoId ?? '(general)'}`);
             console.log(`  agent   ${created.agentCli} (${created.location})`);
+            if (created.parentTaskId) {
+              console.log(`  subtask of ${created.parentTaskId}`);
+            }
             if (brief) {
               console.log(`  brief   ${brief.split('\n')[0]}`);
             }

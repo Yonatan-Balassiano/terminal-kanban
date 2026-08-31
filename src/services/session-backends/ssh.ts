@@ -17,13 +17,22 @@ import { buildBackendSessionName } from '../session-name.js';
 import { shellJoin } from '../shell-quote.js';
 import { buildControlPath, TransportUnreachableError, type SshTransport } from '../transport/index.js';
 import {
+  DEFAULT_POST_PASTE_DELAY_MS,
+  sleep,
+  waitForStablePane,
+  type PaneIdleWaitOptions,
+} from './pane-idle.js';
+import {
   buildTmuxAttachCommand,
+  buildTmuxCapturePaneArgs,
   buildTmuxHasSessionArgs,
   buildTmuxKillPaneArgs,
   buildTmuxKillSessionArgs,
   buildTmuxListPanesArgs,
   buildTmuxListSessionsArgs,
+  buildTmuxLoadBufferArgs,
   buildTmuxNewSessionArgs,
+  buildTmuxPasteBufferArgs,
   buildTmuxSendInputCommands,
   buildTmuxSurviveDetachArgs,
   buildTmuxTagPaneArgs,
@@ -59,6 +68,8 @@ export interface SshTmuxBackendOptions {
   remoteAttachScript?: string;
   idGenerator?: () => string;
   now?: () => number;
+  /** Overridable so tests don't sit through real polling intervals. */
+  paneIdleOptions?: PaneIdleWaitOptions;
 }
 
 interface InspectCacheEntry {
@@ -97,6 +108,7 @@ export class SshTmuxBackend implements SessionBackend {
   private readonly remoteAttachScript: string;
   private readonly idGenerator: () => string;
   private readonly now: () => number;
+  private readonly paneIdleOptions?: PaneIdleWaitOptions;
 
   private readonly inspectCache = new Map<string, InspectCacheEntry>();
   private remoteHome: string | null = null;
@@ -111,6 +123,7 @@ export class SshTmuxBackend implements SessionBackend {
     this.remoteAttachScript = options.remoteAttachScript ?? bundledRemoteAttachScriptPath();
     this.idGenerator = options.idGenerator ?? generateId;
     this.now = options.now ?? Date.now;
+    this.paneIdleOptions = options.paneIdleOptions;
   }
 
   private createTransportRunner(): TmuxCommandRunner {
@@ -308,6 +321,7 @@ export class SshTmuxBackend implements SessionBackend {
         ? await this.ensureRemoteBrief(opts.taskId, opts.slot, opts.initialPrompt)
         : undefined;
       const bootstrapCommand = buildNewSessionBootstrapCommand({
+        taskId: opts.taskId,
         taskKind: opts.taskKind,
         repoPath: opts.repoPath,
         branch: opts.branch,
@@ -320,10 +334,15 @@ export class SshTmuxBackend implements SessionBackend {
         agentPermissionMode: opts.agentPermissionMode,
         agentArgs: opts.agentArgs,
         agentSessionId: opts.agentSessionId,
+        // Only the path travels through argv; see TmuxBackend for why the
+        // brief's contents are delivered separately, once the pane is ready.
         initialPromptFile: remoteBriefFile,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       this.rememberInspect(backendSessionId, { backendSessionId, status: 'active' });
+      if (remoteBriefFile) {
+        await this.deliverInitialPrompt(backendSessionId, remoteBriefFile);
+      }
     }
 
     await this.ensureWrapper(backendSessionId);
@@ -391,6 +410,37 @@ export class SshTmuxBackend implements SessionBackend {
     for (const invocation of buildTmuxSendInputCommands(backendSessionId, data)) {
       await this.remoteRunner(invocation.args);
     }
+  }
+
+  /**
+   * Delivers the card's brief once the remote pane looks ready for it. Mirrors
+   * {@link TmuxBackend}'s version — see there for why this exists instead of
+   * trusting the agent CLI's argv handling, and why a paste rather than typed
+   * keystrokes.
+   *
+   * Skipped when `remoteBriefFile` is gone: `session-bootstrap.sh`, running on
+   * the remote host, deletes it itself on a resume.
+   */
+  private async deliverInitialPrompt(
+    backendSessionId: string,
+    remoteBriefFile: string
+  ): Promise<void> {
+    await waitForStablePane(async () => {
+      const result = await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId));
+      return result.stdout;
+    }, this.paneIdleOptions);
+
+    if (!(await this.transport.exists(remoteBriefFile))) {
+      return;
+    }
+
+    const bufferName = `agentboard_brief_${backendSessionId}`;
+    await this.remoteRunner(buildTmuxLoadBufferArgs(bufferName, remoteBriefFile));
+    await this.remoteRunner(buildTmuxPasteBufferArgs(bufferName, backendSessionId));
+    // An Enter sent right after the paste lands before the CLI has finished
+    // processing it and is silently dropped — see PaneIdleWaitOptions.
+    await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
+    await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Enter']);
   }
 
   async resize(_backendSessionId: string, _cols: number, _rows: number): Promise<void> {

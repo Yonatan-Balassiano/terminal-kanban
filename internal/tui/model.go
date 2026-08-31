@@ -1705,6 +1705,7 @@ func (m *Model) focusActiveTerminalCmd(fullscreen bool) tea.Cmd {
 	return tea.Batch(
 		m.resizeActiveSessionCmd(),
 		m.acknowledgeSessionAttentionCmd(m.activeTaskID),
+		m.acknowledgeChildPrAlertCmd(m.activeTaskID),
 	)
 }
 
@@ -1804,6 +1805,19 @@ func (m *Model) acknowledgeSessionAttentionCmd(taskID string) tea.Cmd {
 
 	return func() tea.Msg {
 		if err := m.client.Call("acknowledgeSessionAttention", map[string]string{"taskId": taskID}, nil); err != nil {
+			return asyncErrorMsg{err: err}
+		}
+		return nil
+	}
+}
+
+func (m *Model) acknowledgeChildPrAlertCmd(taskID string) tea.Cmd {
+	if taskID == "" || m.client == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		if err := m.client.Call("acknowledgeChildPrAlert", map[string]string{"taskId": taskID}, nil); err != nil {
 			return asyncErrorMsg{err: err}
 		}
 		return nil

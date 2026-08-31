@@ -110,6 +110,8 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     description: (row['description'] as string | null) ?? undefined,
     initialPrompt: (row['initial_prompt'] as string | null) ?? undefined,
     kind: (row['kind'] as TaskKind | null) ?? 'repo',
+    parentTaskId: (row['parent_task_id'] as string | null) ?? undefined,
+    childPrAlertTaskId: (row['child_pr_alert_task_id'] as string | null) ?? undefined,
     repoId: (row['repo_id'] as string | null) ?? undefined,
     agentCli: (row['agent_cli'] as 'claude' | 'codex' | null) ?? 'claude',
     location: (row['location'] as TaskLocation | null) ?? 'local',
@@ -426,12 +428,12 @@ export class BoardService {
     this.db
       .prepare<unknown[], void>(
         `INSERT INTO tasks
-           (id, title, description, initial_prompt, kind, repo_id, agent_cli, location, track_id,
-            pillar_id, branch_name, sort_key,
+           (id, title, description, initial_prompt, kind, parent_task_id, repo_id, agent_cli,
+            location, track_id, pillar_id, branch_name, sort_key,
             pr_state, pr_draft, ci_state, review_state, unresolved_thread_count,
             github_sync_status, ci_required_total, ci_required_passed, ci_required_failed,
             ci_required_pending, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
       )
       .run(
         id,
@@ -439,6 +441,7 @@ export class BoardService {
         emptyToNull(params.description),
         emptyToNull(params.initialPrompt),
         kind,
+        params.parentTaskId ?? null,
         isGeneral ? null : params.repoId!,
         agentCli,
         location,
@@ -783,6 +786,34 @@ export class BoardService {
              updated_at = ?
          WHERE id = ?
            AND session_attention_needed = 1`,
+      )
+      .run(now, taskId);
+    return result.changes > 0;
+  }
+
+  /** Flags `parentTaskId`'s card: `childTaskId`'s pull request is ready to review. */
+  setChildPrAlert(parentTaskId: string, childTaskId: string): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare<[string, number, string]>(
+        `UPDATE tasks
+         SET child_pr_alert_task_id = ?,
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(childTaskId, now, parentTaskId);
+    return result.changes > 0;
+  }
+
+  clearChildPrAlert(taskId: string): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare<[number, string]>(
+        `UPDATE tasks
+         SET child_pr_alert_task_id = NULL,
+             updated_at = ?
+         WHERE id = ?
+           AND child_pr_alert_task_id IS NOT NULL`,
       )
       .run(now, taskId);
     return result.changes > 0;

@@ -99,29 +99,23 @@ if [[ -n "$agent_session_id" && "$agent" == "claude" ]]; then
   fi
 fi
 
-# The card's brief, handed to the agent as its opening prompt.
-#
-# Arrives as a path rather than a value: this whole command line is typed into
-# the session's pane, which drops everything past roughly 4 KB — a brief of any
-# real length would truncate the command mid-quote and hang the shell. Reading
-# the file also means quotes, `$`, backticks and newlines need no escaping at
-# all.
+# The card's brief file. It is no longer typed into argv here — a multi-line
+# brief handed to the CLI as a positional argument depends on the CLI's own
+# startup (its SessionStart hooks included) processing it correctly before the
+# prompt is submitted, which is not reliable. The daemon delivers it instead,
+# once this pane is up, by pasting it in directly (see TmuxBackend/SshTmuxBackend).
 #
 # Only a fresh conversation gets it: replaying the brief into a --resume would
-# hand the agent work it has already done. A brief whose file has gone missing
-# is simply not sent, rather than failing the session that was about to start.
-initial_prompt=""
-if [[ -n "$initial_prompt_file" && "$resuming" != "1" && -f "$initial_prompt_file" ]]; then
-  initial_prompt="$(cat "$initial_prompt_file")"
+# hand the agent work it has already done. Deleting the file here — rather
+# than leaving it for the daemon to notice "this is a resume" itself — is the
+# one signal both sides need: the daemon delivers the brief if and only if the
+# file it wrote is still there once the pane comes up.
+if [[ -n "$initial_prompt_file" && "$resuming" == "1" ]]; then
+  rm -f "$initial_prompt_file"
 fi
 
 # agent_args is a shell-quoted argument list built by the daemon, not user
-# free-text, so eval is what re-splits it back into distinct arguments. The
-# brief stays out of the eval and is appended afterwards, so nothing in it is
-# ever read as shell syntax.
+# free-text, so eval is what re-splits it back into distinct arguments.
 eval "set -- $session_args $agent_args"
-if [[ -n "$initial_prompt" ]]; then
-  set -- "$@" "$initial_prompt"
-fi
 
 "$command_name" "$@"

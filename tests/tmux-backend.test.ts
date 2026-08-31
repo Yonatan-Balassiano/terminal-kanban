@@ -225,13 +225,16 @@ describe('TmuxBackend', () => {
 });
 
 describe('TmuxBackend brief handling', () => {
-  /** Every literal the backend typed into the pane, joined. */
+  /** Every literal the backend typed into the pane, joined, plus every call made. */
   async function createWithBrief(initialPrompt: string): Promise<{
     typed: string;
     longestLiteral: number;
+    calls: string[][];
   }> {
     const literals: string[] = [];
+    const calls: string[][] = [];
     const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
       if (args[0] === 'has-session') {
         throw new Error('missing');
       }
@@ -245,6 +248,9 @@ describe('TmuxBackend brief handling', () => {
       runner,
       idGenerator: () => 'session-1',
       now: () => 123,
+      // A stable-empty capture-pane mock settles on the first re-check —
+      // no need to wait out the real interval in a test.
+      paneIdleOptions: { timeoutMs: 1000, intervalMs: 0, stableChecks: 1, postPasteDelayMs: 0 },
     });
 
     await backend.create({
@@ -264,6 +270,7 @@ describe('TmuxBackend brief handling', () => {
     return {
       typed: literals.join(''),
       longestLiteral: literals.reduce((max, literal) => Math.max(max, literal.length), 0),
+      calls,
     };
   }
 
@@ -298,9 +305,41 @@ describe('TmuxBackend brief handling', () => {
 
   it('names no brief file for a card that has none', async () => {
     // Act
-    const { typed } = await createWithBrief('');
+    const { typed, calls } = await createWithBrief('');
 
     // Assert
     expect(typed).toContain('AGENTBOARD_INITIAL_PROMPT_FILE=""');
+    // Nothing to deliver, so no pane-idle poll or paste ever runs.
+    expect(calls.some((args) => args[0] === 'capture-pane')).toBe(false);
+  });
+
+  it('delivers the brief by pasting it in once the pane settles, not by typing it', async () => {
+    // Arrange
+    const brief = 'Fix $HOME "now"\nsecond line';
+
+    // Act
+    const { calls } = await createWithBrief(brief);
+
+    // Assert — capture-pane runs before the paste, and the paste comes from a
+    // loaded buffer (never `send-keys -l`, which would submit after line one).
+    const captureIndex = calls.findIndex((args) => args[0] === 'capture-pane');
+    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
+    const pasteIndex = calls.findIndex((args) => args[0] === 'paste-buffer');
+    // The bootstrap command's own submit also sends an Enter, earlier on —
+    // the one that matters here is the last one, after the paste.
+    const enterIndex = calls
+      .map((args, index) => ({ args, index }))
+      .filter(({ args }) => args[0] === 'send-keys' && args.includes('Enter'))
+      .map(({ index }) => index)
+      .pop();
+
+    expect(captureIndex).toBeGreaterThanOrEqual(0);
+    expect(loadIndex).toBeGreaterThan(captureIndex);
+    expect(pasteIndex).toBeGreaterThan(loadIndex);
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
+
+    // ['load-buffer', '-b', bufferName, filePath]
+    const briefFile = calls[loadIndex]![3];
+    expect(readFileSync(briefFile!, 'utf8')).toBe(brief);
   });
 });

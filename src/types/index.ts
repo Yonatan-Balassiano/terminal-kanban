@@ -154,6 +154,10 @@ export interface TaskRecord {
    */
   initialPrompt?: string;
   kind: TaskKind;
+  /** Set when this card was spun off from another one as its subtask. */
+  parentTaskId?: string;
+  /** The child task whose PR is waiting on this card to review, if any. */
+  childPrAlertTaskId?: string;
   /** Absent on general tasks, which belong to no repo. */
   repoId?: string;
   agentCli: AgentCLI;
@@ -436,6 +440,7 @@ export type RPCMethod =
   | 'teleportTask'
   | 'setDualSessionMode'
   | 'acknowledgeSessionAttention'
+  | 'acknowledgeChildPrAlert'
   | 'sendInput'
   | 'watchSessionUpdates'
   | 'resizeSession'
@@ -489,6 +494,8 @@ export interface CreateTaskParams {
   initialPrompt?: string;
   /** Defaults to 'repo'. A 'general' task takes no repoId. */
   kind?: TaskKind;
+  /** The card this one was spun off from, if it was created as a subtask. */
+  parentTaskId?: string;
   /** Required for 'repo' tasks, ignored for 'general' ones. */
   repoId?: string;
   agentCli?: AgentCLI;
@@ -639,6 +646,10 @@ export interface SetDualSessionModeParams {
 }
 
 export interface AcknowledgeSessionAttentionParams {
+  taskId: string;
+}
+
+export interface AcknowledgeChildPrAlertParams {
   taskId: string;
 }
 

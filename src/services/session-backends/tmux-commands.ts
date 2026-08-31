@@ -91,6 +91,30 @@ export function buildTmuxPaneIdArgs(target: string): string[] {
   return ['display-message', '-p', '-t', target, '#{pane_id}'];
 }
 
+/** Renders whatever is currently on screen in the pane, for idle-detection. */
+export function buildTmuxCapturePaneArgs(target: string): string[] {
+  return ['capture-pane', '-p', '-t', target];
+}
+
+/**
+ * Loads a file's contents into a tmux paste buffer.
+ *
+ * Delivering the card's brief this way, rather than as typed keystrokes,
+ * matters once it spans more than one line: `send-keys` submits on every
+ * newline it sees, so a multi-line brief typed key-by-key would be cut off and
+ * submitted after its first line. A paste, like a human pasting into the pane,
+ * inserts the whole block — including its newlines — without triggering submit
+ * until a real Enter follows.
+ */
+export function buildTmuxLoadBufferArgs(bufferName: string, filePath: string): string[] {
+  return ['load-buffer', '-b', bufferName, filePath];
+}
+
+/** Pastes a loaded buffer into the target pane and frees it (`-d`). */
+export function buildTmuxPasteBufferArgs(bufferName: string, target: string): string[] {
+  return ['paste-buffer', '-b', bufferName, '-d', '-t', target];
+}
+
 export interface TmuxNewSessionSpec {
   backendSessionId: string;
   cwd?: string;

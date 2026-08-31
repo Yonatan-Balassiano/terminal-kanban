@@ -82,3 +82,19 @@ Sessions are either PTY-backed (embedded in the TUI terminal pane) or tmux-backe
 - If you change daemon-side TypeScript code, the daemon must be restarted (`npm run reset-daemon`)
 - If you change Go TUI code, run `npm run build:go` and relaunch the TUI
 - Tests use `vitest` — no jest globals; use `import { describe, it, expect } from 'vitest'`
+
+## Creating sub-tasks (`agentboard task create`)
+
+An agent working a card in this repo can spin off follow-up work as a new card via `agentboard task create <title> --repo <id> --description "..."`. Before doing so:
+
+- **Never pass `--start` without the user's explicit go-ahead.** `--start` immediately launches a second autonomous agent session on the new card, which will edit and commit on its own branch unsupervised — treat it like a `git push`: confirm first. Creating the card without `--start` (it sits in `backlog` for the user to launch when ready) needs no confirmation.
+- **Check the board before creating.** Query the existing tasks (`getBoard` via the TUI, or list cards) to make sure the same work isn't already backlogged or in progress — don't duplicate cards.
+- **Write the brief for a stranger.** `--description` / `--context-file` becomes the new agent's entire opening prompt — it has none of the current conversation. State the why, the relevant file paths, and what's out of scope, the way you'd brief a fresh subagent with zero context.
+- **Resolve `--repo`/`--pillar` explicitly** (`agentboard repos`) rather than guessing — a card created against the wrong repo starts its session in the wrong checkout.
+- **One concrete task per card.** Only create a card for well-defined, ready-to-start follow-up work — don't fan out speculative sub-tasks.
+
+**Subtask marking.** A card created from inside a running session is automatically linked to that session's task as its parent (`AGENTBOARD_TASK_ID`, no flag needed — pass `--parent <id>` to link explicitly instead). A subtask's card shows a "Subtask" badge. When a subtask's PR first opens, the parent card gets flagged (`child_pr_alert_task_id`) and, if the parent has a live session, the notice is typed straight into it — see `notifyParentOfSubtaskPR` in `src/services/sync.ts` and `notifyTaskSession` in `src/services/session-manager.ts`.
+
+**`--start` prompt delivery.** The brief is no longer trusted to the agent CLI's own argv handling (that path was unreliable — see `src/services/session-backends/pane-idle.ts` for why). The daemon spawns the session, waits for the pane to settle, then pastes the brief in itself (`TmuxBackend.deliverInitialPrompt` / `SshTmuxBackend.deliverInitialPrompt`). If a session ever does come up with an empty prompt despite this, that is a regression worth a bug report, not something to route around by hand.
+
+**Receiving a subtask PR notice.** If a message starting with `[agentboard] Automated notice, not from the user:` appears in your input, the daemon typed it — it is not the user talking, and it means a subtask you spawned from this card just opened a pull request. Actually review it (`gh pr diff`, `gh pr view`, `gh pr review`) rather than only acknowledging it; report what you found back to the user. If it arrives mid-task, finish the step you're on first, but don't drop it — get to the review before ending your turn.

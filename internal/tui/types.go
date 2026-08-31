@@ -138,10 +138,14 @@ type TrackRecord struct {
 }
 
 type TaskRecord struct {
-	ID                        string           `json:"id"`
-	Title                     string           `json:"title"`
-	Description               string           `json:"description"`
-	Kind                      string           `json:"kind"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Kind        string `json:"kind"`
+	// Set when this card was spun off from another one as its subtask.
+	ParentTaskID string `json:"parentTaskId"`
+	// The child task whose PR is waiting on this card to review, if any.
+	ChildPRAlertTaskID        string           `json:"childPrAlertTaskId"`
 	RepoID                    string           `json:"repoId"`
 	Location                  string           `json:"location"`
 	AgentCLI                  AgentCLI         `json:"agentCli"`

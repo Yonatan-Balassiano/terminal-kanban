@@ -166,6 +166,7 @@ function makeBoard(taskPatch: Partial<TaskRecord> = {}, extraBranches: string[] 
     moveTask: vi.fn().mockImplementation(({ trackId }: { trackId: string }) => {
       task = { ...task, trackId };
     }),
+    setChildPrAlert: vi.fn(),
   };
 
   return { board, getTask: () => task, getBranches: () => branches };
@@ -223,6 +224,52 @@ describe('SyncService', () => {
       id: 'task-1',
       trackId: 'pr',
     });
+  });
+
+  it("flags the parent card when a subtask's PR first appears", async () => {
+    const { board } = makeBoard({ parentTaskId: 'parent-1' });
+    const prInfo = makePrInfo();
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue(null),
+      getPR: vi.fn(),
+      createPR: vi.fn().mockResolvedValue(prInfo),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+    const notified: unknown[] = [];
+    sync.notifyParentOfSubtaskPR = async (parentTaskId, childTask, prNumber, prUrl) => {
+      notified.push({ parentTaskId, childTaskId: childTask.id, prNumber, prUrl });
+    };
+
+    await sync.trigger();
+
+    expect(board.setChildPrAlert).toHaveBeenCalledWith('parent-1', 'task-1');
+    expect(notified).toEqual([
+      {
+        parentTaskId: 'parent-1',
+        childTaskId: 'task-1',
+        prNumber: 42,
+        prUrl: 'https://example.test/pr/42',
+      },
+    ]);
   });
 
   it('uses the stored repo default base branch without overwriting it during sync', async () => {

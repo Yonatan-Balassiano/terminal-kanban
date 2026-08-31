@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -22,7 +22,8 @@ describe('buildNewSessionBootstrapCommand', () => {
         sessionBootstrapScript: '/scripts/session-bootstrap.sh',
       })
     ).toBe(
-      'AGENTBOARD_TASK_KIND="repo" ' +
+      'AGENTBOARD_TASK_ID="" ' +
+        'AGENTBOARD_TASK_KIND="repo" ' +
         'AGENTBOARD_REPO_PATH="/repo" ' +
         'AGENTBOARD_TASK_BRANCH="ab/task-1234" ' +
         'AGENTBOARD_BASE_BRANCH="main" ' +
@@ -51,7 +52,8 @@ describe('buildNewSessionBootstrapCommand', () => {
         sessionBootstrapScript: '/scripts/session-bootstrap.sh',
       })
     ).toBe(
-      'AGENTBOARD_TASK_KIND="repo" ' +
+      'AGENTBOARD_TASK_ID="" ' +
+        'AGENTBOARD_TASK_KIND="repo" ' +
         'AGENTBOARD_REPO_PATH="/repo" ' +
         'AGENTBOARD_TASK_BRANCH="ab/task-1234" ' +
         'AGENTBOARD_BASE_BRANCH="master" ' +
@@ -309,7 +311,7 @@ describe('session-bootstrap.sh opening prompt', () => {
     agentSessionId?: string;
     existingConversation?: boolean;
     agentCli?: 'claude' | 'codex';
-  }): Promise<string> {
+  }): Promise<{ stdout: string; briefFileExists: boolean }> {
     const dir = mkdtempSync(join(tmpdir(), 'agentboard-prompt-'));
     try {
       const fake = join(dir, agentCli);
@@ -348,7 +350,10 @@ describe('session-bootstrap.sh opening prompt', () => {
           CLAUDE_CONFIG_DIR: claudeConfig,
         },
       });
-      return stdout;
+      return {
+        stdout,
+        briefFileExists: initialPromptFile !== undefined && existsSync(initialPromptFile),
+      };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -387,31 +392,38 @@ describe('session-bootstrap.sh opening prompt', () => {
     expect(command.length).toBeLessThan(1024);
   });
 
-  it('hands the brief to the agent as a single argument, byte for byte', async () => {
+  it('never hands the brief to the agent as an argument, however unruly its contents', async () => {
     // Arrange — quotes, `$`, backticks and a newline all in one brief, plus
-    // enough bulk that it could never have ridden the command line.
+    // enough bulk that it could never have ridden the command line. Delivery
+    // is the daemon's job now (see TmuxBackend.deliverInitialPrompt); the
+    // script's job is only to leave the file for it to find.
     const prompt = `Fix $HOME "now" and \`date\`\nsecond line\n${'x'.repeat(8000)}`;
 
     // Act
-    const stdout = await runBootstrap({ initialPrompt: prompt });
+    const { stdout, briefFileExists } = await runBootstrap({ initialPrompt: prompt });
 
-    // Assert — one argument, with nothing expanded, split or truncated.
-    expect(stdout).toContain(`ARG<${prompt}>`);
+    // Assert — nothing from the brief reaches argv, and the file survives.
+    expect(stdout).not.toContain('ARG<');
+    expect(briefFileExists).toBe(true);
   });
 
-  it('sends the brief when the card is claiming a fresh conversation id', async () => {
+  it('leaves the brief file for the daemon when the card is claiming a fresh conversation id', async () => {
     // Act
-    const stdout = await runBootstrap({ initialPrompt: 'Ship the thing', agentSessionId: SESSION_ID });
+    const { stdout, briefFileExists } = await runBootstrap({
+      initialPrompt: 'Ship the thing',
+      agentSessionId: SESSION_ID,
+    });
 
-    // Assert
+    // Assert — the session flag still rides argv; the brief itself no longer does.
     expect(stdout).toContain(`ARG<--session-id>`);
-    expect(stdout).toContain('ARG<Ship the thing>');
+    expect(stdout).not.toContain('ARG<Ship the thing>');
+    expect(briefFileExists).toBe(true);
   });
 
-  it('withholds the brief from a resumed conversation', async () => {
+  it('deletes the brief file for a resumed conversation, so nothing gets delivered', async () => {
     // Arrange + Act — the agent already did this work; replaying the brief would
-    // start it over.
-    const stdout = await runBootstrap({
+    // start it over. Deletion is the signal the daemon checks for.
+    const { stdout, briefFileExists } = await runBootstrap({
       initialPrompt: 'Ship the thing',
       agentSessionId: SESSION_ID,
       existingConversation: true,
@@ -420,11 +432,12 @@ describe('session-bootstrap.sh opening prompt', () => {
     // Assert
     expect(stdout).toContain('ARG<--resume>');
     expect(stdout).not.toContain('ARG<Ship the thing>');
+    expect(briefFileExists).toBe(false);
   });
 
   it('launches exactly as before when the card carries no brief', async () => {
     // Act
-    const stdout = await runBootstrap({});
+    const { stdout } = await runBootstrap({});
 
     // Assert — the agent runs, and receives no arguments at all.
     expect(stdout).not.toContain('ARG<');

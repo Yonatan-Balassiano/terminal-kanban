@@ -32,6 +32,7 @@ import type {
   ResizeSessionParams,
   InspectSessionParams,
   AcknowledgeSessionAttentionParams,
+  AcknowledgeChildPrAlertParams,
   OpenSessionParams,
   ReconnectSessionParams,
   TeleportTaskParams,
@@ -606,6 +607,19 @@ export async function dispatch(
           (p as unknown as AcknowledgeSessionAttentionParams).taskId
         );
         if (attentionChanged) {
+          serverEvents.emit('event', {
+            type: 'board_patch',
+            payload: services.view.getBoardSnapshot(),
+          });
+        }
+        return { id: req.id, result: null };
+      }
+
+      case 'acknowledgeChildPrAlert': {
+        const alertChanged = services.session.acknowledgeChildPrAlert(
+          (p as unknown as AcknowledgeChildPrAlertParams).taskId
+        );
+        if (alertChanged) {
           serverEvents.emit('event', {
             type: 'board_patch',
             payload: services.view.getBoardSnapshot(),

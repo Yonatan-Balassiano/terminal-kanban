@@ -8,18 +8,28 @@ import type {
   SessionBackend,
   SessionRecord,
 } from '../../types/index.js';
+import { existsSync } from 'fs';
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { writeLocalBrief } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import {
+  DEFAULT_POST_PASTE_DELAY_MS,
+  sleep,
+  waitForStablePane,
+  type PaneIdleWaitOptions,
+} from './pane-idle.js';
+import {
   buildTmuxAttachCommand,
+  buildTmuxCapturePaneArgs,
   buildTmuxHasSessionArgs,
   buildTmuxKillPaneArgs,
   buildTmuxKillSessionArgs,
   buildTmuxListPanesArgs,
   buildTmuxListSessionsArgs,
+  buildTmuxLoadBufferArgs,
   buildTmuxNewSessionArgs,
+  buildTmuxPasteBufferArgs,
   buildTmuxSendInputCommands,
   buildTmuxSurviveDetachArgs,
   buildTmuxTagPaneArgs,
@@ -51,6 +61,8 @@ export interface TmuxBackendOptions {
   runner?: TmuxCommandRunner;
   idGenerator?: () => string;
   now?: () => number;
+  /** Overridable so tests don't sit through real polling intervals. */
+  paneIdleOptions?: PaneIdleWaitOptions;
 }
 
 /** Runs `tmux` on the machine the daemon is running on. */
@@ -72,11 +84,13 @@ export class TmuxBackend implements SessionBackend {
   private runner: TmuxCommandRunner;
   private idGenerator: () => string;
   private now: () => number;
+  private paneIdleOptions?: PaneIdleWaitOptions;
 
   constructor(options: TmuxBackendOptions = {}) {
     this.runner = options.runner ?? localTmuxRunner;
     this.idGenerator = options.idGenerator ?? generateId;
     this.now = options.now ?? Date.now;
+    this.paneIdleOptions = options.paneIdleOptions;
   }
 
   private async ensureSessionSurvivesDetach(backendSessionId: string): Promise<void> {
@@ -182,7 +196,11 @@ export class TmuxBackend implements SessionBackend {
         )
       );
       await this.tagSessionPane(backendSessionId);
+      const initialPromptFile = opts.initialPrompt
+        ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
+        : undefined;
       const bootstrapCommand = buildNewSessionBootstrapCommand({
+        taskId: opts.taskId,
         taskKind: opts.taskKind,
         repoPath: opts.repoPath,
         branch: opts.branch,
@@ -195,11 +213,15 @@ export class TmuxBackend implements SessionBackend {
         agentPermissionMode: opts.agentPermissionMode,
         agentArgs: opts.agentArgs,
         agentSessionId: opts.agentSessionId,
-        initialPromptFile: opts.initialPrompt
-          ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
-          : undefined,
+        // Only the file's path travels through the pane's argv; the script
+        // deletes it itself when this turns out to be a resume (see
+        // session-bootstrap.sh). The daemon, not argv, delivers the contents.
+        initialPromptFile,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
+      if (initialPromptFile) {
+        await this.deliverInitialPrompt(backendSessionId, initialPromptFile);
+      }
     }
 
     const now = this.now();
@@ -230,6 +252,34 @@ export class TmuxBackend implements SessionBackend {
     for (const invocation of buildTmuxSendInputCommands(target, data)) {
       await this.runner(invocation.args);
     }
+  }
+
+  /**
+   * Delivers the card's brief once the pane looks ready for it, instead of
+   * trusting the agent CLI to have picked it up from argv on its own.
+   *
+   * Skipped when `briefFile` is gone: `session-bootstrap.sh` deletes it itself
+   * when the pane turned out to be resuming an existing conversation, which is
+   * the one signal both sides need to agree the brief should not be replayed.
+   */
+  private async deliverInitialPrompt(backendSessionId: string, briefFile: string): Promise<void> {
+    const target = await this.resolveInputTarget(backendSessionId);
+    await waitForStablePane(async () => {
+      const result = await this.runner(buildTmuxCapturePaneArgs(target));
+      return result.stdout;
+    }, this.paneIdleOptions);
+
+    if (!existsSync(briefFile)) {
+      return;
+    }
+
+    const bufferName = `agentboard_brief_${backendSessionId}`;
+    await this.runner(buildTmuxLoadBufferArgs(bufferName, briefFile));
+    await this.runner(buildTmuxPasteBufferArgs(bufferName, target));
+    // An Enter sent right after the paste lands before the CLI has finished
+    // processing it and is silently dropped — see PaneIdleWaitOptions.
+    await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
+    await this.runner(['send-keys', '-t', target, 'Enter']);
   }
 
   async resize(_backendSessionId: string, _cols: number, _rows: number): Promise<void> {
