@@ -1047,8 +1047,10 @@ func TestPRPickerIncludesSubtaskPRsMarkedAsSuch(t *testing.T) {
 	if !strings.Contains(plain, "#33 open") {
 		t.Fatalf("PR picker = %q, want it to list the subtask's PR", plain)
 	}
-	if !strings.Contains(plain, "SUBTASK") {
-		t.Fatalf("PR picker = %q, want the subtask's row marked SUBTASK", plain)
+	// Named, not just flagged: with more than one subtask a bare "SUBTASK"
+	// tag would not say which one this row belongs to.
+	if !strings.Contains(plain, "Extracted helper") {
+		t.Fatalf("PR picker = %q, want the subtask's row to name its own task", plain)
 	}
 }
 
@@ -1060,8 +1062,8 @@ func TestPRPickerDoesNotMarkTheParentsOwnBranches(t *testing.T) {
 
 	plain := ansiPattern.ReplaceAllString(renderBranchPRListModal(model), "")
 
-	if strings.Contains(plain, "SUBTASK") {
-		t.Fatalf("PR picker = %q, a card's own PRs must not be marked SUBTASK", plain)
+	if strings.Contains(plain, "↳") {
+		t.Fatalf("PR picker = %q, a card's own PRs must not carry the owning-task mark", plain)
 	}
 }
 

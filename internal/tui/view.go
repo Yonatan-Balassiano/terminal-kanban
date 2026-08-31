@@ -942,12 +942,22 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 			true,
 		))
 	}
+	// -6 rather than -2: unlike the plain githubStatus badge above, these carry
+	// an icon and a joining space ahead of the label, inside the same 1-column
+	// padding on each side — budgeting only for the padding lets a long title
+	// push the badge past contentWidth and wrap the card onto an extra line
+	// the fixed-height layout never accounted for.
 	if task.ParentTaskID != "" {
-		lines = append(lines, badge("Subtask", "purple", "↳", false))
+		lines = append(lines, badge(
+			truncateText(parentTaskLabel(m, task), contentWidth-6),
+			"purple",
+			"↳",
+			false,
+		))
 	}
 	if task.ChildPRAlertTaskID != "" {
 		lines = append(lines, badge(
-			truncateText(childPrAlertLabel(m, task), contentWidth-2),
+			truncateText(childPrAlertLabel(m, task), contentWidth-6),
 			"warning",
 			"🔔",
 			false,
@@ -1690,6 +1700,19 @@ func childPrAlertLabel(m *Model, task TaskRecord) string {
 		}
 	}
 	return "PR ready: " + task.ChildPRAlertTaskID
+}
+
+// parentTaskLabel names the card this one was spun off from, so two different
+// parents' subtasks read as distinct at a glance instead of both saying the
+// same bare "Subtask". Falls back to the id if the parent has scrolled out of
+// the board snapshot this render is working from.
+func parentTaskLabel(m *Model, task TaskRecord) string {
+	for _, other := range m.tasks {
+		if other.ID == task.ParentTaskID {
+			return other.Title
+		}
+	}
+	return task.ParentTaskID
 }
 
 func taskCardBorderColor(task TaskRecord, isSelected bool) string {

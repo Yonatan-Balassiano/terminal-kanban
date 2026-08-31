@@ -1301,6 +1301,41 @@ func TestRenderTaskCardKeepsBranchChipForRepoTasks(t *testing.T) {
 	}
 }
 
+// Two different parents' subtasks must read as distinct at a glance — a bare
+// "Subtask" badge cannot tell you which is which once there is more than one.
+func TestRenderTaskCardNamesTheSubtasksParent(t *testing.T) {
+	model := &Model{
+		tasks: []TaskRecord{
+			{ID: "parent-1", Title: "Rate limiting", UpdatedAt: 1},
+			{ID: "parent-2", Title: "Onboarding", UpdatedAt: 1},
+		},
+	}
+
+	cardOne := renderTaskCard(
+		model,
+		TaskRecord{ID: "sub-1", Title: "Extract the limiter", ParentTaskID: "parent-1", UpdatedAt: 1},
+		false, false, nil, "",
+	)
+	cardTwo := renderTaskCard(
+		model,
+		TaskRecord{ID: "sub-2", Title: "Rewrite the welcome screen", ParentTaskID: "parent-2", UpdatedAt: 1},
+		false, false, nil, "",
+	)
+
+	plainOne := ansiPattern.ReplaceAllString(cardOne, "")
+	plainTwo := ansiPattern.ReplaceAllString(cardTwo, "")
+
+	if !strings.Contains(plainOne, "Rate limiting") {
+		t.Fatalf("card one = %q, want it to name parent-1's title", plainOne)
+	}
+	if !strings.Contains(plainTwo, "Onboarding") {
+		t.Fatalf("card two = %q, want it to name parent-2's title", plainTwo)
+	}
+	if strings.Contains(plainOne, "Onboarding") || strings.Contains(plainTwo, "Rate limiting") {
+		t.Fatalf("cards named the wrong parent: card one = %q, card two = %q", plainOne, plainTwo)
+	}
+}
+
 func TestRenderOverviewBoardListsGeneralScope(t *testing.T) {
 	model := &Model{
 		repos: []RepoRecord{{ID: "repo-1", Label: "web5-poc"}},

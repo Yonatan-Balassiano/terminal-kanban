@@ -654,6 +654,16 @@ func renderBranchPRListModal(m *Model) string {
 	return modalBox(lipgloss.DoubleBorder(), strings.Join(lines, "\n"))
 }
 
+// branchOwnerTaskLabel names the task a branch belongs to, for a row whose
+// owner is not the picker's own task. Falls back to the id if that task has
+// scrolled out of the board snapshot this render is working from.
+func branchOwnerTaskLabel(m *Model, branch TaskBranchRecord) string {
+	if task := m.taskByID(branch.TaskID); task != nil {
+		return task.Title
+	}
+	return branch.TaskID
+}
+
 func renderBranchPRRow(m *Model, task TaskRecord, branch TaskBranchRecord, selected bool) string {
 	borderColor := uiChrome.Line
 	if selected {
@@ -678,9 +688,10 @@ func renderBranchPRRow(m *Model, task TaskRecord, branch TaskBranchRecord, selec
 		badge(strings.ToUpper(truncateText(m.taskBranchRepoLabel(branch), 16)), "muted", "", false),
 	}
 	// Rows from a subtask's own branches are otherwise indistinguishable from
-	// the card's own, so mark whichever ones did not come from task itself.
+	// the card's own — and from each other, once a card has more than one
+	// subtask — so name whichever task actually owns a row that isn't task's.
 	if branch.TaskID != task.ID {
-		leftParts = append(leftParts, badge("SUBTASK", "purple", "↳", false))
+		leftParts = append(leftParts, badge(truncateText(branchOwnerTaskLabel(m, branch), 20), "purple", "↳", false))
 	}
 	leftParts = append(leftParts, titleStyle.Render(truncateText(compactBranchLabel(branch.BranchName), 32)))
 
