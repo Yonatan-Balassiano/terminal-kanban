@@ -411,7 +411,7 @@ func (m *Model) openBranchPRListModal(task *TaskRecord) {
 		m.statusMessage = "Select a card to list its PRs."
 		return
 	}
-	if len(task.Branches) == 0 {
+	if len(m.branchPRListBranchesFor(task)) == 0 {
 		m.statusMessage = "This card has no tracked branch yet."
 		return
 	}
@@ -1154,7 +1154,9 @@ func (m *Model) handleBranchPRListModalKey(key tea.KeyMsg) tea.Cmd {
 		m.closeModal()
 		return m.openBranchPRCmd(selected, true)
 	case "j":
-		m.openBranchPRCommentModal(state.TaskID, selected)
+		// selected.TaskID, not state.TaskID: on a subtask's row those differ,
+		// and the comment modal resolves the branch back by (taskID, branchID).
+		m.openBranchPRCommentModal(selected.TaskID, selected)
 		return nil
 	case "m":
 		// Stay open when the merge is refused, so the reason can be read against
@@ -1175,11 +1177,26 @@ func (m *Model) branchPRListBranches() []TaskBranchRecord {
 	if m.branchPRListModal == nil {
 		return nil
 	}
-	task := m.taskByID(m.branchPRListModal.TaskID)
+	return m.branchPRListBranchesFor(m.taskByID(m.branchPRListModal.TaskID))
+}
+
+// branchPRListBranchesFor is every PR-bearing branch the picker shows for task:
+// its own, followed by every direct subtask's — so reviewing a card's PRs
+// surfaces the work it spawned without having to open each subtask separately.
+// A row's owning task is read off Branch.TaskID, not assumed to be task.ID, so
+// mergeTaskBranchPRCmd/commentTaskBranchPRCmd/openBranchPRCmd keep working
+// unchanged on a subtask's row.
+func (m *Model) branchPRListBranchesFor(task *TaskRecord) []TaskBranchRecord {
 	if task == nil {
 		return nil
 	}
-	return task.Branches
+	branches := append([]TaskBranchRecord{}, task.Branches...)
+	for _, other := range m.tasks {
+		if other.ParentTaskID == task.ID {
+			branches = append(branches, other.Branches...)
+		}
+	}
+	return branches
 }
 
 func (m *Model) taskBranchByID(taskID, branchID string) *TaskBranchRecord {

@@ -877,6 +877,10 @@ func TestOpenCreateTaskModalDefaultsToGeneralInGeneralScope(t *testing.T) {
 }
 
 func branchPRModel(branches []TaskBranchRecord) *Model {
+	// Real branch rows always carry the id of the task they belong to
+	// (task_branches.task_id is NOT NULL); fixtures must too, since the PR
+	// picker tells a subtask's row apart from the card's own by comparing it.
+	stampBranchTaskID(branches, "task-1")
 	return &Model{
 		width:              200,
 		height:             40,
@@ -894,6 +898,12 @@ func branchPRModel(branches []TaskBranchRecord) *Model {
 			RepoID:   "repo-a",
 			Branches: branches,
 		}},
+	}
+}
+
+func stampBranchTaskID(branches []TaskBranchRecord, taskID string) {
+	for index := range branches {
+		branches[index].TaskID = taskID
 	}
 }
 
@@ -1000,6 +1010,92 @@ func TestPRPickerCommentComposerRemembersItsBranch(t *testing.T) {
 	}
 	if model.prCommentModal == nil || model.prCommentModal.BranchID != "branch-b" {
 		t.Fatalf("prCommentModal = %+v, want it aimed at branch-b", model.prCommentModal)
+	}
+}
+
+// branchPRModelWithSubtask is a parent card and one subtask spawned from it,
+// each carrying its own branch — the shape the PR picker rolls up.
+func branchPRModelWithSubtask(parentBranches, subtaskBranches []TaskBranchRecord) *Model {
+	model := branchPRModel(parentBranches)
+	stampBranchTaskID(subtaskBranches, "task-2")
+	model.tasks = append(model.tasks, TaskRecord{
+		ID:           "task-2",
+		Title:        "Extracted helper",
+		TrackID:      "in-progress",
+		SortKey:      2,
+		RepoID:       "repo-a",
+		ParentTaskID: "task-1",
+		Branches:     subtaskBranches,
+	})
+	return model
+}
+
+func oneOpenBranch(id, repoID string, prNumber int) []TaskBranchRecord {
+	return []TaskBranchRecord{
+		{ID: id, RepoID: repoID, BranchName: "feat/" + id, PRNumber: intPtr(prNumber), PRState: "open", CIState: "passed", ReviewState: "approved"},
+	}
+}
+
+// The point of the feature: reviewing a card's PRs should not require opening
+// every subtask separately to notice it also has one open.
+func TestPRPickerIncludesSubtaskPRsMarkedAsSuch(t *testing.T) {
+	model := branchPRModelWithSubtask(twoOpenBranches(), oneOpenBranch("branch-c", "repo-a", 33))
+	model.openBranchPRListModal(&model.tasks[0])
+
+	plain := ansiPattern.ReplaceAllString(renderBranchPRListModal(model), "")
+
+	if !strings.Contains(plain, "#33 open") {
+		t.Fatalf("PR picker = %q, want it to list the subtask's PR", plain)
+	}
+	if !strings.Contains(plain, "SUBTASK") {
+		t.Fatalf("PR picker = %q, want the subtask's row marked SUBTASK", plain)
+	}
+}
+
+// A subtask's own row must not carry the mark — only rows that are not the
+// modal's own task should.
+func TestPRPickerDoesNotMarkTheParentsOwnBranches(t *testing.T) {
+	model := branchPRModel(twoOpenBranches())
+	model.openBranchPRListModal(&model.tasks[0])
+
+	plain := ansiPattern.ReplaceAllString(renderBranchPRListModal(model), "")
+
+	if strings.Contains(plain, "SUBTASK") {
+		t.Fatalf("PR picker = %q, a card's own PRs must not be marked SUBTASK", plain)
+	}
+}
+
+// A parent card with no branch of its own but a subtask that has one must
+// still open the picker — the point is "does this card's work have any open
+// PR", not "does this exact task row have a branch".
+func TestPRPickerOpensForAParentWithOnlySubtaskPRs(t *testing.T) {
+	model := branchPRModelWithSubtask(nil, oneOpenBranch("branch-c", "repo-a", 33))
+
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("E")})
+
+	if model.modal != ModalBranchPRList {
+		t.Fatalf("modal = %q, want %q", model.modal, ModalBranchPRList)
+	}
+}
+
+// Commenting on a subtask's PR from the parent's picker must resolve back to
+// the subtask, not the parent, or the composer's lookup finds nothing.
+func TestPRPickerCommentOnASubtaskPRTargetsTheSubtask(t *testing.T) {
+	model := branchPRModelWithSubtask(twoOpenBranches(), oneOpenBranch("branch-c", "repo-a", 33))
+	model.openBranchPRListModal(&model.tasks[0])
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyDown})
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	model.handleModalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+
+	if model.modal != ModalPRComment {
+		t.Fatalf("modal = %q, want the PR comment composer", model.modal)
+	}
+	if model.prCommentModal == nil || model.prCommentModal.TaskID != "task-2" {
+		t.Fatalf("prCommentModal = %+v, want it aimed at task-2 (the subtask)", model.prCommentModal)
+	}
+	if model.prCommentModal.BranchID != "branch-c" {
+		t.Fatalf("prCommentModal = %+v, want it aimed at branch-c", model.prCommentModal)
 	}
 }
 

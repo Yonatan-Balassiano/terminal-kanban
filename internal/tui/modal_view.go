@@ -616,7 +616,7 @@ func renderBranchPRListModal(m *Model) string {
 	if task == nil {
 		return ""
 	}
-	branches := task.Branches
+	branches := m.branchPRListBranchesFor(task)
 
 	lines := []string{
 		joinSpaceBetween(strings.Join([]string{
@@ -673,17 +673,24 @@ func renderBranchPRRow(m *Model, task TaskRecord, branch TaskBranchRecord, selec
 		detailColor = uiChrome.Warning
 	}
 
+	leftParts := []string{
+		lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(selected, uiChrome.Accent, uiChrome.Muted))).Render(ternaryString(selected, "▸", " ")),
+		badge(strings.ToUpper(truncateText(m.taskBranchRepoLabel(branch), 16)), "muted", "", false),
+	}
+	// Rows from a subtask's own branches are otherwise indistinguishable from
+	// the card's own, so mark whichever ones did not come from task itself.
+	if branch.TaskID != task.ID {
+		leftParts = append(leftParts, badge("SUBTASK", "purple", "↳", false))
+	}
+	leftParts = append(leftParts, titleStyle.Render(truncateText(compactBranchLabel(branch.BranchName), 32)))
+
 	return lipgloss.NewStyle().
 		Width(branchPRListWidth-4).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(borderColor)).
 		Padding(0, 1).
 		Render(
-			joinSpaceBetween(strings.Join([]string{
-				lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(selected, uiChrome.Accent, uiChrome.Muted))).Render(ternaryString(selected, "▸", " ")),
-				badge(strings.ToUpper(truncateText(m.taskBranchRepoLabel(branch), 16)), "muted", "", false),
-				titleStyle.Render(truncateText(compactBranchLabel(branch.BranchName), 32)),
-			}, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(
+			joinSpaceBetween(strings.Join(leftParts, " "), lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(
 				taskBranchGlyph(branch, task.Release)+"  "+taskBranchPRLabel(branch),
 			), branchPRListWidth-8) + "\n" +
 				lipgloss.NewStyle().Foreground(lipgloss.Color(detailColor)).Render(truncateText(detail, branchPRListWidth-8)),
