@@ -37,6 +37,7 @@ import type {
   ReconnectSessionParams,
   TeleportTaskParams,
   SendInputParams,
+  NotifyTaskSessionParams,
   GetBufferParams,
   PrepareTaskWorkspaceParams,
   CreateTaskPRParams,
@@ -642,6 +643,16 @@ export async function dispatch(
           });
         }
         return { id: req.id, result: null };
+      }
+
+      case 'notifyTaskSession': {
+        const params = p as unknown as NotifyTaskSessionParams;
+        const delivered = await services.session.notifyTaskSession(
+          params.taskId,
+          params.message,
+          params.slot,
+        );
+        return { id: req.id, result: { delivered } };
       }
 
       case 'watchSessionUpdates':

@@ -736,6 +736,43 @@ export function buildCli(): Command {
       },
     );
 
+  task
+    .command('notify <id> <message>')
+    .description(
+      "Type a message into another card's live session — e.g. ping a subtask to address PR comments",
+    )
+    .action(async (id: string, message: string) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          if (!board.tasks.some((t) => t.id === id)) {
+            throw new Error(`Unknown task "${id}". No card with that id exists.`);
+          }
+
+          const { delivered } = await rpc.call<{ delivered: boolean }>('notifyTaskSession', {
+            taskId: id,
+            message,
+          });
+
+          if (delivered) {
+            console.log(`Delivered to ${id}'s live session.`);
+          } else {
+            console.log(`Task ${id} has no live session — nothing to deliver to.`);
+            process.exitCode = 1;
+          }
+        } finally {
+          rpc.disconnect();
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
   // ----------------------------------------------------------
   // repos
   // ----------------------------------------------------------

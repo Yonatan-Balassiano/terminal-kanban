@@ -442,6 +442,7 @@ export type RPCMethod =
   | 'acknowledgeSessionAttention'
   | 'acknowledgeChildPrAlert'
   | 'sendInput'
+  | 'notifyTaskSession'
   | 'watchSessionUpdates'
   | 'resizeSession'
   | 'getBuffer'
@@ -656,6 +657,17 @@ export interface AcknowledgeChildPrAlertParams {
 export interface SendInputParams {
   taskId: string;
   data: string;
+  slot?: SessionSlot;
+}
+
+/**
+ * Types a message straight into another card's live session, the way a human
+ * collaborator would by attaching and typing — for one task's agent to ping
+ * another's, e.g. "address the PR comments" after reviewing a subtask's PR.
+ */
+export interface NotifyTaskSessionParams {
+  taskId: string;
+  message: string;
   slot?: SessionSlot;
 }
 
