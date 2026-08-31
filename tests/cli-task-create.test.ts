@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { BoardSnapshot, TaskRecord } from '../src/types/index.js';
@@ -279,6 +279,85 @@ describe('agentboard task create', () => {
     // Act + Assert
     await expect(run('Add rate limiting', '--parent', 'no-such-task')).rejects.toThrow(ExitError);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown --parent'));
+  });
+
+  describe('falling back to the worktree marker file', () => {
+    // session-bootstrap.sh drops .agentboard/task-id in the worktree; the CLI
+    // reads it when AGENTBOARD_TASK_ID never made it into this process's own
+    // environment — e.g. a Bash tool call running through a sandbox that does
+    // not forward the parent shell's env vars, but still runs with the right cwd.
+    let originalCwd: string;
+    let dir: string;
+
+    beforeEach(() => {
+      originalCwd = process.cwd();
+      dir = mkdtempSync(join(tmpdir(), 'agentboard-marker-'));
+    });
+
+    afterEach(() => {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('finds the marker by walking up from a nested cwd when the env var is absent', async () => {
+      // Arrange
+      delete process.env['AGENTBOARD_TASK_ID'];
+      mkdirSync(join(dir, '.agentboard'), { recursive: true });
+      writeFileSync(join(dir, '.agentboard', 'task-id'), 'parent-1', 'utf8');
+      const nested = join(dir, 'src', 'deep');
+      mkdirSync(nested, { recursive: true });
+      process.chdir(nested);
+      const board = makeBoard({ tasks: [makeTask({ id: 'parent-1' })] });
+      const { call } = stubRpc({}, board);
+
+      // Act
+      await run('Add rate limiting');
+
+      // Assert
+      expect(call).toHaveBeenCalledWith(
+        'createTask',
+        expect.objectContaining({ parentTaskId: 'parent-1' }),
+      );
+    });
+
+    it('prefers the env var over the marker file when both are present', async () => {
+      // Arrange
+      process.env['AGENTBOARD_TASK_ID'] = 'parent-1';
+      mkdirSync(join(dir, '.agentboard'), { recursive: true });
+      writeFileSync(join(dir, '.agentboard', 'task-id'), 'parent-2', 'utf8');
+      process.chdir(dir);
+      const board = makeBoard({
+        tasks: [makeTask({ id: 'parent-1' }), makeTask({ id: 'parent-2' })],
+      });
+      const { call } = stubRpc({}, board);
+
+      // Act
+      await run('Add rate limiting');
+
+      // Assert
+      expect(call).toHaveBeenCalledWith(
+        'createTask',
+        expect.objectContaining({ parentTaskId: 'parent-1' }),
+      );
+    });
+
+    it('drops a stale auto-detected parent instead of refusing to create the card', async () => {
+      // Arrange — the marker names a card that no longer exists (e.g. deleted).
+      delete process.env['AGENTBOARD_TASK_ID'];
+      mkdirSync(join(dir, '.agentboard'), { recursive: true });
+      writeFileSync(join(dir, '.agentboard', 'task-id'), 'long-gone', 'utf8');
+      process.chdir(dir);
+      const { call } = stubRpc();
+
+      // Act
+      await run('Add rate limiting');
+
+      // Assert — creation succeeds, just without a parent link.
+      expect(call).toHaveBeenCalledWith(
+        'createTask',
+        expect.objectContaining({ parentTaskId: undefined }),
+      );
+    });
   });
 
   it('refuses a remote task on a repo that has no remote path', async () => {

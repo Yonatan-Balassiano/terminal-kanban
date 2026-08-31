@@ -198,6 +198,33 @@ function filterListedTasks(tasks: TaskRecord[], archivedOnly: boolean): TaskReco
 // --------------- task create helpers ------------------------
 
 /**
+ * Finds the task id session-bootstrap.sh dropped in this worktree, by walking
+ * up from `startDir` — a stand-in for `AGENTBOARD_TASK_ID` when it did not
+ * make it into this process's environment (a Bash tool call the agent makes
+ * can run through a sandbox that does not forward the parent shell's env vars,
+ * even though it still runs with the right cwd). Absent for a general task's
+ * session, which never writes this file (see session-bootstrap.sh).
+ */
+function findParentTaskIdFromWorktree(startDir: string): string | undefined {
+  let dir = path.resolve(startDir);
+  for (let depth = 0; depth < 50; depth += 1) {
+    const markerPath = path.join(dir, '.agentboard', 'task-id');
+    if (fs.existsSync(markerPath)) {
+      const id = fs.readFileSync(markerPath, 'utf8').trim();
+      if (id) {
+        return id;
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      return undefined;
+    }
+    dir = parent;
+  }
+  return undefined;
+}
+
+/**
  * Resolve a repo or pillar the way a person refers to one: by id, or by the
  * label they see on the board.
  *
@@ -647,10 +674,22 @@ export function buildCli(): Command {
 
             // Falls back to whichever card this command is itself running
             // inside — set by the session bootstrap script — so a card spun off
-            // from a running session is marked as its subtask with no extra flag.
-            const parentTaskId = opts.parent ?? (process.env['AGENTBOARD_TASK_ID'] || undefined);
+            // from a running session is marked as its subtask with no extra
+            // flag. The env var is tried first (no filesystem walk needed);
+            // the worktree marker file catches it when a sandboxed Bash tool
+            // call dropped the env var but still runs with the right cwd.
+            const autoDetectedParentId =
+              (process.env['AGENTBOARD_TASK_ID'] || undefined) ??
+              findParentTaskIdFromWorktree(process.cwd());
+            let parentTaskId = opts.parent ?? autoDetectedParentId;
             if (parentTaskId && !board.tasks.some((task) => task.id === parentTaskId)) {
-              throw new Error(`Unknown --parent "${parentTaskId}". No card with that id exists.`);
+              if (opts.parent) {
+                throw new Error(`Unknown --parent "${parentTaskId}". No card with that id exists.`);
+              }
+              // Auto-detected from a stale marker (e.g. the parent card was
+              // since deleted): drop the link rather than blocking creation
+              // over a bonus feature the user made no explicit claim about.
+              parentTaskId = undefined;
             }
 
             let repo: RepoRecord | undefined;

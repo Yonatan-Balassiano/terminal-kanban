@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+task_id="${AGENTBOARD_TASK_ID:-}"
 task_kind="${AGENTBOARD_TASK_KIND:-repo}"
 repo_path="${AGENTBOARD_REPO_PATH:-}"
 task_branch="${AGENTBOARD_TASK_BRANCH:-}"
@@ -36,6 +37,27 @@ print_workspace_banner() {
 
 if [[ -n "$session_cwd" ]]; then
   cd "$session_cwd"
+fi
+
+# Drop the card's own id on disk inside its worktree.
+#
+# AGENTBOARD_TASK_ID is exported into this pane's shell, and the agent CLI
+# inherits it — but a Bash tool call the agent makes may run through its own
+# sandbox that does not forward the outer process's environment, silently
+# losing the id. `agentboard task create`'s subtask auto-link falls back to
+# reading this file (walking up from $PWD) when the env var is missing, so a
+# sandboxed shell still finds its parent instead of creating an orphaned card.
+# Skipped for a general task: those all share $HOME as their cwd, where a
+# single marker file would be ambiguous across every general task running at
+# once.
+if [[ "$task_kind" != "general" && -n "$task_id" && -d "$session_cwd" ]]; then
+  mkdir -p "$session_cwd/.agentboard" 2>/dev/null || true
+  printf '%s' "$task_id" > "$session_cwd/.agentboard/task-id" 2>/dev/null || true
+  git_dir="$(git -C "$session_cwd" rev-parse --git-dir 2>/dev/null || true)"
+  if [[ -n "$git_dir" ]]; then
+    exclude_file="$git_dir/info/exclude"
+    grep -qxF '.agentboard/' "$exclude_file" 2>/dev/null || printf '.agentboard/\n' >> "$exclude_file" 2>/dev/null || true
+  fi
 fi
 
 if [[ -n "$bootstrap_notice" ]]; then

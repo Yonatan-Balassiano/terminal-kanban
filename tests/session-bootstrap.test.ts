@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -287,6 +295,80 @@ describe('session-bootstrap.sh agent session resume', () => {
     expect(stdout).toContain('AGENT_ARGS:');
     expect(stdout).not.toContain('--session-id');
     expect(stdout).not.toContain('--resume');
+  });
+});
+
+describe('session-bootstrap.sh worktree marker file', () => {
+  /**
+   * Runs the real bootstrap through a real shell, with a fake agent that does
+   * nothing but exit — the point of this block is what the script leaves on
+   * disk before it ever gets to launching an agent.
+   */
+  async function runBootstrap({
+    taskId,
+    taskKind,
+    initGit = false,
+  }: {
+    taskId?: string;
+    taskKind?: 'repo' | 'general';
+    initGit?: boolean;
+  }): Promise<{ dir: string }> {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-marker-'));
+    const fake = join(dir, 'claude');
+    writeFileSync(fake, '#!/bin/bash\nexit 0\n');
+    chmodSync(fake, 0o755);
+
+    if (initGit) {
+      await execFileAsync('git', ['init', '-q', dir]);
+    }
+
+    const command = buildNewSessionBootstrapCommand({
+      taskId,
+      taskKind,
+      repoPath: dir,
+      branch: 'ab/api-0001',
+      agentCli: 'claude',
+      usesWorktree: true,
+      cwd: dir,
+      sessionBootstrapScript: BOOTSTRAP,
+    });
+
+    await execFileAsync('bash', ['-c', command], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}` },
+    });
+    return { dir };
+  }
+
+  it("drops the card's id in its worktree", async () => {
+    // Act
+    const { dir } = await runBootstrap({ taskId: 'task-1234' });
+
+    // Assert
+    const markerPath = join(dir, '.agentboard', 'task-id');
+    expect(existsSync(markerPath)).toBe(true);
+    expect(readFileSync(markerPath, 'utf8')).toBe('task-1234');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('excludes the marker from the worktree\'s own git history without touching .gitignore', async () => {
+    // Act — a real repo, so the script's git-dir lookup actually resolves.
+    const { dir } = await runBootstrap({ taskId: 'task-1234', initGit: true });
+
+    // Assert
+    const excludePath = join(dir, '.git', 'info', 'exclude');
+    expect(readFileSync(excludePath, 'utf8')).toContain('.agentboard/');
+    expect(existsSync(join(dir, '.gitignore'))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes no marker for a general task, whose sessions all share $HOME as cwd', async () => {
+    // Act
+    const { dir } = await runBootstrap({ taskId: 'task-1234', taskKind: 'general' });
+
+    // Assert
+    expect(existsSync(join(dir, '.agentboard'))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
