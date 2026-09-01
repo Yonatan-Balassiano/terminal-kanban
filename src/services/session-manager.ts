@@ -834,6 +834,38 @@ export class SessionManager {
     return true;
   }
 
+  /**
+   * Manual escape hatch: re-pastes the card's stored brief into an
+   * already-running session, for the rare case where automatic delivery
+   * (paste + retry inside `backend.create()`) gave up before the pane became
+   * responsive — see `SessionBackend.redeliverPrompt`.
+   *
+   * Returns false when there is nothing to do (no live session, or the task
+   * never had a brief), rather than throwing — both are normal states, not
+   * errors. Throws only when the session's own backend does not support
+   * redelivery (PTY), since that is a real "can't do this" the caller should
+   * surface.
+   */
+  async redeliverInitialPrompt(taskId: string, slot: SessionSlot = 'primary'): Promise<boolean> {
+    const session = this.getSession(taskId, slot);
+    if (!session?.backendSessionId) {
+      return false;
+    }
+
+    const taskRow = this.loadTaskRow(taskId);
+    if (!taskRow?.initial_prompt) {
+      return false;
+    }
+
+    const backend = this.getBackend(session.backendType);
+    if (!backend.redeliverPrompt) {
+      throw new Error(`${session.backendType} sessions do not support re-delivering the initial prompt.`);
+    }
+
+    await backend.redeliverPrompt(taskId, slot, session.backendSessionId, taskRow.initial_prompt);
+    return true;
+  }
+
   async resizeSession(
     taskId: string,
     cols: number,

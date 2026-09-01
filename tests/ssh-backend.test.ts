@@ -397,3 +397,60 @@ describe('SshTmuxBackend.resetAttachment', () => {
     expect(created?.join(' ')).toContain('remote-attach.sh');
   });
 });
+
+describe('SshTmuxBackend.redeliverPrompt', () => {
+  it('parks a fresh brief on the remote host, pastes it, and submits it', async () => {
+    // Arrange — the manual escape hatch: no prior create() call, just an
+    // already-live remote session that automatic delivery failed to reach.
+    const writtenBriefs: Record<string, string> = {};
+    const transport = {
+      host: 'test.host',
+      id: 'ssh:test.host',
+      isRemote: true,
+      exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+      exists: vi.fn(async () => true),
+      mkdirp: vi.fn(async () => undefined),
+      removeDir: vi.fn(async () => undefined),
+      writeFileIfChanged: vi.fn(async (path: string, content: string) => {
+        writtenBriefs[path] = content;
+        return true;
+      }),
+      reachability: vi.fn(async () => 'ok' as const),
+    };
+
+    const remoteCalls: string[][] = [];
+    const backend = new SshTmuxBackend({
+      transport: transport as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        remoteCalls.push(args);
+        return ok();
+      },
+      localRunner: async () => ok(),
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+      },
+    });
+
+    // Act
+    await backend.redeliverPrompt(SESSION_NAME, 'primary', SESSION_NAME, 'Please continue where you left off.');
+
+    // Assert
+    const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
+    const pasteIndex = remoteCalls.findIndex((args) => args[0] === 'paste-buffer');
+    const enterIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
+    expect(loadIndex).toBeGreaterThanOrEqual(0);
+    expect(pasteIndex).toBeGreaterThan(loadIndex);
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
+
+    const remoteBriefFile = remoteCalls[loadIndex]![3]!;
+    expect(writtenBriefs[remoteBriefFile]).toBe('Please continue where you left off.');
+  });
+});

@@ -822,6 +822,42 @@ export function buildCli(): Command {
     });
 
   task
+    .command('redeliver-prompt <id>')
+    .description(
+      'Re-send a card\'s opening brief into its live session — use when a session started but the brief is still sitting unsubmitted in the pane (the automatic delivery gave up waiting for a slow startup)',
+    )
+    .action(async (id: string) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          if (!board.tasks.some((t) => t.id === id)) {
+            throw new Error(`Unknown task "${id}". No card with that id exists.`);
+          }
+
+          const { delivered } = await rpc.call<{ delivered: boolean }>('redeliverInitialPrompt', {
+            taskId: id,
+          });
+
+          if (delivered) {
+            console.log(`Re-delivered ${id}'s brief to its live session.`);
+          } else {
+            console.log(`Task ${id} has no live session, or no stored brief — nothing to deliver.`);
+            process.exitCode = 1;
+          }
+        } finally {
+          rpc.disconnect();
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  task
     .command('attach-pr <task> <prNumber>')
     .description(
       "Manually attach a pull request auto-discovery missed, by its number — resolves the branch itself",

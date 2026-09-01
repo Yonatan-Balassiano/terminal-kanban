@@ -1955,3 +1955,149 @@ describe('SessionManager agent conversation id', () => {
     expect(secondary.agentSessionId).not.toBe(primary.agentSessionId);
   });
 });
+
+describe('SessionManager.redeliverInitialPrompt', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function makeManager(backendOverrides: Partial<SessionBackend> = {}) {
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'tmux',
+      backendSessionId: 'ab_task_1234',
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({ command: '' })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+      ...backendOverrides,
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    return { manager, backend };
+  }
+
+  it('re-delivers the stored brief to the live session via the backend', async () => {
+    // Arrange
+    const redeliverPrompt = vi.fn<[string, 'primary' | 'secondary', string, string], Promise<void>>(
+      async () => {}
+    );
+    const task = board.createTask({
+      title: 'Needs a nudge',
+      repoId: 'repo-1',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    const { manager } = makeManager({ redeliverPrompt });
+    await manager.openSession(task.id);
+
+    // Act
+    const delivered = await manager.redeliverInitialPrompt(task.id);
+
+    // Assert
+    expect(delivered).toBe(true);
+    expect(redeliverPrompt).toHaveBeenCalledWith(task.id, 'primary', 'ab_task_1234', 'Fix the flaky test.');
+  });
+
+  it('returns false without calling the backend when the task has no session', async () => {
+    // Arrange
+    const redeliverPrompt = vi.fn<[string, 'primary' | 'secondary', string, string], Promise<void>>(
+      async () => {}
+    );
+    const task = board.createTask({
+      title: 'Never opened',
+      repoId: 'repo-1',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    const { manager } = makeManager({ redeliverPrompt });
+
+    // Act
+    const delivered = await manager.redeliverInitialPrompt(task.id);
+
+    // Assert
+    expect(delivered).toBe(false);
+    expect(redeliverPrompt).not.toHaveBeenCalled();
+  });
+
+  it('returns false without calling the backend when the task never had a brief', async () => {
+    // Arrange
+    const redeliverPrompt = vi.fn<[string, 'primary' | 'secondary', string, string], Promise<void>>(
+      async () => {}
+    );
+    const task = board.createTask({ title: 'No brief', repoId: 'repo-1' });
+    const { manager } = makeManager({ redeliverPrompt });
+    await manager.openSession(task.id);
+
+    // Act
+    const delivered = await manager.redeliverInitialPrompt(task.id);
+
+    // Assert
+    expect(delivered).toBe(false);
+    expect(redeliverPrompt).not.toHaveBeenCalled();
+  });
+
+  it('throws when the session backend does not support redelivery', async () => {
+    // Arrange
+    const task = board.createTask({
+      title: 'PTY only',
+      repoId: 'repo-1',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    const { manager } = makeManager(); // no redeliverPrompt override — backend lacks it
+    await manager.openSession(task.id);
+
+    // Act + Assert
+    await expect(manager.redeliverInitialPrompt(task.id)).rejects.toThrow(
+      /do not support re-delivering/
+    );
+  });
+});

@@ -300,6 +300,11 @@ describe('TmuxBackend brief handling', () => {
       initialPrompt,
     });
 
+    // Delivery is fire-and-forget now (create() must not block its caller for
+    // up to two minutes) — give its chain of zero-delay timers a real tick to
+    // finish before asserting on what it did.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
     return {
       typed: literals.join(''),
       longestLiteral: literals.reduce((max, literal) => Math.max(max, literal.length), 0),
@@ -404,5 +409,45 @@ describe('TmuxBackend brief handling', () => {
     // Assert — the bootstrap command's own Enter, plus the initial attempt at
     // the brief, plus 3 retries: 5 in total.
     expect(enterCalls(calls)).toHaveLength(5);
+  });
+});
+
+describe('TmuxBackend.redeliverPrompt', () => {
+  it('pastes a fresh brief file and submits it, without going through create()', async () => {
+    // Arrange — the manual escape hatch: no prior create() call, just an
+    // already-live session that automatic delivery failed to reach.
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+      },
+    });
+
+    // Act
+    await backend.redeliverPrompt('brieftask', 'primary', 'ab_brieftask_p', 'Please continue where you left off.');
+
+    // Assert
+    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
+    const pasteIndex = calls.findIndex((args) => args[0] === 'paste-buffer');
+    const enterIndex = calls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
+    expect(loadIndex).toBeGreaterThanOrEqual(0);
+    expect(pasteIndex).toBeGreaterThan(loadIndex);
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
+
+    const briefFile = calls[loadIndex]![3];
+    expect(readFileSync(briefFile!, 'utf8')).toBe('Please continue where you left off.');
   });
 });

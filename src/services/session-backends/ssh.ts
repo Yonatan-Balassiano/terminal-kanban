@@ -343,7 +343,13 @@ export class SshTmuxBackend implements SessionBackend {
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       this.rememberInspect(backendSessionId, { backendSessionId, status: 'active' });
       if (remoteBriefFile) {
-        await this.deliverInitialPrompt(backendSessionId, remoteBriefFile);
+        // Not awaited — see TmuxBackend for why: delivery can take well over
+        // a minute in the worst case, and blocking the caller's own RPC round
+        // trip that long risks its own timeout firing and retrying
+        // `agentboard task create`, which would create a second card.
+        void this.deliverInitialPrompt(backendSessionId, remoteBriefFile).catch(() => {
+          // Best-effort; nowhere useful to surface a failure from here.
+        });
       }
     }
 
@@ -449,6 +455,16 @@ export class SshTmuxBackend implements SessionBackend {
       },
       this.paneIdleOptions,
     );
+  }
+
+  /**
+   * The manual escape hatch for a session whose automatic delivery gave up
+   * before the remote pane became responsive — see
+   * `SessionBackend.redeliverPrompt`.
+   */
+  async redeliverPrompt(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void> {
+    const remoteBriefFile = await this.ensureRemoteBrief(taskId, slot, prompt);
+    await this.deliverInitialPrompt(backendSessionId, remoteBriefFile);
   }
 
   async resize(_backendSessionId: string, _cols: number, _rows: number): Promise<void> {

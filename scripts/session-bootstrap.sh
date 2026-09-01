@@ -53,9 +53,15 @@ fi
 if [[ "$task_kind" != "general" && -n "$task_id" && -d "$session_cwd" ]]; then
   mkdir -p "$session_cwd/.agentboard" 2>/dev/null || true
   printf '%s' "$task_id" > "$session_cwd/.agentboard/task-id" 2>/dev/null || true
-  git_dir="$(git -C "$session_cwd" rev-parse --git-dir 2>/dev/null || true)"
+  # --absolute-git-dir, not --git-dir: a linked worktree's answer is only
+  # correct relative to the worktree root, and by the time this runs $PWD may
+  # already be somewhere else (a general task's cwd, an earlier `cd`).
+  git_dir="$(git -C "$session_cwd" rev-parse --absolute-git-dir 2>/dev/null || true)"
   if [[ -n "$git_dir" ]]; then
     exclude_file="$git_dir/info/exclude"
+    # A linked worktree's own .git/worktrees/<name>/ has no info/ subdirectory
+    # by default — only the main checkout's .git/info/ is guaranteed to exist.
+    mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || true
     grep -qxF '.agentboard/' "$exclude_file" 2>/dev/null || printf '.agentboard/\n' >> "$exclude_file" 2>/dev/null || true
   fi
 fi

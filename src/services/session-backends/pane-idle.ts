@@ -34,12 +34,19 @@ const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_INTERVAL_MS = 400;
 const DEFAULT_STABLE_CHECKS = 2;
 export const DEFAULT_POST_PASTE_DELAY_MS = 600;
-// Generous on purpose: live testing found a single fixed delay is not always
-// enough (a slow SessionStart hook chain can keep a pane from truly being
-// ready well past a first guess), and this only costs wall-clock time on a
-// session that is starting up anyway, never a running one.
-const DEFAULT_MAX_SUBMIT_RETRIES = 10;
-const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 1500;
+// Generous on purpose, and had to be raised three times: a single fixed delay
+// wasn't enough (first fix), neither was 10 retries over 15s, and neither was
+// 55 retries over 110s — all three caught live with a real repo, where a slow
+// SessionStart hook chain left the pane frozen and unresponsive to Enter for
+// upward of two minutes (131s observed once), with a hand-sent Enter working
+// instantly the moment it settled. There is no bound on how slow a hook chain
+// can be, so this is not "the right number" so much as a large-but-finite
+// ceiling — delivery this whole window only costs wall-clock time on a
+// session that is starting up anyway, never a running one, and
+// `redeliverInitialPrompt` (session-manager.ts) is the manual escape hatch
+// for whatever this ceiling still doesn't cover.
+const DEFAULT_MAX_SUBMIT_RETRIES = 85;
+const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 2500;
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

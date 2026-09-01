@@ -38,6 +38,7 @@ import type {
   TeleportTaskParams,
   SendInputParams,
   NotifyTaskSessionParams,
+  RedeliverInitialPromptParams,
   GetBufferParams,
   PrepareTaskWorkspaceParams,
   CreateTaskPRParams,
@@ -658,6 +659,12 @@ export async function dispatch(
           params.message,
           params.slot,
         );
+        return { id: req.id, result: { delivered } };
+      }
+
+      case 'redeliverInitialPrompt': {
+        const params = p as unknown as RedeliverInitialPromptParams;
+        const delivered = await services.session.redeliverInitialPrompt(params.taskId, params.slot);
         return { id: req.id, result: { delivered } };
       }
 

@@ -7,6 +7,7 @@ import type {
   CreateSessionOpts,
   SessionBackend,
   SessionRecord,
+  SessionSlot,
 } from '../../types/index.js';
 import { existsSync } from 'fs';
 import { generateId } from '../../db/index.js';
@@ -222,7 +223,20 @@ export class TmuxBackend implements SessionBackend {
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       if (initialPromptFile) {
-        await this.deliverInitialPrompt(backendSessionId, initialPromptFile);
+        // Not awaited: delivery can take well over a minute in the worst case
+        // (a slow SessionStart hook chain — confirmed live), and this method's
+        // caller is a synchronous RPC round trip an agent's own Bash tool call
+        // is waiting on. Blocking that long risked the caller's own timeout
+        // firing first and retrying `agentboard task create`, which — since
+        // createTask is not idempotent — would create a second card instead
+        // of just being patient. The session record below is returned as soon
+        // as the pane exists; delivery finishes (or gives up) in the background.
+        void this.deliverInitialPrompt(backendSessionId, initialPromptFile).catch(() => {
+          // Best-effort: a failure here leaves the brief typed but unsubmitted
+          // in the pane, same as the fixed-delay version before this always
+          // risked — there is nowhere useful to surface it from inside a
+          // detached backend call.
+        });
       }
     }
 
@@ -288,6 +302,18 @@ export class TmuxBackend implements SessionBackend {
       },
       this.paneIdleOptions,
     );
+  }
+
+  /**
+   * The manual escape hatch for a session whose automatic delivery (in
+   * `create()`) gave up before the pane became responsive — see
+   * `SessionBackend.redeliverPrompt`. Writes a fresh brief file since the
+   * original (if any) was already deleted by session-bootstrap.sh or consumed
+   * by the first attempt.
+   */
+  async redeliverPrompt(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void> {
+    const briefFile = writeLocalBrief(taskId, slot, prompt);
+    await this.deliverInitialPrompt(backendSessionId, briefFile);
   }
 
   async resize(_backendSessionId: string, _cols: number, _rows: number): Promise<void> {

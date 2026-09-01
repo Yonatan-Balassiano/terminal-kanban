@@ -322,6 +322,17 @@ export interface SessionBackend {
    * session is its own front end and has nothing to reset.
    */
   resetAttachment?(backendSessionId: string): Promise<void>;
+  /**
+   * Re-delivers a prompt into an already-running session's pane — the manual
+   * escape hatch for a session whose automatic initial-prompt delivery
+   * (paste + retry, see pane-idle.ts) still didn't land within its window: a
+   * slow SessionStart hook chain has no upper bound, so no fixed retry budget
+   * can be guaranteed sufficient.
+   *
+   * Only backends that deliver prompts via paste implement this — PTY's
+   * delivery path is argv-based and has no equivalent to re-run.
+   */
+  redeliverPrompt?(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void>;
 }
 
 export interface CreateSessionOpts {
@@ -452,6 +463,7 @@ export type RPCMethod =
   | 'acknowledgeChildPrAlert'
   | 'sendInput'
   | 'notifyTaskSession'
+  | 'redeliverInitialPrompt'
   | 'watchSessionUpdates'
   | 'resizeSession'
   | 'getBuffer'
@@ -682,6 +694,16 @@ export interface SendInputParams {
 export interface NotifyTaskSessionParams {
   taskId: string;
   message: string;
+  slot?: SessionSlot;
+}
+
+/**
+ * Re-delivers a card's stored brief into its already-running session — the
+ * manual escape hatch for automatic delivery giving up too soon. See
+ * `SessionManager.redeliverInitialPrompt`.
+ */
+export interface RedeliverInitialPromptParams {
+  taskId: string;
   slot?: SessionSlot;
 }
 

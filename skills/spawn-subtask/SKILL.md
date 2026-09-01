@@ -20,7 +20,7 @@ Use when the current task has concrete, ready-to-start follow-up work that deser
 
 Always launch the subtask's agent immediately — pass `--start` every time, with no separate confirmation step. Creating the card without `--start` just leaves it idle in `backlog`, which defeats the point of spawning it.
 
-The daemon delivers the brief itself once the session starts — it waits for the pane to settle, then pastes it in — so there's no need to verify or hand-deliver the prompt yourself the way earlier versions of this skill instructed. If a session still comes up with an empty prompt despite that, treat it as a bug in AgentBoard, not something to route around.
+The daemon delivers the brief itself in the background once the session starts — it waits for the pane to settle, then pastes it in and verifies the submit actually took, retrying for several minutes if not — so there's no need to verify or hand-deliver the prompt yourself the way earlier versions of this skill instructed. A very slow agent-CLI startup (a slow SessionStart hook chain) can occasionally still outlast that window; if a session comes up with the brief sitting pasted but unsubmitted, run `agentboard task redeliver-prompt <its task id>` rather than typing it in by hand — that's the supported way to nudge it, not a workaround.
 
 ## 4. What comes for free
 
