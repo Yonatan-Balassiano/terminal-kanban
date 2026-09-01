@@ -451,3 +451,135 @@ describe('TmuxBackend.redeliverPrompt', () => {
     expect(readFileSync(briefFile!, 'utf8')).toBe('Please continue where you left off.');
   });
 });
+
+describe('TmuxBackend auto-trust', () => {
+  it('accepts a never-trusted-folder prompt (Down, then Enter) before delivering the brief', async () => {
+    // Arrange — the pane shows the real trust screen until Down is sent, then
+    // settles on the CLI's normal ready screen for everything after.
+    const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
+    const calls: string[][] = [];
+    let trustAccepted = false;
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'has-session') {
+        throw new Error('missing');
+      }
+      if (args[0] === 'send-keys' && args[3] === 'Down') {
+        trustAccepted = true;
+      }
+      if (args[0] === 'capture-pane') {
+        return { stdout: trustAccepted ? '' : TRUST_SCREEN, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+      },
+    });
+
+    // Act
+    await backend.create({
+      taskId: 'trusttask',
+      taskTitle: 'Never trusted',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/never-trusted-0001',
+      agentCli: 'claude',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — Down before Enter (never a bare Enter, which would pick the
+    // default-highlighted "No, exit"), and the trust dance happens before
+    // the brief is ever pasted in.
+    const downIndex = calls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
+    const trustEnterIndex = calls.findIndex(
+      (args, i) => args[0] === 'send-keys' && args.includes('Enter') && i > downIndex,
+    );
+    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
+    expect(downIndex).toBeGreaterThanOrEqual(0);
+    expect(trustEnterIndex).toBeGreaterThan(downIndex);
+    expect(loadIndex).toBeGreaterThan(trustEnterIndex);
+  });
+
+  it('never sends Down when the trust prompt is not showing', async () => {
+    // Arrange — an already-trusted directory: the pane never shows the prompt.
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'has-session') {
+        throw new Error('missing');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+      },
+    });
+
+    // Act
+    await backend.create({
+      taskId: 'trustedtask',
+      taskTitle: 'Already trusted',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/already-trusted-0001',
+      agentCli: 'claude',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert
+    expect(calls.some((args) => args[0] === 'send-keys' && args[3] === 'Down')).toBe(false);
+  });
+});
+
+describe('TmuxBackend.peekPane', () => {
+  it('captures the current pane content by its resolved target', async () => {
+    // Arrange
+    const runner: TmuxCommandRunner = async (args) => {
+      if (args[0] === 'list-panes') {
+        return { stdout: '', stderr: '' };
+      }
+      if (args[0] === 'capture-pane') {
+        return { stdout: 'whatever is on screen right now', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({ runner });
+
+    // Act
+    const content = await backend.peekPane('ab_task_1234_p');
+
+    // Assert
+    expect(content).toBe('whatever is on screen right now');
+  });
+});

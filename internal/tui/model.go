@@ -2149,6 +2149,19 @@ func (m *Model) resizeActiveSessionCmd() tea.Cmd {
 
 func (m *Model) openPRCmd(task *TaskRecord, checks bool) tea.Cmd {
 	return func() tea.Msg {
+		// Once the card has merged and shipped a build, the PR itself is no
+		// longer the interesting thing "o" can open — the dev portal page for
+		// the artifact is. "v" (checks) stays PR-specific regardless: checks
+		// are a property of the pull request, not the artifact.
+		if !checks {
+			if devPortalURL := getTaskDevPortalURL(task); devPortalURL != "" {
+				if err := openExternal(devPortalURL); err != nil {
+					return asyncErrorMsg{err: err}
+				}
+				return boardActionMsg{status: "Opened dev portal."}
+			}
+		}
+
 		url := getTaskPRURL(task, m.repoByID(task.RepoID))
 		if url == "" {
 			return asyncErrorMsg{err: fmt.Errorf("PR link is not available for the selected task.")}

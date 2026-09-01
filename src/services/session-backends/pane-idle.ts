@@ -53,6 +53,43 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Text unique to Claude Code's first-run "do you trust this folder" prompt.
+ * Confirmed live against a real, never-trusted directory.
+ */
+const TRUST_PROMPT_MARKER = 'Yes, I trust this folder';
+
+export function looksLikeTrustPrompt(paneText: string): boolean {
+  return paneText.includes(TRUST_PROMPT_MARKER);
+}
+
+/**
+ * Auto-accepts Claude Code's own trust prompt, when it's on screen.
+ *
+ * AgentBoard created this worktree itself, under a repo the user explicitly
+ * registered — that trust is implicit. Without this, a `--start`ed session
+ * with nobody watching hangs here forever: confirmed live, the prompt's
+ * default-highlighted option is "No, exit", not "Yes" — a bare Enter (which
+ * is all the rest of the delivery pipeline ever sends) quits the CLI instead
+ * of accepting, and `submitAndVerify`'s "did the pane change" check misreads
+ * that quit as a successful brief submission.
+ *
+ * A no-op — returns false, sends nothing — when the prompt is not showing.
+ */
+export async function autoTrustIfPrompted(
+  capture: () => Promise<string>,
+  sendDown: () => Promise<void>,
+  sendEnter: () => Promise<void>,
+): Promise<boolean> {
+  const current = await capture();
+  if (!looksLikeTrustPrompt(current)) {
+    return false;
+  }
+  await sendDown();
+  await sendEnter();
+  return true;
+}
+
+/**
  * Polls a pane's rendered content until it stops changing between captures.
  *
  * A prompt typed the instant a pane is spawned races the agent CLI's own

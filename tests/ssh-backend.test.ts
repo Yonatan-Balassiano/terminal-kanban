@@ -454,3 +454,82 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
     expect(writtenBriefs[remoteBriefFile]).toBe('Please continue where you left off.');
   });
 });
+
+describe('SshTmuxBackend auto-trust', () => {
+  it('accepts a never-trusted-folder prompt (Down, then Enter) before delivering the brief', async () => {
+    // Arrange — the remote pane shows the real trust screen until Down is
+    // sent, then settles on the CLI's normal ready screen for everything
+    // after — mirrors TmuxBackend's equivalent test.
+    const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
+    let trustAccepted = false;
+    const remoteCalls: string[][] = [];
+    const transport = {
+      host: 'test.host',
+      id: 'ssh:test.host',
+      isRemote: true,
+      exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+      exists: vi.fn(async () => true),
+      mkdirp: vi.fn(async () => undefined),
+      removeDir: vi.fn(async () => undefined),
+      writeFileIfChanged: vi.fn(async () => true),
+      reachability: vi.fn(async () => 'ok' as const),
+    };
+
+    const backend = new SshTmuxBackend({
+      transport: transport as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        remoteCalls.push(args);
+        if (args[0] === 'has-session') fail();
+        if (args[0] === 'send-keys' && args[3] === 'Down') {
+          trustAccepted = true;
+        }
+        if (args[0] === 'capture-pane') {
+          return ok(trustAccepted ? '' : TRUST_SCREEN);
+        }
+        return ok();
+      },
+      localRunner: async () => ok(),
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+      },
+    });
+
+    // Act
+    await backend.create({ ...createOpts(), initialPrompt: 'Fix the flaky test.' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — Down before Enter (never a bare Enter), and the trust dance
+    // happens before the brief is ever pasted in.
+    const downIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
+    const trustEnterIndex = remoteCalls.findIndex(
+      (args, i) => args[0] === 'send-keys' && args.includes('Enter') && i > downIndex,
+    );
+    const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
+    expect(downIndex).toBeGreaterThanOrEqual(0);
+    expect(trustEnterIndex).toBeGreaterThan(downIndex);
+    expect(loadIndex).toBeGreaterThan(trustEnterIndex);
+  });
+});
+
+describe('SshTmuxBackend.peekPane', () => {
+  it('captures the remote pane content directly by backend session id', async () => {
+    // Arrange
+    const { backend } = makeHarness({
+      remote: (args) => (args[0] === 'capture-pane' ? ok('whatever is on screen right now') : ok()),
+    });
+
+    // Act
+    const content = await backend.peekPane(SESSION_NAME);
+
+    // Assert
+    expect(content).toBe('whatever is on screen right now');
+  });
+});

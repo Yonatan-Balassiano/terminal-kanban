@@ -668,6 +668,11 @@ export async function dispatch(
         return { id: req.id, result: { delivered } };
       }
 
+      case 'getFleetStatus': {
+        const sessions = await services.session.getFleetStatus();
+        return { id: req.id, result: { sessions } };
+      }
+
       case 'watchSessionUpdates':
         // Handled at connection level so each client can watch a different task.
         return { id: req.id, result: { watchingTaskId: p['taskId'] ?? null } };

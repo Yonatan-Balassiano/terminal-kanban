@@ -333,6 +333,15 @@ export interface SessionBackend {
    * delivery path is argv-based and has no equivalent to re-run.
    */
   redeliverPrompt?(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void>;
+  /**
+   * A one-shot snapshot of a live pane's rendered content, for detecting a
+   * state the session's own status fields don't carry — e.g. the trust
+   * prompt (see `redeliverPrompt`'s note) still showing.
+   *
+   * Only backends whose sessions are external panes implement this — a PTY
+   * session's content already flows through `getBuffer`.
+   */
+  peekPane?(backendSessionId: string): Promise<string>;
 }
 
 export interface CreateSessionOpts {
@@ -400,6 +409,30 @@ export interface SessionActivitySnapshot {
   updatedAt: number;
 }
 
+/**
+ * One live session's state, rolled up for `agentboard fleet` — the "poke N
+ * tmux panes by hand" problem, solved by one table instead.
+ */
+export interface FleetSessionStatus {
+  taskId: string;
+  taskTitle: string;
+  slot: SessionSlot;
+  backendType: SessionBackendType;
+  sessionStatus: SessionStatus;
+  isBusy: boolean;
+  attentionNeeded: boolean;
+  /**
+   * The session is sitting at Claude Code's own trust prompt — see
+   * `SessionBackend.redeliverPrompt`'s note on why this used to hang a
+   * `--start`ed session forever. Always false once `autoTrustIfPrompted`
+   * (pane-idle.ts) is dismissing it on its own; a session still showing
+   * `true` here means that dismissal itself didn't happen or didn't work.
+   * Only ever set for tmux/ssh sessions — PTY has no separate pane to check.
+   */
+  trustPromptShowing: boolean;
+  createdAt: number;
+}
+
 export interface BackendHealth {
   available: boolean;
   version?: string;
@@ -464,6 +497,7 @@ export type RPCMethod =
   | 'sendInput'
   | 'notifyTaskSession'
   | 'redeliverInitialPrompt'
+  | 'getFleetStatus'
   | 'watchSessionUpdates'
   | 'resizeSession'
   | 'getBuffer'

@@ -2101,3 +2101,135 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     );
   });
 });
+
+describe('SessionManager.getFleetStatus', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function makeManager(backendOverrides: Partial<SessionBackend> = {}) {
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'tmux',
+      backendSessionId: `ab_${opts.taskId}_p`,
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({ command: '' })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+      ...backendOverrides,
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    return { manager, backend };
+  }
+
+  it('rolls up title, attention, and trust-prompt state for every live session', async () => {
+    // Arrange — the mock backend's inspect() returns null (no info), so
+    // sessionStatus reads as 'orphaned' deterministically without needing to
+    // fake a process table; this test is about getFleetStatus's own new
+    // rollup logic, not activity derivation, which is covered elsewhere.
+    const peekPane = vi.fn<[string], Promise<string>>(
+      async () => 'Quick safety check\n❯ Yes, I trust this folder'
+    );
+    const task = board.createTask({ title: 'Stuck on trust', repoId: 'repo-1' });
+    const { manager } = makeManager({ peekPane });
+    await manager.openSession(task.id);
+    // openSession clears attention as a side effect of opening fresh, so it
+    // has to be set after — this test is asserting the flag is read
+    // correctly, not that opening a session preserves it.
+    board.setTaskSessionAttention(task.id);
+
+    // Act
+    const fleet = await manager.getFleetStatus();
+
+    // Assert
+    expect(fleet).toHaveLength(1);
+    expect(fleet[0]).toMatchObject({
+      taskId: task.id,
+      taskTitle: 'Stuck on trust',
+      slot: 'primary',
+      backendType: 'tmux',
+      sessionStatus: 'orphaned',
+      isBusy: false,
+      attentionNeeded: true,
+      trustPromptShowing: true,
+    });
+    expect(peekPane).toHaveBeenCalledWith(`ab_${task.id}_p`);
+  });
+
+  it('reports trustPromptShowing false when the backend has no peekPane support', async () => {
+    // Arrange — no peekPane override: the default mock backend lacks it, the
+    // same as PTY sessions in production.
+    const task = board.createTask({ title: 'Normal session', repoId: 'repo-1' });
+    const { manager } = makeManager();
+    await manager.openSession(task.id);
+
+    // Act
+    const fleet = await manager.getFleetStatus();
+
+    // Assert
+    expect(fleet[0]?.trustPromptShowing).toBe(false);
+  });
+
+  it('returns an empty list when nothing is live', async () => {
+    // Arrange
+    board.createTask({ title: 'Never opened', repoId: 'repo-1' });
+    const { manager } = makeManager();
+
+    // Act
+    const fleet = await manager.getFleetStatus();
+
+    // Assert
+    expect(fleet).toEqual([]);
+  });
+});

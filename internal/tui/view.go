@@ -2438,6 +2438,26 @@ func getTaskPRURL(task *TaskRecord, repo *RepoRecord) string {
 	return fmt.Sprintf("%s/pull/%d", repoURL, *task.PRNumber)
 }
 
+// getTaskDevPortalURL resolves the BO dev portal page for the artifact a
+// merged card is shipping through, once there is actually something built to
+// look at.
+//
+// "rc-built"/"rolling-out" only: a card that is still "awaiting-build" has no
+// release candidate yet, and BlockingArtifactName is empty once an artifact
+// reaches "ga" (nothing left blocking it) — for those two cases the PR link
+// is still the more useful thing "o" can open.
+func getTaskDevPortalURL(task *TaskRecord) string {
+	if task.Release == nil || task.Release.BlockingArtifactName == "" {
+		return ""
+	}
+	switch task.Release.Stage {
+	case "rc-built", "rolling-out":
+		return "https://wix-bo.com/dev/project/" + task.Release.BlockingArtifactName
+	default:
+		return ""
+	}
+}
+
 // getBranchPRURL resolves one branch's PR link. A branch names its own repo, so
 // the link never has to be guessed from the card's repo — which on a cross-repo
 // card would open the wrong project.

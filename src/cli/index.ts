@@ -187,6 +187,55 @@ function printTaskTable(tasks: TaskRecord[], emptyMessage = 'No tasks found.'): 
   }
 }
 
+/**
+ * Renders `getFleetStatus`'s rows the way `printTaskTable` renders tasks —
+ * one table, no need to poke each live session's pane by hand to see what
+ * state it's actually in.
+ */
+function printFleetTable(sessions: import('../types/index.js').FleetSessionStatus[]): void {
+  if (sessions.length === 0) {
+    console.log('No live sessions.');
+    return;
+  }
+
+  const header = ['TASK', 'TITLE', 'SLOT', 'BACKEND', 'STATUS', 'BUSY', 'ATTENTION', 'TRUST-PROMPT', 'AGE'];
+  const rows = sessions.map((s) => [
+    s.taskId,
+    s.taskTitle,
+    s.slot,
+    s.backendType,
+    s.sessionStatus,
+    s.isBusy ? 'yes' : 'no',
+    s.attentionNeeded ? 'yes' : 'no',
+    s.trustPromptShowing ? 'STUCK' : '-',
+    formatFleetAge(Date.now() - s.createdAt),
+  ]);
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
+  const fmt = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i])).join('  ');
+  console.log(fmt(header));
+  console.log(widths.map((w) => '-'.repeat(w)).join('  '));
+  for (const row of rows) {
+    console.log(fmt(row.map(String)));
+  }
+
+  const stuck = sessions.filter((s) => s.trustPromptShowing);
+  if (stuck.length > 0) {
+    console.log(
+      `\n${stuck.length} session(s) stuck on the trust prompt — this should self-resolve; if it doesn't, attach and accept it by hand.`,
+    );
+  }
+}
+
+function formatFleetAge(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h${minutes}m`;
+}
+
 function filterListedTasks(tasks: TaskRecord[], archivedOnly: boolean): TaskRecord[] {
   if (!archivedOnly) {
     return tasks;
@@ -567,6 +616,36 @@ export function buildCli(): Command {
           console.log(JSON.stringify(tasks, null, 2));
         } else {
           printTaskTable(tasks, opts.archived ? 'No archived tasks found.' : 'No tasks found.');
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // fleet
+  // ----------------------------------------------------------
+  program
+    .command('fleet')
+    .description(
+      'List every live session and its state at a glance — replaces checking N concurrent sessions by poking N tmux panes by hand',
+    )
+    .option('--json', 'Output as JSON')
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const { sessions } = await rpc.call<{
+          sessions: import('../types/index.js').FleetSessionStatus[];
+        }>('getFleetStatus');
+        rpc.disconnect();
+
+        if (opts.json) {
+          console.log(JSON.stringify(sessions, null, 2));
+        } else {
+          printFleetTable(sessions);
         }
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);

@@ -15,6 +15,7 @@ import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { writeLocalBrief } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import {
+  autoTrustIfPrompted,
   DEFAULT_POST_PASTE_DELAY_MS,
   sleep,
   submitAndVerify,
@@ -280,10 +281,23 @@ export class TmuxBackend implements SessionBackend {
    */
   private async deliverInitialPrompt(backendSessionId: string, briefFile: string): Promise<void> {
     const target = await this.resolveInputTarget(backendSessionId);
-    await waitForStablePane(async () => {
-      const result = await this.runner(buildTmuxCapturePaneArgs(target));
-      return result.stdout;
-    }, this.paneIdleOptions);
+    const capture = async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;
+    await waitForStablePane(capture, this.paneIdleOptions);
+
+    const trusted = await autoTrustIfPrompted(
+      capture,
+      async () => {
+        await this.runner(['send-keys', '-t', target, 'Down']);
+      },
+      async () => {
+        await this.runner(['send-keys', '-t', target, 'Enter']);
+      },
+    );
+    if (trusted) {
+      // The prompt just gave way to the CLI's own startup, hooks included —
+      // wait for that to settle too before treating the pane as ready.
+      await waitForStablePane(capture, this.paneIdleOptions);
+    }
 
     if (!existsSync(briefFile)) {
       return;
@@ -314,6 +328,11 @@ export class TmuxBackend implements SessionBackend {
   async redeliverPrompt(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void> {
     const briefFile = writeLocalBrief(taskId, slot, prompt);
     await this.deliverInitialPrompt(backendSessionId, briefFile);
+  }
+
+  async peekPane(backendSessionId: string): Promise<string> {
+    const target = await this.resolveInputTarget(backendSessionId);
+    return (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;
   }
 
   async resize(_backendSessionId: string, _cols: number, _rows: number): Promise<void> {

@@ -4,6 +4,7 @@ import type {
   AgentCLI,
   AgentPermissionMode,
   BackendSessionInfo,
+  FleetSessionStatus,
   SessionRecord,
   SessionBackend,
   SessionBackendType,
@@ -19,6 +20,7 @@ import type { BoardService } from './board.js';
 import { PtyBackend } from './session-backends/pty.js';
 import { TmuxBackend } from './session-backends/tmux.js';
 import { SshTmuxBackend } from './session-backends/ssh.js';
+import { looksLikeTrustPrompt } from './session-backends/pane-idle.js';
 import {
   LOCAL_TRANSPORT_ID,
   TransportRegistry,
@@ -1352,6 +1354,54 @@ export class SessionManager {
         this.markSessionOrphaned(session.id);
       }
     }
+  }
+
+  // ---- fleet status -------------------------------------------
+
+  /**
+   * One row per live session, for `agentboard fleet` — replaces poking N
+   * tmux panes by hand with a single table naming exactly what state each
+   * one is in.
+   */
+  async getFleetStatus(): Promise<FleetSessionStatus[]> {
+    const rows = this.db
+      .prepare<[], SessionRow>(`SELECT * FROM sessions WHERE status IN ('active','idle')`)
+      .all();
+
+    const results: FleetSessionStatus[] = [];
+    for (const row of rows) {
+      const session = rowToRecord(row);
+      if (!session.backendSessionId) continue;
+
+      const task = this.board.getTask(session.taskId);
+      const { activity } = await this.inspectSessionState(session.taskId, session.slot);
+
+      let trustPromptShowing = false;
+      if (session.backendType === 'tmux' || session.backendType === 'ssh') {
+        const backend = this.getBackend(session.backendType);
+        if (backend.peekPane) {
+          try {
+            trustPromptShowing = looksLikeTrustPrompt(await backend.peekPane(session.backendSessionId));
+          } catch {
+            // Best-effort: an unreachable pane just means "unknown", not a crash.
+          }
+        }
+      }
+
+      results.push({
+        taskId: session.taskId,
+        taskTitle: task?.title ?? session.taskId,
+        slot: session.slot,
+        backendType: session.backendType,
+        sessionStatus: activity?.sessionStatus ?? 'orphaned',
+        isBusy: activity?.isBusy ?? false,
+        attentionNeeded: task?.sessionAttentionNeeded ?? false,
+        trustPromptShowing,
+        createdAt: session.createdAt,
+      });
+    }
+
+    return results;
   }
 
   // ---- heartbeat -------------------------------------------
