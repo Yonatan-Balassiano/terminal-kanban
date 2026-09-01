@@ -152,6 +152,11 @@ async function createReleaseTracker(deps: {
             // epoch: the devex release query filters on GitHub's exact string,
             // and one rebuilt from milliseconds would shift the boundary. The
             // resolver fetches it itself and caches it for the process lifetime.
+            //
+            // mergedAtMs is the one exception: it never reaches the devex
+            // query, only the tracker's own "has this waited long enough to
+            // give up on" check, where the stored epoch is exactly right.
+            mergedAtMs: branch.mergedAt ?? undefined,
           },
         ];
       });

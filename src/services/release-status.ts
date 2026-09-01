@@ -72,6 +72,13 @@ export interface PRRef {
   prState: string;
   mergeCommitSha?: string;
   mergedAt?: string;
+  /**
+   * The merge, as a plain epoch — distinct from `mergedAt`'s GitHub-format
+   * string, which is reserved for the devex query. Used only to judge whether
+   * enough time has passed that an `unknown` verdict stops being "not built
+   * yet" and starts being "may never resolve" (see `ReleaseTracker.isFullyReleased`).
+   */
+  mergedAtMs?: number;
   /** Changed paths, when the caller already has them. Fetched if absent. */
   changedFiles?: string[];
 }

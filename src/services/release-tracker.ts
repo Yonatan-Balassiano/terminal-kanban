@@ -71,6 +71,14 @@ export class ReleaseTracker {
    * card in shipping indefinitely, which is a worse outcome than the board it
    * replaced. A card not yet looked at is held, because that resolves itself on
    * the next poll.
+   *
+   * An `unknown` verdict only counts as "could not tell" once the merge has
+   * waited long enough that "not built yet" stops being credible
+   * (`ReleaseStatusStore.isStaleMerge`). Skipping that check let a fresh
+   * merge's very first resolution attempt — routinely `unknown` for a few
+   * minutes while a build starts — read as fully released and move the card
+   * straight to done. Being terminal, done never re-evaluates, so a later,
+   * correct verdict (e.g. `awaiting-build`) arrived too late to undo it.
    */
   isFullyReleased(taskId: string): boolean {
     const merged = this.listTaskPRs(taskId).filter((pr) => pr.prState === 'merged');
@@ -94,8 +102,7 @@ export class ReleaseTracker {
         case 'no-artifact':
           return true;
         case 'unknown':
-          // Unreadable, not unshipped.
-          return true;
+          return pr.mergedAtMs != null && this.store.isStaleMerge(pr.mergedAtMs);
         default:
           return false;
       }

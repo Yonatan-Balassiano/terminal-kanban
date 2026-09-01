@@ -9,8 +9,14 @@ import type { PRReleaseStatus, ReleaseStage } from '../src/types/index.js';
 
 const SLUG = 'wix-private/web5';
 
-function mergedPR(prNumber: number): PRRef {
-  return { repoSlug: SLUG, prNumber, repoPath: '/repo', prState: 'merged' };
+function mergedPR(prNumber: number, mergedAtMs?: number): PRRef {
+  return {
+    repoSlug: SLUG,
+    prNumber,
+    repoPath: '/repo',
+    prState: 'merged',
+    ...(mergedAtMs !== undefined ? { mergedAtMs } : {}),
+  };
 }
 
 function status(prNumber: number, stage: ReleaseStage): PRReleaseStatus {
@@ -51,6 +57,7 @@ describe('ReleaseTracker', () => {
     prs: PRRef[];
     resolve: (pr: PRRef) => PRReleaseStatus;
     onTaskReleased?: (taskId: string) => void;
+    now?: () => number;
   }) {
     const dir = mkdtempSync(join(tmpdir(), 'agentboard-tracker-'));
     dirs.push(dir);
@@ -71,6 +78,7 @@ describe('ReleaseTracker', () => {
       listTaskPRs: () => opts.prs,
       listTrackedTaskIds: () => ['task-1'],
       ...(opts.onTaskReleased ? { onTaskReleased: opts.onTaskReleased } : {}),
+      ...(opts.now ? { now: opts.now } : {}),
     });
 
     return { tracker, resolver, db };
@@ -101,12 +109,35 @@ describe('ReleaseTracker', () => {
     expect(tracker.isFullyReleased('task-1')).toBe(false);
   });
 
-  it('does not strand a card when the release status cannot be read', async () => {
-    // Arrange — an expired login must not park every card in shipping forever.
-    // Unreadable is not the same as unshipped.
+  it('holds a card back on a fresh unknown verdict, not just a resolved one', async () => {
+    // Arrange — the very first check after a merge is routinely `unknown` for
+    // a few minutes while a build starts. Reading that as "fully released"
+    // moves the card straight to done — a terminal state that never
+    // re-evaluates — before a later, correct verdict has any chance to land.
+    const NOW = 1_000_000;
     const { tracker } = newTracker({
-      prs: [mergedPR(1)],
+      prs: [mergedPR(1, NOW - 60_000)],
       resolve: (pr) => status(pr.prNumber, 'unknown'),
+      now: () => NOW,
+    });
+
+    // Act
+    await tracker.poll();
+
+    // Assert
+    expect(tracker.isFullyReleased('task-1')).toBe(false);
+  });
+
+  it('does not strand a card once an unknown verdict has aged past being credible', async () => {
+    // Arrange — an expired login or an untracked repository must not park a
+    // card in shipping forever. Once the merge is old enough that "not built
+    // yet" stops being credible (ReleaseStatusStore.isStaleMerge), unreadable
+    // is treated the same as unshippable.
+    const NOW = 1_000_000;
+    const { tracker } = newTracker({
+      prs: [mergedPR(1, NOW - 21_600_001)],
+      resolve: (pr) => status(pr.prNumber, 'unknown'),
+      now: () => NOW,
     });
 
     // Act
