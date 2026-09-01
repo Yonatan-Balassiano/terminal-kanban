@@ -112,6 +112,7 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     kind: (row['kind'] as TaskKind | null) ?? 'repo',
     parentTaskId: (row['parent_task_id'] as string | null) ?? undefined,
     childPrAlertTaskId: (row['child_pr_alert_task_id'] as string | null) ?? undefined,
+    sessionName: (row['session_name'] as string | null) ?? undefined,
     repoId: (row['repo_id'] as string | null) ?? undefined,
     agentCli: (row['agent_cli'] as 'claude' | 'codex' | null) ?? 'claude',
     location: (row['location'] as TaskLocation | null) ?? 'local',
@@ -406,18 +407,28 @@ export class BoardService {
     const id = generateId();
     const now = Date.now();
     const trackId = params.trackId ?? 'backlog';
+    const parent = params.parentTaskId ? this.getTask(params.parentTaskId) : null;
+    // The name this card's session launches under (SendMessage/ListAgents).
+    // An explicit name always wins; otherwise a subtask's default is prefixed
+    // with its parent's own sessionName, so the hierarchy reads directly off
+    // the flat session list without anyone needing to look anything up.
+    const sessionName =
+      params.sessionName ??
+      (parent ? `${parent.sessionName ?? parent.title}/${params.title}` : params.title);
     // Linking parent_task_id is not enough on its own: it tells the *board*
     // this card is a subtask, but nothing tells the *agent* that starts on
     // it — the brief is whatever free text the creator wrote, with no
     // guarantee it mentions the relationship at all. Prepending this here,
     // once, covers every creation path (CLI, TUI, auto-detected or explicit
     // --parent) rather than depending on each caller to remember to say it.
-    const parent = params.parentTaskId ? this.getTask(params.parentTaskId) : null;
     const initialPrompt = parent
       ? [
-          `[agentboard] This card is a subtask of "${parent.title}" (id ${parent.id}). ` +
-            `If you spin off further subtasks of your own, pass --parent ${id} explicitly ` +
-            `rather than relying on auto-detection.`,
+          `[agentboard] This card is a subtask of "${parent.title}" ` +
+            `(task id ${parent.id}, session name "${parent.sessionName ?? parent.title}"). ` +
+            `Your own session name is "${sessionName}" — that is what SendMessage/ListAgents ` +
+            `addresses you as; agentboard task notify addresses by task id instead, and this ` +
+            `card's is ${id}. If you spin off further subtasks of your own, pass --parent ${id} ` +
+            `explicitly rather than relying on auto-detection.`,
           params.initialPrompt,
         ]
           .filter((part) => part && part.trim().length > 0)
@@ -445,12 +456,12 @@ export class BoardService {
     this.db
       .prepare<unknown[], void>(
         `INSERT INTO tasks
-           (id, title, description, initial_prompt, kind, parent_task_id, repo_id, agent_cli,
-            location, track_id, pillar_id, branch_name, sort_key,
+           (id, title, description, initial_prompt, kind, parent_task_id, session_name, repo_id,
+            agent_cli, location, track_id, pillar_id, branch_name, sort_key,
             pr_state, pr_draft, ci_state, review_state, unresolved_thread_count,
             github_sync_status, ci_required_total, ci_required_passed, ci_required_failed,
             ci_required_pending, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 'none', 'none', 0, 'idle', 0, 0, 0, 0, ?, ?)`,
       )
       .run(
         id,
@@ -459,6 +470,7 @@ export class BoardService {
         emptyToNull(initialPrompt),
         kind,
         params.parentTaskId ?? null,
+        sessionName,
         isGeneral ? null : params.repoId!,
         agentCli,
         location,

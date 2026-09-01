@@ -248,6 +248,7 @@ function applyAdditiveMigrations(db: Db): void {
   ensureColumn(db, 'tasks', 'initial_prompt', 'TEXT');
   ensureColumn(db, 'tasks', 'parent_task_id', 'TEXT');
   ensureColumn(db, 'tasks', 'child_pr_alert_task_id', 'TEXT');
+  ensureColumn(db, 'tasks', 'session_name', 'TEXT');
 
   // Run after the column migrations: both tables have foreign keys into tasks,
   // which the rebuild above may have just replaced.

@@ -38,6 +38,24 @@ describe('resolveAgentArgs', () => {
       '--verbose',
     ]);
   });
+
+  it('names the claude session so it is addressable via SendMessage/ListAgents', () => {
+    expect(resolveAgentArgs('claude', 'default', {}, 'Add rate limiting')).toEqual([
+      '--name',
+      'Add rate limiting',
+    ]);
+  });
+
+  it('adds no name flag for an agent whose --name is unverified', () => {
+    // Same reasoning as the bypass flag: a guessed flag is worse than none.
+    expect(resolveAgentArgs('codex', 'default', {}, 'Add rate limiting')).toEqual([]);
+  });
+
+  it('puts the name flag between permission flags and configured extras', () => {
+    expect(
+      resolveAgentArgs('claude', 'bypass', { claude: ['--verbose'] }, 'Add rate limiting'),
+    ).toEqual(['--dangerously-skip-permissions', '--name', 'Add rate limiting', '--verbose']);
+  });
 });
 
 describe('bootstrap command', () => {

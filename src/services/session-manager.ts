@@ -72,6 +72,7 @@ interface TaskRow {
   session_id: string | null;
   secondary_session_id: string | null;
   initial_prompt: string | null;
+  session_name: string | null;
 }
 
 interface RepoRow {
@@ -416,7 +417,7 @@ export class SessionManager {
     const taskRow = this.db
       .prepare<[string], TaskRow>(
         `SELECT id, title, kind, repo_id, agent_cli, location, track_id, branch_name, worktree_path,
-                session_id, secondary_session_id, initial_prompt
+                session_id, secondary_session_id, initial_prompt, session_name
            FROM tasks
           WHERE id = ?`
       )
@@ -563,6 +564,7 @@ export class SessionManager {
       workspaces: sessionWorkspaceEntries(workspace),
       agentSessionId,
       initialPrompt: taskRow.initial_prompt ?? undefined,
+      sessionName: taskRow.session_name ?? undefined,
     };
     const createdSession = await backend.create(createOpts);
     const sessionRecord: SessionRecord = {
@@ -761,7 +763,7 @@ export class SessionManager {
     const task = this.db
       .prepare<[string], TaskRow>(
         `SELECT id, title, kind, repo_id, agent_cli, location, track_id, branch_name, worktree_path,
-                session_id, secondary_session_id, initial_prompt
+                session_id, secondary_session_id, initial_prompt, session_name
            FROM tasks
           WHERE id = ?`
       )
@@ -1176,7 +1178,7 @@ export class SessionManager {
     return this.db
       .prepare<[string], TaskRow>(
         `SELECT id, title, kind, repo_id, agent_cli, location, track_id, branch_name, worktree_path,
-                session_id, secondary_session_id, initial_prompt
+                session_id, secondary_session_id, initial_prompt, session_name
            FROM tasks
           WHERE id = ?`
       )

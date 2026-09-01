@@ -158,6 +158,13 @@ export interface TaskRecord {
   parentTaskId?: string;
   /** The child task whose PR is waiting on this card to review, if any. */
   childPrAlertTaskId?: string;
+  /**
+   * This card's session's `--name` — how other Claude Code sessions address
+   * it via SendMessage/ListAgents. Assigned once at creation; for a subtask,
+   * prefixed with the parent's own sessionName so hierarchy is visible
+   * straight off the flat session list.
+   */
+  sessionName?: string;
   /** Absent on general tasks, which belong to no repo. */
   repoId?: string;
   agentCli: AgentCLI;
@@ -321,6 +328,8 @@ export interface CreateSessionOpts {
   taskId: string;
   taskTitle: string;
   slot: SessionSlot;
+  /** The `--name` to launch the agent CLI under, when the CLI supports one. */
+  sessionName?: string;
   /** Defaults to 'repo'. A 'general' session skips all branch checkout. */
   taskKind?: TaskKind;
   /** Empty for general tasks. */
@@ -497,6 +506,11 @@ export interface CreateTaskParams {
   kind?: TaskKind;
   /** The card this one was spun off from, if it was created as a subtask. */
   parentTaskId?: string;
+  /**
+   * Explicit `--name` for this card's session. Defaults to the title
+   * (prefixed with the parent's own sessionName, for a subtask) when omitted.
+   */
+  sessionName?: string;
   /** Required for 'repo' tasks, ignored for 'general' ones. */
   repoId?: string;
   agentCli?: AgentCLI;

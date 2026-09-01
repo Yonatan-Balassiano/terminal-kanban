@@ -202,6 +202,7 @@ export class TmuxBackend implements SessionBackend {
         : undefined;
       const bootstrapCommand = buildNewSessionBootstrapCommand({
         taskId: opts.taskId,
+        sessionName: opts.sessionName,
         taskKind: opts.taskKind,
         repoPath: opts.repoPath,
         branch: opts.branch,

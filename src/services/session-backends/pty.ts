@@ -69,6 +69,7 @@ export class PtyBackend implements SessionBackend {
     // Bootstrap on master, pull, then switch to the task branch.
     const checkoutCmd = `${buildNewSessionBootstrapCommand({
       taskId: opts.taskId,
+      sessionName: opts.sessionName,
       taskKind: opts.taskKind,
       repoPath: opts.repoPath,
       branch: opts.branch,

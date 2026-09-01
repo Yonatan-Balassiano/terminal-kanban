@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- The child task whose PR just opened, so this card can flag "review this
   -- subtask's PR" until acknowledged. NULL when there is nothing to review.
   child_pr_alert_task_id TEXT,
+  -- The agent CLI's own --name, so this card's session is addressable by a
+  -- readable name (SendMessage/ListAgents) rather than only its task id.
+  -- Assigned once at creation, same as branch_name; carries the parent's own
+  -- session_name as a prefix for a subtask, so hierarchy reads directly off
+  -- the flat session list without a lookup.
+  session_name TEXT,
   repo_id TEXT REFERENCES repos(id) ON DELETE CASCADE,
   track_id TEXT NOT NULL,
   pillar_id TEXT REFERENCES pillars(id) ON DELETE SET NULL,

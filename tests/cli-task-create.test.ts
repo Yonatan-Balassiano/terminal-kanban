@@ -272,6 +272,20 @@ describe('agentboard task create', () => {
     );
   });
 
+  it('passes an explicit --session-name through to createTask', async () => {
+    // Arrange
+    const { call } = stubRpc();
+
+    // Act
+    await run('Add rate limiting', '--session-name', 'rate-limit-work');
+
+    // Assert
+    expect(call).toHaveBeenCalledWith(
+      'createTask',
+      expect.objectContaining({ sessionName: 'rate-limit-work' }),
+    );
+  });
+
   it('refuses an unknown --parent rather than creating an orphaned reference', async () => {
     // Arrange
     stubRpc();

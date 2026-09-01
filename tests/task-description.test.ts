@@ -67,6 +67,62 @@ describe('BoardService task description', () => {
     expect(stored?.initialPrompt).toContain('Pull the limiter into its own module.');
   });
 
+  it('names a task after its title by default, so it is addressable via SendMessage/ListAgents', () => {
+    // Act
+    const task = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });
+
+    // Assert
+    expect(task.sessionName).toBe('Add rate limiting');
+  });
+
+  it("prefixes a subtask's default session name with its parent's, for hierarchy at a glance", () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });
+
+    // Act
+    const subtask = board.createTask({
+      title: 'Extract the limiter',
+      repoId: 'repo-1',
+      parentTaskId: parent.id,
+    });
+
+    // Assert
+    expect(subtask.sessionName).toBe('Add rate limiting/Extract the limiter');
+  });
+
+  it('lets an explicit session name override the derived default', () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });
+
+    // Act
+    const subtask = board.createTask({
+      title: 'Extract the limiter',
+      repoId: 'repo-1',
+      parentTaskId: parent.id,
+      sessionName: 'rate-limit-extraction',
+    });
+
+    // Assert
+    expect(subtask.sessionName).toBe('rate-limit-extraction');
+  });
+
+  it("tells the subtask's agent both session names, since SendMessage and agentboard task notify address differently", () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });
+
+    // Act
+    const subtask = board.createTask({
+      title: 'Extract the limiter',
+      repoId: 'repo-1',
+      parentTaskId: parent.id,
+    });
+
+    // Assert
+    const prompt = board.getTask(subtask.id)?.initialPrompt;
+    expect(prompt).toContain(`session name "${parent.title}"`);
+    expect(prompt).toContain(`Your own session name is "${subtask.sessionName}"`);
+  });
+
   it('names the parent even for a subtask created with no brief of its own', () => {
     // Arrange
     const parent = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });

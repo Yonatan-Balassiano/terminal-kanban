@@ -608,6 +608,10 @@ export function buildCli(): Command {
       '--parent <id>',
       'Mark this as a subtask of an existing card (defaults to the running session’s own task, if any)',
     )
+    .option(
+      '--session-name <name>',
+      'Name for the new session (SendMessage/ListAgents); defaults to the title, prefixed with the parent’s own session name for a subtask',
+    )
     .option('--pillar <ref>', "Pillar id or label (defaults to the repo's default pillar)")
     .option('--agent <cli>', 'Agent CLI to run: claude or codex', 'claude')
     .option('--location <where>', 'Where the session runs: local or remote', 'local')
@@ -624,6 +628,7 @@ export function buildCli(): Command {
           repo?: string;
           general?: boolean;
           parent?: string;
+          sessionName?: string;
           pillar?: string;
           agent?: string;
           location?: string;
@@ -722,6 +727,7 @@ export function buildCli(): Command {
               title,
               kind: opts.general ? 'general' : 'repo',
               parentTaskId,
+              sessionName: opts.sessionName,
               repoId: repo?.id,
               pillarId,
               agentCli: opts.agent,
@@ -750,6 +756,9 @@ export function buildCli(): Command {
             }
             console.log(`  repo    ${created.repoId ?? '(general)'}`);
             console.log(`  agent   ${created.agentCli} (${created.location})`);
+            if (created.sessionName) {
+              console.log(`  session ${created.sessionName}`);
+            }
             if (created.parentTaskId) {
               console.log(`  subtask of ${created.parentTaskId}`);
             }

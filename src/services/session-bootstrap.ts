@@ -22,6 +22,12 @@ export interface SessionBootstrapCommandOptions {
    * guess its own id.
    */
   taskId?: string;
+  /**
+   * `--name` for the agent CLI, so this session is addressable via
+   * SendMessage/ListAgents by a readable name rather than only its task id.
+   * Only claude's `--name` is verified — see `resolveAgentArgs`.
+   */
+  sessionName?: string;
   /** Defaults to 'repo'. A 'general' session gets no branch checkout. */
   taskKind?: TaskKind;
   repoPath: string;
@@ -82,18 +88,31 @@ function encodeWorkspaces(workspaces: readonly SessionWorkspaceEntry[]): string 
     .join(WORKSPACE_ROW_SEPARATOR);
 }
 
+/**
+ * Agent CLIs whose `--name`/display-name flag has been verified. An agent
+ * absent here simply gets no name flag, the same way BYPASS_PERMISSION_FLAGS
+ * leaves out an unverified CLI's permission flag.
+ */
+const NAME_FLAG: Partial<Record<AgentCLI, string>> = {
+  claude: '--name',
+};
+
 /** Arguments appended to the agent CLI invocation, in a stable order. */
 export function resolveAgentArgs(
   agentCli: AgentCLI,
   permissionMode: AgentPermissionMode = 'default',
-  agentArgs: Partial<Record<AgentCLI, string[]>> = {}
+  agentArgs: Partial<Record<AgentCLI, string[]>> = {},
+  sessionName?: string
 ): string[] {
   const permissionArgs = permissionMode === 'bypass' ? (BYPASS_PERMISSION_FLAGS[agentCli] ?? []) : [];
-  return [...permissionArgs, ...(agentArgs[agentCli] ?? [])];
+  const nameFlag = NAME_FLAG[agentCli];
+  const nameArgs = sessionName && nameFlag ? [nameFlag, sessionName] : [];
+  return [...permissionArgs, ...nameArgs, ...(agentArgs[agentCli] ?? [])];
 }
 
 export function buildNewSessionBootstrapCommand({
   taskId,
+  sessionName,
   taskKind = 'repo',
   repoPath,
   branch,
@@ -109,7 +128,7 @@ export function buildNewSessionBootstrapCommand({
   agentSessionId,
   initialPromptFile,
 }: SessionBootstrapCommandOptions): string {
-  const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs);
+  const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs, sessionName);
   const envVars: Array<[string, string]> = [
     ['AGENTBOARD_TASK_ID', taskId ?? ''],
     ['AGENTBOARD_TASK_KIND', taskKind],
