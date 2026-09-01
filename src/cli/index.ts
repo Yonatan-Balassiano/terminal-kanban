@@ -877,6 +877,55 @@ export function buildCli(): Command {
       }
     });
 
+  task
+    .command('delete <task>')
+    .description('Delete a card — terminates its session(s) and removes its worktree(s)')
+    .option('--force', 'Skip the confirmation and delete immediately')
+    .action(async (taskId: string, opts: { force?: boolean }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          const task = board.tasks.find((t) => t.id === taskId);
+          if (!task) {
+            throw new Error(`Unknown task "${taskId}". No card with that id exists.`);
+          }
+
+          const dirty =
+            task.hasUntracked ||
+            task.hasConflicts ||
+            task.gitState === 'dirty' ||
+            task.gitState === 'untracked' ||
+            task.gitState === 'conflicted';
+
+          if (!opts.force) {
+            console.log(`About to delete task ${task.id}: ${task.title}`);
+            if (task.worktreePath) {
+              console.log(`  worktree ${task.worktreePath}`);
+            }
+            if (dirty) {
+              console.log('  ⚠ this worktree currently has uncommitted changes — they will be lost.');
+            }
+            console.log('This terminates its session(s) and removes its worktree(s). Not reversible.');
+            console.log('Re-run with --force to actually delete it.');
+            process.exitCode = 1;
+            return;
+          }
+
+          await rpc.call('deleteTask', { id: taskId });
+          console.log(`Deleted task ${taskId}: ${task.title}`);
+        } finally {
+          rpc.disconnect();
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
   // ----------------------------------------------------------
   // repos
   // ----------------------------------------------------------
