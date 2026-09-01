@@ -29,6 +29,7 @@ Core ideas:
 - Repo and pillar filters
 - Layout switch: `side-by-side` or `top / bottom`
 - Local daemon for board state, session management, and GitHub sync
+- Subtasks: spin off follow-up work as an auto-linked card, with PR rollup and cross-task notifications
 
 ## Requirements
 
@@ -184,6 +185,15 @@ agentboard ls --archived   # list archived tasks
 agentboard ls --json       # list tasks as JSON
 agentboard sync            # trigger GitHub sync manually
 agentboard attach <task>   # open session and print attach command
+```
+
+### Task commands
+
+```bash
+agentboard task create <title> --repo <id> [--description "..."] [--start]   # create a task
+agentboard task create <title> --general [--start]                           # create a repo-less task
+agentboard task create <title> --parent <id> --start                         # create it as an explicit subtask
+agentboard task notify <id> "<message>"                                      # type a message into a card's live session
 ```
 
 ### Repository commands
@@ -361,6 +371,20 @@ Merge command used by the board:
 ```bash
 gh pr merge <pr-number> -s
 ```
+
+## Subtasks
+
+An agent working a task can spin off follow-up work as its own card, linked back to the task it came from:
+
+```bash
+agentboard task create "Extract the rate limiter" --repo <id> --description "..." --start
+```
+
+- **Auto-linking.** Run from inside a running session, the new card is automatically linked as a subtask of the task that spawned it — no flag needed. Linking is tried two ways: the `AGENTBOARD_TASK_ID` environment variable the session was started with, then — if that didn't reach the process (e.g. a sandboxed shell that doesn't forward the outer environment) — a `.agentboard/task-id` marker file the session drops in its own worktree, found by walking up from the current directory. Pass `--parent <id>` to link explicitly instead.
+- **On the board.** A subtask's card shows a badge naming its parent (`↳ Add rate limiting`) rather than a generic "Subtask" tag, so two different parents' subtasks stay distinguishable at a glance.
+- **PR rollup.** A card's PR list (`Shift+E`) shows its own branches followed by every direct subtask's, each such row named with its own owning task (`↳ Extracted helper`). Every action there (open, checks, merge, comment) resolves against the branch's actual owning task, so it works the same whether the row is the card's own or a subtask's.
+- **PR notification.** When a subtask's PR first opens, the parent card is flagged, and if the parent still has a live session, the notice is typed straight into its pane.
+- **Pinging a card's session.** `agentboard task notify <id> "<message>"` types a message into any card's live session directly — used for the PR notice above, and generally for one task's agent to prompt another's (e.g. telling a subtask to address review comments after its PR is checked).
 
 ## Card Statuses
 
