@@ -195,6 +195,7 @@ agentboard task create <title> --general [--start]                           # c
 agentboard task create <title> --parent <id> --start                         # create it as an explicit subtask
 agentboard task create <title> --session-name <name> --start                 # name its session explicitly
 agentboard task notify <id> "<message>"                                      # type a message into a card's live session
+agentboard task attach-pr <id> <pr-number> [--repo <ref>] [--base <branch>]  # attach a PR auto-discovery missed
 ```
 
 ### Repository commands
@@ -354,6 +355,7 @@ With `gh` configured, AgentBoard can:
 - create PRs
 - move tasks with open or draft PRs into the `PR` column automatically
 - retry post-push PR creation from the board with `C` if the automatic watcher misses a push
+- attach a PR that automatic discovery missed by its number: `agentboard task attach-pr <id> <pr-number> [--repo <ref>]` — resolves the branch itself and lets the next sync fill in its state
 - show PR number and URL
 - show build status
 - show review status
