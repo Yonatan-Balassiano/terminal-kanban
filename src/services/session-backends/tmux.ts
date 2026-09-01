@@ -16,6 +16,7 @@ import { buildBackendSessionName } from '../session-name.js';
 import {
   DEFAULT_POST_PASTE_DELAY_MS,
   sleep,
+  submitAndVerify,
   waitForStablePane,
   type PaneIdleWaitOptions,
 } from './pane-idle.js';
@@ -279,7 +280,13 @@ export class TmuxBackend implements SessionBackend {
     // An Enter sent right after the paste lands before the CLI has finished
     // processing it and is silently dropped — see PaneIdleWaitOptions.
     await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
-    await this.runner(['send-keys', '-t', target, 'Enter']);
+    await submitAndVerify(
+      async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout,
+      async () => {
+        await this.runner(['send-keys', '-t', target, 'Enter']);
+      },
+      this.paneIdleOptions,
+    );
   }
 
   async resize(_backendSessionId: string, _cols: number, _rows: number): Promise<void> {

@@ -225,21 +225,47 @@ describe('TmuxBackend', () => {
 });
 
 describe('TmuxBackend brief handling', () => {
-  /** Every literal the backend typed into the pane, joined, plus every call made. */
-  async function createWithBrief(initialPrompt: string): Promise<{
+  /**
+   * Every literal the backend typed into the pane, joined, plus every call
+   * made.
+   *
+   * `captureResponses` lets a test script what each successive `capture-pane`
+   * call after the paste sees — the fixed pane-idle wait always sees `''`, so
+   * responses here apply from the post-paste capture-pane calls onward,
+   * exhausted responses repeating the last one.
+   */
+  async function createWithBrief(
+    initialPrompt: string,
+    options: {
+      captureResponses?: string[];
+      maxSubmitRetries?: number;
+      submitRetryIntervalMs?: number;
+    } = {},
+  ): Promise<{
     typed: string;
     longestLiteral: number;
     calls: string[][];
   }> {
     const literals: string[] = [];
     const calls: string[][] = [];
+    let capturesSincePaste = 0;
+    let pasted = false;
     const runner: TmuxCommandRunner = async (args) => {
       calls.push(args);
       if (args[0] === 'has-session') {
         throw new Error('missing');
       }
+      if (args[0] === 'paste-buffer') {
+        pasted = true;
+      }
       if (args[0] === 'send-keys' && args[3] === '-l') {
         literals.push(args[4] ?? '');
+      }
+      if (args[0] === 'capture-pane' && pasted && options.captureResponses) {
+        const responses = options.captureResponses;
+        const stdout = responses[Math.min(capturesSincePaste, responses.length - 1)] ?? '';
+        capturesSincePaste += 1;
+        return { stdout, stderr: '' };
       }
       return { stdout: '', stderr: '' };
     };
@@ -250,7 +276,14 @@ describe('TmuxBackend brief handling', () => {
       now: () => 123,
       // A stable-empty capture-pane mock settles on the first re-check —
       // no need to wait out the real interval in a test.
-      paneIdleOptions: { timeoutMs: 1000, intervalMs: 0, stableChecks: 1, postPasteDelayMs: 0 },
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: options.maxSubmitRetries ?? 0,
+        submitRetryIntervalMs: options.submitRetryIntervalMs ?? 0,
+      },
     });
 
     await backend.create({
@@ -341,5 +374,35 @@ describe('TmuxBackend brief handling', () => {
     // ['load-buffer', '-b', bufferName, filePath]
     const briefFile = calls[loadIndex]![3];
     expect(readFileSync(briefFile!, 'utf8')).toBe(brief);
+  });
+
+  /** Every `send-keys ... Enter` call, in order. */
+  function enterCalls(calls: string[][]): string[][] {
+    return calls.filter((args) => args[0] === 'send-keys' && args.includes('Enter'));
+  }
+
+  it('stops as soon as the pane shows the Enter took, without over-sending it', async () => {
+    // Arrange — the pane changes on the very first post-submit check.
+    const { calls } = await createWithBrief('Ship the thing', {
+      captureResponses: ['idle, brief sitting in the box', 'Cogitating…'],
+      maxSubmitRetries: 3,
+    });
+
+    // Assert — the bootstrap command's own Enter plus exactly one for the
+    // brief; no retries once the change was confirmed.
+    expect(enterCalls(calls)).toHaveLength(2);
+  });
+
+  it('resends Enter when the pane never changes, up to the retry limit', async () => {
+    // Arrange — the pane looks identical on every check: the Enter that
+    // should have submitted the brief was dropped, over and over.
+    const { calls } = await createWithBrief('Ship the thing', {
+      captureResponses: ['idle, brief still sitting in the box'],
+      maxSubmitRetries: 3,
+    });
+
+    // Assert — the bootstrap command's own Enter, plus the initial attempt at
+    // the brief, plus 3 retries: 5 in total.
+    expect(enterCalls(calls)).toHaveLength(5);
   });
 });

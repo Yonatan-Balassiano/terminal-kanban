@@ -17,14 +17,29 @@ export interface PaneIdleWaitOptions {
    * multi-line paste asynchronously, and an Enter that lands mid-render is
    * silently dropped rather than queued. Confirmed live: the identical
    * `send-keys Enter` sent a few seconds later submits it instantly.
+   *
+   * A fixed pause is still only a best guess at how long that takes — seen
+   * live to sometimes not be enough on its own — which is what
+   * {@link submitAndVerify} is for: it confirms the Enter actually did
+   * something instead of trusting this delay was long enough.
    */
   postPasteDelayMs?: number;
+  /** How many more times to resend Enter if the pane never changes. */
+  maxSubmitRetries?: number;
+  /** Gap between each check of whether the pane changed. */
+  submitRetryIntervalMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_INTERVAL_MS = 400;
 const DEFAULT_STABLE_CHECKS = 2;
 export const DEFAULT_POST_PASTE_DELAY_MS = 600;
+// Generous on purpose: live testing found a single fixed delay is not always
+// enough (a slow SessionStart hook chain can keep a pane from truly being
+// ready well past a first guess), and this only costs wall-clock time on a
+// session that is starting up anyway, never a running one.
+const DEFAULT_MAX_SUBMIT_RETRIES = 10;
+const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 1500;
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,5 +79,38 @@ export async function waitForStablePane(
     }
     previous = current;
     await sleep(intervalMs);
+  }
+}
+
+/**
+ * Sends Enter, then confirms the pane actually changed — the sole proof an
+ * Enter that races a paste's own processing isn't available (there is no
+ * "submitted" signal to poll for, only "something happened"). Resends Enter,
+ * never the paste, on each retry: the text is already sitting there, it is
+ * only the submit that needs another attempt.
+ *
+ * Not foolproof — a screen that changes for an unrelated reason (a spinner
+ * tick, a hook finishing) reads the same as a real submit — but it is
+ * strictly better than the fixed delay alone, which is what shipped first and
+ * was seen live to sometimes not be enough.
+ */
+export async function submitAndVerify(
+  capture: () => Promise<string>,
+  sendEnter: () => Promise<void>,
+  {
+    maxSubmitRetries = DEFAULT_MAX_SUBMIT_RETRIES,
+    submitRetryIntervalMs = DEFAULT_SUBMIT_RETRY_INTERVAL_MS,
+  }: PaneIdleWaitOptions = {},
+): Promise<void> {
+  const baseline = await capture();
+  await sendEnter();
+
+  for (let attempt = 0; attempt < maxSubmitRetries; attempt += 1) {
+    await sleep(submitRetryIntervalMs);
+    const current = await capture();
+    if (current !== baseline) {
+      return;
+    }
+    await sendEnter();
   }
 }

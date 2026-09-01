@@ -19,6 +19,7 @@ import { buildControlPath, TransportUnreachableError, type SshTransport } from '
 import {
   DEFAULT_POST_PASTE_DELAY_MS,
   sleep,
+  submitAndVerify,
   waitForStablePane,
   type PaneIdleWaitOptions,
 } from './pane-idle.js';
@@ -440,7 +441,13 @@ export class SshTmuxBackend implements SessionBackend {
     // An Enter sent right after the paste lands before the CLI has finished
     // processing it and is silently dropped — see PaneIdleWaitOptions.
     await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
-    await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Enter']);
+    await submitAndVerify(
+      async () => (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout,
+      async () => {
+        await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Enter']);
+      },
+      this.paneIdleOptions,
+    );
   }
 
   async resize(_backendSessionId: string, _cols: number, _rows: number): Promise<void> {
