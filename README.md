@@ -196,6 +196,7 @@ agentboard task create <title> --parent <id> --start                         # c
 agentboard task create <title> --session-name <name> --start                 # name its session explicitly
 agentboard task notify <id> "<message>"                                      # type a message into a card's live session
 agentboard task attach-pr <id> <pr-number> [--repo <ref>] [--base <branch>]  # attach a PR auto-discovery missed
+agentboard task delete <id> [--force]                                        # delete a card (terminates sessions, removes worktrees)
 ```
 
 ### Repository commands
