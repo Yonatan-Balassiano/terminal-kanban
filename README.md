@@ -391,6 +391,8 @@ agentboard task create "Extract the rate limiter" --repo <id> --description "...
 - **PR notification.** When a subtask's PR first opens, the parent card is flagged, and if the parent still has a live session, the notice is typed straight into its pane.
 - **Pinging a card's session.** `agentboard task notify <id> "<message>"` types a message into any card's live session directly — used for the PR notice above, and generally for one task's agent to prompt another's (e.g. telling a subtask to address review comments after its PR is checked).
 
+All of this is written up as a Claude Code skill teammates can install — see [`skills/spawn-subtask`](skills/spawn-subtask).
+
 ## Card Statuses
 
 Task cards show:
