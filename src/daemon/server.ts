@@ -131,6 +131,12 @@ interface AddTaskBranchParams {
   repoId: string;
   /** Defaults to the branch name the card already works under. */
   branchName?: string;
+  /**
+   * Resolves to the PR's own head branch when `branchName` is omitted — for
+   * attaching a pull request auto-discovery missed by its number instead of
+   * requiring the caller to already know its exact branch name.
+   */
+  prNumber?: number;
   baseBranch?: string;
 }
 
@@ -883,17 +889,37 @@ export async function dispatch(
         if (task.kind === 'general') {
           throw new Error('General cards have no repo, so they cannot carry a branch');
         }
-        if (!services.workspace.getRepo(params.repoId)) {
+        const repo = services.workspace.getRepo(params.repoId);
+        if (!repo) {
           throw new Error(`Repo not found: ${params.repoId}`);
         }
 
-        // A card spanning several repos normally carries the same branch name in
-        // each, so default to the one it already works under instead of
-        // inventing a second name the user would have to reconcile by hand.
-        const branchName = params.branchName?.trim() || task.branchName;
+        // Resolved in order of how specific the caller's intent was: an exact
+        // branch name they gave wins outright; a PR number is still a deliberate
+        // choice and must resolve to *that* PR's branch, never silently fall
+        // through to whatever the card's own branch happens to be (which every
+        // repo task already has, auto-assigned at creation — checking it first
+        // would make `prNumber` dead on arrival almost every time it's used).
+        // Only with neither does the card's own branch become the default.
+        let branchName = params.branchName?.trim();
+        if (!branchName && params.prNumber != null) {
+          if (!repo.githubOwner || !repo.githubRepo) {
+            throw new Error(`Repo ${repo.id} has no GitHub identity to resolve a PR number against`);
+          }
+          const headBranch = await services.github.getPRHeadBranch(
+            repo.path,
+            params.prNumber,
+            `${repo.githubOwner}/${repo.githubRepo}`,
+          );
+          if (!headBranch) {
+            throw new Error(`PR #${params.prNumber} not found in ${repo.githubOwner}/${repo.githubRepo}`);
+          }
+          branchName = headBranch;
+        }
+        branchName ||= task.branchName;
         if (!branchName) {
           throw new Error(
-            `Task ${params.taskId} has no branch name to default from — pass branchName`,
+            `Task ${params.taskId} has no branch name to default from — pass branchName or prNumber`,
           );
         }
 

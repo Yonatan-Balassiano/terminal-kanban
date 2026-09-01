@@ -821,6 +821,62 @@ export function buildCli(): Command {
       }
     });
 
+  task
+    .command('attach-pr <task> <prNumber>')
+    .description(
+      "Manually attach a pull request auto-discovery missed, by its number — resolves the branch itself",
+    )
+    .option('--repo <ref>', "Repo the PR is in (defaults to the card's own repo)")
+    .option('--base <branch>', "Base branch for the PR, if not the repo's default")
+    .action(async (taskId: string, prNumberArg: string, opts: { repo?: string; base?: string }) => {
+      try {
+        const prNumber = Number.parseInt(prNumberArg, 10);
+        if (!Number.isFinite(prNumber) || prNumber <= 0) {
+          throw new Error(`Invalid PR number "${prNumberArg}".`);
+        }
+
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          const task = board.tasks.find((t) => t.id === taskId);
+          if (!task) {
+            throw new Error(`Unknown task "${taskId}". No card with that id exists.`);
+          }
+          if (task.kind === 'general') {
+            throw new Error(`Task ${taskId} is a general card — it has no repo to attach a PR to.`);
+          }
+
+          const repo = opts.repo
+            ? resolveRef(board.repos, opts.repo, 'repo')
+            : board.repos.find((r) => r.id === task.repoId);
+          if (!repo) {
+            throw new Error(
+              'Pass --repo <id|label> — this card has no repo of its own to default to.',
+            );
+          }
+
+          await rpc.call('addTaskBranch', {
+            taskId,
+            repoId: repo.id,
+            prNumber,
+            ...(opts.base ? { baseBranch: opts.base } : {}),
+          });
+
+          console.log(
+            `Attached PR #${prNumber} from ${repo.label} to task ${taskId}. Sync will fill in its state shortly.`,
+          );
+        } finally {
+          rpc.disconnect();
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
   // ----------------------------------------------------------
   // repos
   // ----------------------------------------------------------

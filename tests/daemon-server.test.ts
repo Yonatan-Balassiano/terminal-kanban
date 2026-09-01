@@ -649,6 +649,100 @@ describe('daemon addTaskBranch dispatch', () => {
     expect(addTaskBranch).not.toHaveBeenCalled();
     expect(response.error?.message).toBe('Repo not found: repo-ghost');
   });
+
+  it('resolves the branch name from a PR number, even though the card already has its own branch', async () => {
+    // Arrange — makeTask() defaults to branchName 'ab/task-1', the normal case:
+    // every repo task gets one auto-assigned at creation. A prNumber is still a
+    // deliberate, more specific request and must win over that default, not
+    // silently fall through to it (caught live: it originally did).
+    const addTaskBranch = vi.fn().mockReturnValue(makeBranch({ id: 'branch-2', repoId: 'repo-2' }));
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+    const trigger = vi.fn().mockResolvedValue(undefined);
+    const getPRHeadBranch = vi.fn().mockResolvedValue('feature/sibling-work');
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-add-branch-by-pr',
+        method: 'addTaskBranch',
+        params: { taskId: 'task-1', repoId: 'repo-2', prNumber: 99 },
+      },
+      {
+        board: { getTask: vi.fn().mockReturnValue(makeTask()), addTaskBranch },
+        workspace: {
+          getRepo: vi
+            .fn()
+            .mockReturnValue(makeRepo({ id: 'repo-2', githubOwner: 'wix', githubRepo: 'web5' })),
+        },
+        github: { getPRHeadBranch },
+        view: { getBoardSnapshot },
+        sync: { trigger },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(getPRHeadBranch).toHaveBeenCalledWith('/repo', 99, 'wix/web5');
+    expect(addTaskBranch).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      repoId: 'repo-2',
+      branchName: 'feature/sibling-work',
+    });
+    expect(response).toEqual({ id: 'req-add-branch-by-pr', result: { tasks: [] } });
+  });
+
+  it('refuses a PR number against a repo with no GitHub identity', async () => {
+    // Arrange
+    const addTaskBranch = vi.fn();
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-add-branch-no-identity',
+        method: 'addTaskBranch',
+        params: { taskId: 'task-1', repoId: 'repo-2', prNumber: 99 },
+      },
+      {
+        board: { getTask: vi.fn().mockReturnValue(makeTask()), addTaskBranch },
+        workspace: { getRepo: vi.fn().mockReturnValue(makeRepo({ id: 'repo-2' })) },
+        github: { getPRHeadBranch: vi.fn() },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(addTaskBranch).not.toHaveBeenCalled();
+    expect(response.error?.message).toContain('no GitHub identity');
+  });
+
+  it('refuses a PR number GitHub has no record of', async () => {
+    // Arrange
+    const addTaskBranch = vi.fn();
+    const getPRHeadBranch = vi.fn().mockResolvedValue(null);
+
+    // Act
+    const response = await dispatch(
+      {
+        id: 'req-add-branch-missing-pr',
+        method: 'addTaskBranch',
+        params: { taskId: 'task-1', repoId: 'repo-2', prNumber: 404 },
+      },
+      {
+        board: { getTask: vi.fn().mockReturnValue(makeTask()), addTaskBranch },
+        workspace: {
+          getRepo: vi
+            .fn()
+            .mockReturnValue(makeRepo({ id: 'repo-2', githubOwner: 'wix', githubRepo: 'web5' })),
+        },
+        github: { getPRHeadBranch },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    // Assert
+    expect(addTaskBranch).not.toHaveBeenCalled();
+    expect(response.error?.message).toBe('PR #404 not found in wix/web5');
+  });
 });
 
 describe('daemon removeTaskBranch dispatch', () => {
