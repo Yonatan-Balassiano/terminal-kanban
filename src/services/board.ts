@@ -406,6 +406,23 @@ export class BoardService {
     const id = generateId();
     const now = Date.now();
     const trackId = params.trackId ?? 'backlog';
+    // Linking parent_task_id is not enough on its own: it tells the *board*
+    // this card is a subtask, but nothing tells the *agent* that starts on
+    // it — the brief is whatever free text the creator wrote, with no
+    // guarantee it mentions the relationship at all. Prepending this here,
+    // once, covers every creation path (CLI, TUI, auto-detected or explicit
+    // --parent) rather than depending on each caller to remember to say it.
+    const parent = params.parentTaskId ? this.getTask(params.parentTaskId) : null;
+    const initialPrompt = parent
+      ? [
+          `[agentboard] This card is a subtask of "${parent.title}" (id ${parent.id}). ` +
+            `If you spin off further subtasks of your own, pass --parent ${id} explicitly ` +
+            `rather than relying on auto-detection.`,
+          params.initialPrompt,
+        ]
+          .filter((part) => part && part.trim().length > 0)
+          .join('\n\n')
+      : params.initialPrompt;
     // Normalized rather than trusted: this runs on whatever the RPC layer hands over.
     const kind: TaskKind = params.kind === 'general' ? 'general' : 'repo';
     const isGeneral = kind === 'general';
@@ -439,7 +456,7 @@ export class BoardService {
         id,
         params.title,
         emptyToNull(params.description),
-        emptyToNull(params.initialPrompt),
+        emptyToNull(initialPrompt),
         kind,
         params.parentTaskId ?? null,
         isGeneral ? null : params.repoId!,

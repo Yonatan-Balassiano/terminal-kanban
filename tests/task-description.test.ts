@@ -46,6 +46,42 @@ describe('BoardService task description', () => {
     expect(stored?.initialPrompt).toBe('Cap the API at 100 rps.');
   });
 
+  it("tells a subtask's agent about its parent in its own opening prompt", () => {
+    // Arrange — the parent's own DB row, so its title can be looked up.
+    const parent = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });
+
+    // Act
+    const subtask = board.createTask({
+      title: 'Extract the limiter',
+      repoId: 'repo-1',
+      parentTaskId: parent.id,
+      initialPrompt: 'Pull the limiter into its own module.',
+    });
+
+    // Assert — linking parent_task_id is not enough on its own: the agent that
+    // starts on this card has to be told directly, since nothing guarantees
+    // the creator's own brief mentions the relationship.
+    const stored = board.getTask(subtask.id);
+    expect(stored?.initialPrompt).toContain(`subtask of "${parent.title}"`);
+    expect(stored?.initialPrompt).toContain(`--parent ${subtask.id}`);
+    expect(stored?.initialPrompt).toContain('Pull the limiter into its own module.');
+  });
+
+  it('names the parent even for a subtask created with no brief of its own', () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });
+
+    // Act — no --description at all, e.g. spawned bare from the TUI.
+    const subtask = board.createTask({
+      title: 'Extract the limiter',
+      repoId: 'repo-1',
+      parentTaskId: parent.id,
+    });
+
+    // Assert
+    expect(board.getTask(subtask.id)?.initialPrompt).toContain(`subtask of "${parent.title}"`);
+  });
+
   it('leaves a card created without a brief carrying neither', () => {
     // Arrange + Act — a card from the TUI, which asks for no context.
     const task = board.createTask({ title: 'Friday thing', repoId: 'repo-1' });
