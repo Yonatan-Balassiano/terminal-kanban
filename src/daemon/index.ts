@@ -605,18 +605,6 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   // Fires on reaching done, not on a merge: a card whose pull requests have
   // landed but whose change has not shipped still needs its worktrees.
   sync.onTaskMergedOrClosed = (taskId) => taskLifecycle.cleanupTaskResources(taskId);
-  // A subtask's PR is news for whichever card spawned it — deliver it straight
-  // into the parent's live session when it has one; board.setChildPrAlert
-  // (called alongside this) is the durable fallback for when it does not.
-  sync.notifyParentOfSubtaskPR = async (parentTaskId, childTask, prNumber, prUrl) => {
-    await session.notifyTaskSession(
-      parentTaskId,
-      `[agentboard] Automated notice, not from the user: the subtask "${childTask.title}" ` +
-        `you spawned from this card just opened PR #${prNumber} (${prUrl}). Review it now — ` +
-        `\`gh pr diff ${prNumber}\` / \`gh pr view ${prNumber}\` — and leave feedback with ` +
-        `\`gh pr review\` if anything needs fixing, or report back what you found.`,
-    );
-  };
   if (release) {
     sync.isFullyReleased = (taskId) => release.isFullyReleased(taskId);
   }

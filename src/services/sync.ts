@@ -7,6 +7,7 @@ import type {
   TaskRecord,
 } from '../types/index.js';
 import type { BoardService } from './board.js';
+import { isAgentBoardBranchName } from './branch-name.js';
 import { allBranchesResolved } from './task-branches.js';
 import { GitHubServiceError, type GitHubService, type PRInfo, type DiscoveredPR } from './github.js';
 import { GitService } from './git.js';
@@ -110,17 +111,6 @@ export class SyncService {
    * tracking artifacts.
    */
   isFullyReleased?: (taskId: string) => boolean;
-  /**
-   * Fires the first time a subtask's PR appears, so the parent card's own
-   * live session — if it has one — can be told about it directly. Supplied by
-   * the daemon; absent means only the durable board-level alert gets set.
-   */
-  notifyParentOfSubtaskPR?: (
-    parentTaskId: string,
-    childTask: TaskRecord,
-    prNumber: number,
-    prUrl: string,
-  ) => Promise<void>;
   private github: GitHubService;
   private git: GitService;
   private db: Db;
@@ -568,6 +558,10 @@ export class SyncService {
         if (!repoId || known.has(`${repoId}#${task.branchName}`)) {
           continue;
         }
+        const owner = this.board.findTaskBranchOwner(repoId, task.branchName);
+        if (owner && owner !== task.id) {
+          continue;
+        }
         // No worktree: the branch is only prepared when the user opens it.
         this.board.addTaskBranch({
           taskId: task.id,
@@ -643,6 +637,21 @@ export class SyncService {
         if (!branchName || known.has(`${repoId}#${branchName}`)) {
           continue;
         }
+        // Every branch AgentBoard itself creates carries its own prefix; one
+        // that doesn't was never opened for this (or any) card's work, no
+        // matter how the search matched it — a cheap, independent backstop
+        // regardless of how precise the search query itself is.
+        if (!isAgentBoardBranchName(branchName)) {
+          continue;
+        }
+        // A PR that merely *mentions* one of this task's own PR numbers is
+        // not proof it belongs to this task — a sibling subtask's PR
+        // routinely references a related sibling's PR in passing. Only a
+        // branch nobody else has claimed yet is safe to adopt here.
+        const owner = this.board.findTaskBranchOwner(repoId, branchName);
+        if (owner && owner !== task.id) {
+          continue;
+        }
 
         this.board.addTaskBranch({ taskId: task.id, repoId, branchName });
         known.add(`${repoId}#${branchName}`);
@@ -683,6 +692,19 @@ export class SyncService {
   private repoPathFor(repoId: string): string | undefined {
     const row = this.loadRepoRow(repoId);
     return row ? (row['path'] as string) : undefined;
+  }
+
+  /**
+   * Clears `parentTaskId`'s child-PR-alert badge, but only when it is
+   * currently pointing at `childTaskId`. A parent can have several subtasks
+   * in flight at once, so one child reaching a terminal state must not wipe
+   * out a still-relevant alert for a different sibling.
+   */
+  private clearChildPrAlertIfMine(parentTaskId: string, childTaskId: string): void {
+    const parent = this.board.getTask(parentTaskId);
+    if (parent?.childPrAlertTaskId === childTaskId) {
+      this.board.clearChildPrAlert?.(parentTaskId);
+    }
   }
 
   /**
@@ -730,6 +752,13 @@ export class SyncService {
     // in case the change has to be revisited.
     if (nextTrack === 'done') {
       void this.onTaskMergedOrClosed?.(taskId);
+
+      // A subtask that reached done needs its parent's badge cleared the same
+      // as a merge/close does below — done is itself a terminal state, and a
+      // tmux/ssh-backed parent has no other path to ever clear it.
+      if (task.parentTaskId) {
+        this.clearChildPrAlertIfMine(task.parentTaskId, taskId);
+      }
     }
 
     return 1;
@@ -852,15 +881,23 @@ export class SyncService {
         this.clearDelayedRetry(task.id);
 
         // A PR just appeared where this branch had none before. If this task
-        // is a subtask, its parent card is the one that needs to know.
+        // is a subtask, its parent card is the one that needs to know — via
+        // the durable board-level alert; a live parent session is told
+        // directly through Claude's own messaging instead of a typed-in pane
+        // notice.
         if (branch.prNumber == null && task.parentTaskId) {
           this.board.setChildPrAlert?.(task.parentTaskId, task.id);
-          void this.notifyParentOfSubtaskPR?.(
-            task.parentTaskId,
-            task,
-            prInfo.number,
-            prInfo.url,
-          );
+        }
+
+        // This branch's PR just transitioned into a terminal state. If it is
+        // the reason a parent card's badge is showing, the badge is now
+        // stale — clear it the same way a live parent session's manual
+        // acknowledge would, since a tmux/ssh-backed parent otherwise never
+        // gets that chance.
+        const wasMergedOrClosed = branch.prState === 'merged' || branch.prState === 'closed';
+        const nowMergedOrClosed = patch.prState === 'merged' || patch.prState === 'closed';
+        if (!wasMergedOrClosed && nowMergedOrClosed && task.parentTaskId) {
+          this.clearChildPrAlertIfMine(task.parentTaskId, task.id);
         }
       }
 

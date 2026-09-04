@@ -662,9 +662,16 @@ export class GitHubService {
    * owner-qualified form sits in a PR body as inert text; GitHub does not
    * auto-link or index it, so a search for it returns nothing even scoped
    * correctly with `org:`.
+   *
+   * Quoted, not bare: GitHub's search tokenizes an unquoted term on its own
+   * punctuation, so `repo.name#123` unquoted searches for `repo`, `name` and
+   * `123` independently, ORed together loosely enough to match almost any PR
+   * that mentions the repo by name anywhere and any number anywhere else —
+   * confirmed live, one task's card ended up with dozens of unrelated merged
+   * PRs from across the org. Quoting forces an exact-phrase match instead.
    */
   async findPRsReferencing(repoPath: string, org: string, reference: string): Promise<DiscoveredPR[]> {
-    return this.searchPRIssues(repoPath, `type:pr org:${org} ${reference}`);
+    return this.searchPRIssues(repoPath, `type:pr org:${org} "${reference}"`);
   }
 
   /**

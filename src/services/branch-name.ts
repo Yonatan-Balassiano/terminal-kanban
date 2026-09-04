@@ -34,6 +34,21 @@ export function isLegacyTaskBranchName(taskId: string, branchName?: string): boo
   return branchName === `${BRANCH_PREFIX}/${taskId}`;
 }
 
+/**
+ * Whether a branch name looks like AgentBoard's own — every branch this tool
+ * ever creates starts with `${BRANCH_PREFIX}/`.
+ *
+ * Sync's cross-repo discovery finds candidate branches by GitHub search,
+ * which can turn up an ordinary, unrelated branch that merely shares a word
+ * or a referenced PR number with one of the task's own. A branch nobody
+ * created through AgentBoard is never legitimately the sibling half of a
+ * task's own work, so this is a cheap, independent backstop regardless of
+ * how precise the search query itself is.
+ */
+export function isAgentBoardBranchName(branchName: string): boolean {
+  return branchName.startsWith(`${BRANCH_PREFIX}/`);
+}
+
 export function resolveTaskBranchName(
   taskTitle: string,
   taskId: string,

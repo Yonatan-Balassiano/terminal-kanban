@@ -75,7 +75,11 @@ function makePrInfo(patch: Partial<PRInfo> = {}): PRInfo {
  * actual rule that decides what a card looks like once it carries several
  * branches — a hand-written stub would let the rule drift unnoticed.
  */
-function makeBoard(taskPatch: Partial<TaskRecord> = {}, extraBranches: string[] = []) {
+function makeBoard(
+  taskPatch: Partial<TaskRecord> = {},
+  extraBranches: string[] = [],
+  otherTasks: TaskRecord[] = [],
+) {
   let task = makeTask(taskPatch);
   let branches: TaskBranchRecord[] = [];
 
@@ -125,12 +129,24 @@ function makeBoard(taskPatch: Partial<TaskRecord> = {}, extraBranches: string[] 
   }
 
   const board = {
-    getTask: vi.fn().mockImplementation((id: string) => (id === task.id ? task : null)),
+    getTask: vi
+      .fn()
+      .mockImplementation((id: string) =>
+        id === task.id ? task : (otherTasks.find((other) => other.id === id) ?? null),
+      ),
     getTasks: vi.fn().mockImplementation(() => [task]),
     getTaskBranches: vi.fn().mockImplementation(() => [...branches]),
     getTaskBranch: vi
       .fn()
       .mockImplementation((id: string) => branches.find((branch) => branch.id === id) ?? null),
+    findTaskBranchOwner: vi
+      .fn()
+      .mockImplementation((repoId: string, branchName: string) => {
+        const found = branches.find(
+          (branch) => branch.repoId === repoId && branch.branchName === branchName,
+        );
+        return found ? task.id : null;
+      }),
     addTaskBranch: vi
       .fn()
       .mockImplementation((params: { repoId: string; branchName: string }) => {
@@ -167,6 +183,7 @@ function makeBoard(taskPatch: Partial<TaskRecord> = {}, extraBranches: string[] 
       task = { ...task, trackId };
     }),
     setChildPrAlert: vi.fn(),
+    clearChildPrAlert: vi.fn(),
   };
 
   return { board, getTask: () => task, getBranches: () => branches };
@@ -254,22 +271,150 @@ describe('SyncService', () => {
     };
 
     const sync = new SyncService(board as never, github as never, git as never, db as never);
-    const notified: unknown[] = [];
-    sync.notifyParentOfSubtaskPR = async (parentTaskId, childTask, prNumber, prUrl) => {
-      notified.push({ parentTaskId, childTaskId: childTask.id, prNumber, prUrl });
-    };
 
     await sync.trigger();
 
     expect(board.setChildPrAlert).toHaveBeenCalledWith('parent-1', 'task-1');
-    expect(notified).toEqual([
-      {
-        parentTaskId: 'parent-1',
-        childTaskId: 'task-1',
-        prNumber: 42,
-        prUrl: 'https://example.test/pr/42',
-      },
-    ]);
+  });
+
+  it("clears the parent card's badge when this subtask's PR merges", async () => {
+    // Arrange — the badge on the parent is currently pointing at this very
+    // task, and its branch's PR is about to transition from open to merged.
+    const parent = makeTask({ id: 'parent-1', childPrAlertTaskId: 'task-1' });
+    const { board } = makeBoard({ trackId: 'pr', parentTaskId: 'parent-1' }, [], [parent]);
+    board.updateTaskBranchSync('branch-0', { prNumber: 42, prState: 'open' });
+
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo({ number: 42, prState: 'merged' })),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(board.clearChildPrAlert).toHaveBeenCalledWith('parent-1');
+  });
+
+  it("leaves the parent card's badge alone when it points at a different sibling", async () => {
+    // Arrange — same merge transition as above, but the badge currently
+    // showing on the parent belongs to a different subtask. One sibling
+    // merging must never wipe out a still-relevant alert for another.
+    const parent = makeTask({ id: 'parent-1', childPrAlertTaskId: 'sibling-task' });
+    const { board } = makeBoard({ trackId: 'pr', parentTaskId: 'parent-1' }, [], [parent]);
+    board.updateTaskBranchSync('branch-0', { prNumber: 42, prState: 'open' });
+
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo({ number: 42, prState: 'merged' })),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(board.clearChildPrAlert).not.toHaveBeenCalled();
+  });
+
+  it("clears the parent card's badge when this subtask reaches done", async () => {
+    // Arrange — the branch is already merged and settled (no new PR
+    // transition happens during this sync), so the only thing driving the
+    // card to done is evaluateTrackTransition itself.
+    const parent = makeTask({ id: 'parent-1', childPrAlertTaskId: 'task-1' });
+    const { board } = makeBoard(
+      { trackId: 'shipping', parentTaskId: 'parent-1' },
+      [],
+      [parent],
+    );
+    board.updateTaskBranchSync('branch-0', {
+      prNumber: 42,
+      prState: 'merged',
+      mergeCommitSha: 'abc123',
+    });
+
+    const github = {
+      findBranchPR: vi.fn(),
+      getPR: vi.fn(),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn(),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(board.moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
+    expect(board.clearChildPrAlert).toHaveBeenCalledWith('parent-1');
   });
 
   it('uses the stored repo default base branch without overwriting it during sync', async () => {
@@ -906,6 +1051,54 @@ describe('SyncService', () => {
     expect(getBranches().map((branch) => branch.repoId)).toEqual(['repo-1', 'repo-9']);
   });
 
+  it('does not adopt a same-named branch in another repo that a different card already carries', async () => {
+    // Arrange — same shape as the adoption test above, but the branch in the
+    // other repo is already owned by a different task on the board.
+    const { board, getBranches } = makeBoard({ trackId: 'pr' });
+    board.findTaskBranchOwner.mockImplementation((repoId: string, branchName: string) =>
+      repoId === 'repo-9' && branchName === 'ab/task-1' ? 'some-other-task' : null,
+    );
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue(null),
+      getPR: vi.fn(),
+      createPR: vi.fn().mockResolvedValue(null),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([
+        { number: 7, repoSlug: 'org/other', prState: 'open', url: 'u' },
+      ]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([
+          { id: 'repo-1', github_owner: 'org', github_repo: 'proj' },
+          { id: 'repo-9', github_owner: 'org', github_repo: 'other' },
+        ]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(getBranches().map((branch) => branch.repoId)).toEqual(['repo-1']);
+  });
+
   it('adopts a sibling pull request that references a PR the card already carries, under a different branch name', async () => {
     // Arrange — the card's own branch already carries PR #27882 in repo-1. A
     // second repo has a PR under an unrelated branch name whose body links
@@ -958,6 +1151,119 @@ describe('SyncService', () => {
     expect(getBranches().map((branch) => [branch.repoId, branch.branchName])).toEqual([
       ['repo-1', 'ab/task-1'],
       ['repo-9', 'ab/image-documents-in-the-mapping'],
+    ]);
+  });
+
+  it('does not adopt a referencing pull request that another card already carries', async () => {
+    // Arrange — a sibling subtask's own PR (proj#27882) is mentioned in
+    // another repo's PR body, but that PR already belongs to a different
+    // task on the board (a routine cross-reference between sibling subtasks
+    // of the same parent, not proof of shared ownership).
+    const { board, getBranches } = makeBoard({ trackId: 'pr' });
+    board.updateTaskBranchSync('branch-0', { prNumber: 27882, prState: 'open' });
+    board.findTaskBranchOwner.mockImplementation((repoId: string, branchName: string) =>
+      repoId === 'repo-9' && branchName === 'ab/image-documents-in-the-mapping'
+        ? 'some-other-task'
+        : null,
+    );
+
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue(null),
+      getPR: vi.fn(),
+      createPR: vi.fn().mockResolvedValue(null),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+      findPRsReferencing: vi.fn().mockResolvedValue([
+        { number: 1342, repoSlug: 'org/other', prState: 'open', url: 'u' },
+      ]),
+      getPRHeadBranch: vi.fn().mockResolvedValue('ab/image-documents-in-the-mapping'),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([
+          { id: 'repo-1', github_owner: 'org', github_repo: 'proj' },
+          { id: 'repo-9', github_owner: 'org', github_repo: 'other' },
+        ]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert — the reference was found, but never adopted onto this card.
+    expect(github.getPRHeadBranch).toHaveBeenCalledWith(expect.any(String), 1342, 'org/other');
+    expect(getBranches().map((branch) => [branch.repoId, branch.branchName])).toEqual([
+      ['repo-1', 'ab/task-1'],
+    ]);
+  });
+
+  it('does not adopt a referencing pull request whose branch is not an AgentBoard branch', async () => {
+    // Arrange — an unquoted search term can match almost any PR that
+    // mentions the repo by name and any number anywhere else; an ordinary
+    // branch nobody created through AgentBoard is never legitimately this
+    // card's sibling, whatever the search matched it on.
+    const { board, getBranches } = makeBoard({ trackId: 'pr' });
+    board.updateTaskBranchSync('branch-0', { prNumber: 27882, prState: 'open' });
+
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue(null),
+      getPR: vi.fn(),
+      createPR: vi.fn().mockResolvedValue(null),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+      findPRsReferencing: vi.fn().mockResolvedValue([
+        { number: 1342, repoSlug: 'org/other', prState: 'open', url: 'u' },
+      ]),
+      getPRHeadBranch: vi.fn().mockResolvedValue('chore/bump-core-1-61-0'),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([
+          { id: 'repo-1', github_owner: 'org', github_repo: 'proj' },
+          { id: 'repo-9', github_owner: 'org', github_repo: 'other' },
+        ]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert — the reference was found, but never adopted onto this card.
+    expect(github.getPRHeadBranch).toHaveBeenCalledWith(expect.any(String), 1342, 'org/other');
+    expect(getBranches().map((branch) => [branch.repoId, branch.branchName])).toEqual([
+      ['repo-1', 'ab/task-1'],
     ]);
   });
 
