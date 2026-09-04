@@ -252,6 +252,26 @@ export class BoardService {
   }
 
   /**
+   * The id of whichever task already has this repo + branch attached, if any.
+   *
+   * Sync's cross-repo discovery (`discoverReferencingBranches`,
+   * `discoverSiblingBranches`) finds candidate branches by GitHub search —
+   * a shared parent's sibling subtasks routinely mention each other's PR
+   * numbers in passing, which reads exactly like a genuine cross-repo
+   * reference for the *same* piece of work. Callers must check this before
+   * attaching a discovered branch, so a sibling's own PR never gets
+   * relabeled as this task's.
+   */
+  findTaskBranchOwner(repoId: string, branchName: string): string | null {
+    const row = this.db
+      .prepare<[string, string], { task_id: string }>(
+        'SELECT task_id FROM task_branches WHERE repo_id = ? AND branch_name = ? LIMIT 1',
+      )
+      .get(repoId, branchName);
+    return row?.task_id ?? null;
+  }
+
+  /**
    * Adds a repo + branch to a card, or returns the existing one.
    *
    * Idempotent by (task, repo, branch) so a branch discovered again by sync
@@ -428,7 +448,11 @@ export class BoardService {
             `Your own session name is "${sessionName}" — that is what SendMessage/ListAgents ` +
             `addresses you as; agentboard task notify addresses by task id instead, and this ` +
             `card's is ${id}. If you spin off further subtasks of your own, pass --parent ${id} ` +
-            `explicitly rather than relying on auto-detection.`,
+            `explicitly rather than relying on auto-detection. When you open your pull request, ` +
+            `message your parent session directly — ` +
+            `SendMessage({to: "${parent.sessionName ?? parent.title}", message: "..."}) — rather ` +
+            `than waiting to be asked; name the PR number and URL, and give a one-line summary of ` +
+            `what it does.`,
           params.initialPrompt,
         ]
           .filter((part) => part && part.trim().length > 0)
