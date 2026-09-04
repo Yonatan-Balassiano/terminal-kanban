@@ -327,12 +327,25 @@ export interface SessionBackend {
    * escape hatch for a session whose automatic initial-prompt delivery
    * (paste + retry, see pane-idle.ts) still didn't land within its window: a
    * slow SessionStart hook chain has no upper bound, so no fixed retry budget
-   * can be guaranteed sufficient.
+   * can be guaranteed sufficient. Also the mechanism `notifyTaskSession` reuses
+   * to type an automated notice into a session honestly, instead of the
+   * unverified `sendInput` it used to use.
    *
    * Only backends that deliver prompts via paste implement this — PTY's
    * delivery path is argv-based and has no equivalent to re-run.
+   *
+   * Resolves `true` when the paste was verified to have rendered and Enter
+   * was sent to submit it, `false` when the paste never verified — in which
+   * case nothing was submitted, and whatever is on screen is left as-is
+   * rather than risking a mangled fragment.
    */
-  redeliverPrompt?(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void>;
+  redeliverPrompt?(
+    taskId: string,
+    slot: SessionSlot,
+    backendSessionId: string,
+    prompt: string,
+    agentCli?: string,
+  ): Promise<boolean>;
   /**
    * A one-shot snapshot of a live pane's rendered content, for detecting a
    * state the session's own status fields don't carry — e.g. the trust

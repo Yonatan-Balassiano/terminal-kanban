@@ -17,8 +17,11 @@ import { buildBackendSessionName } from '../session-name.js';
 import {
   autoTrustIfPrompted,
   DEFAULT_POST_PASTE_DELAY_MS,
+  pasteAndVerify,
+  pasteMarker,
   sleep,
   submitAndVerify,
+  waitForForegroundCommand,
   waitForStablePane,
   type PaneIdleWaitOptions,
 } from './pane-idle.js';
@@ -40,6 +43,8 @@ import {
   buildTmuxPaneIdArgs,
   chainTmuxArgs,
   parseAgentboardSessionNames,
+  parseTmuxPaneProcess,
+  TMUX_PANE_PROCESS_FORMAT,
   TMUX_PANE_TAG_FORMAT,
   TMUX_TAGGED_PANE_FORMAT,
 } from './tmux-commands.js';
@@ -232,7 +237,12 @@ export class TmuxBackend implements SessionBackend {
         // createTask is not idempotent — would create a second card instead
         // of just being patient. The session record below is returned as soon
         // as the pane exists; delivery finishes (or gives up) in the background.
-        void this.deliverInitialPrompt(backendSessionId, initialPromptFile).catch(() => {
+        void this.deliverInitialPrompt(
+          backendSessionId,
+          initialPromptFile,
+          opts.agentCli,
+          opts.initialPrompt,
+        ).catch(() => {
           // Best-effort: a failure here leaves the brief typed but unsubmitted
           // in the pane, same as the fixed-delay version before this always
           // risked — there is nowhere useful to surface it from inside a
@@ -278,8 +288,26 @@ export class TmuxBackend implements SessionBackend {
    * Skipped when `briefFile` is gone: `session-bootstrap.sh` deletes it itself
    * when the pane turned out to be resuming an existing conversation, which is
    * the one signal both sides need to agree the brief should not be replayed.
+   *
+   * `agentCli` — the same 'claude'/'codex' name session-bootstrap.sh execs as
+   * its `command_name` — gates the paste on that process actually being the
+   * pane's foreground command. Without it, a slow `git checkout`/`pull` in the
+   * bootstrap script ahead of the CLI can look "stable" to
+   * {@link waitForStablePane} and take the paste itself: a plain shell has no
+   * bracketed-paste request of its own, so the brief's blank lines read back
+   * as separate Enters and only its first line — the subtask notice,
+   * typically — ends up submitted.
+   *
+   * Resolves `true` once the paste has been verified and Enter sent to
+   * submit it, `false` when the paste never verified (nothing was
+   * submitted) or the brief file was gone (a resume — nothing to deliver).
    */
-  private async deliverInitialPrompt(backendSessionId: string, briefFile: string): Promise<void> {
+  private async deliverInitialPrompt(
+    backendSessionId: string,
+    briefFile: string,
+    agentCli?: string,
+    promptText?: string,
+  ): Promise<boolean> {
     const target = await this.resolveInputTarget(backendSessionId);
     const capture = async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;
     await waitForStablePane(capture, this.paneIdleOptions);
@@ -299,16 +327,41 @@ export class TmuxBackend implements SessionBackend {
       await waitForStablePane(capture, this.paneIdleOptions);
     }
 
+    if (agentCli) {
+      await waitForForegroundCommand(
+        async () => {
+          const result = await this.runner(buildTmuxListPanesArgs(TMUX_PANE_PROCESS_FORMAT, target));
+          return parseTmuxPaneProcess(result.stdout).currentCommand;
+        },
+        agentCli,
+        this.paneIdleOptions,
+      );
+    }
+
     if (!existsSync(briefFile)) {
-      return;
+      return false;
     }
 
     const bufferName = `agentboard_brief_${backendSessionId}`;
-    await this.runner(buildTmuxLoadBufferArgs(bufferName, briefFile));
-    await this.runner(buildTmuxPasteBufferArgs(bufferName, target));
-    // An Enter sent right after the paste lands before the CLI has finished
-    // processing it and is silently dropped — see PaneIdleWaitOptions.
-    await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
+    const landed = await pasteAndVerify(
+      async () => {
+        await this.runner(buildTmuxLoadBufferArgs(bufferName, briefFile));
+        await this.runner(buildTmuxPasteBufferArgs(bufferName, target));
+        // An Enter sent right after the paste lands before the CLI has
+        // finished processing it and is silently dropped — see
+        // PaneIdleWaitOptions.
+        await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
+      },
+      capture,
+      pasteMarker(promptText ?? ''),
+      this.paneIdleOptions,
+    );
+    if (!landed) {
+      // Whatever is on screen is unverified — do not submit it. Leaving it
+      // sitting there is a state `redeliverInitialPrompt` already knows how
+      // to fix; submitting a mangled fragment is not.
+      return false;
+    }
     await submitAndVerify(
       async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout,
       async () => {
@@ -316,6 +369,7 @@ export class TmuxBackend implements SessionBackend {
       },
       this.paneIdleOptions,
     );
+    return true;
   }
 
   /**
@@ -325,9 +379,15 @@ export class TmuxBackend implements SessionBackend {
    * original (if any) was already deleted by session-bootstrap.sh or consumed
    * by the first attempt.
    */
-  async redeliverPrompt(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void> {
+  async redeliverPrompt(
+    taskId: string,
+    slot: SessionSlot,
+    backendSessionId: string,
+    prompt: string,
+    agentCli?: string,
+  ): Promise<boolean> {
     const briefFile = writeLocalBrief(taskId, slot, prompt);
-    await this.deliverInitialPrompt(backendSessionId, briefFile);
+    return this.deliverInitialPrompt(backendSessionId, briefFile, agentCli, prompt);
   }
 
   async peekPane(backendSessionId: string): Promise<string> {

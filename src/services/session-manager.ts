@@ -820,6 +820,15 @@ export class SessionManager {
    * rather than throwing when the card has no live session — there is simply
    * nowhere to deliver an automated notice, and the caller falls back to a
    * durable board-level flag instead.
+   *
+   * Delivery reuses the same hardened paste-and-verify machinery as the
+   * initial brief (`backend.redeliverPrompt`, see `pane-idle.ts`) instead of
+   * a raw `sendInput`: a raw send types the message character-by-character
+   * and treats every embedded newline in a multi-line message as an
+   * immediate Enter, submitting it early, mid-line, with no confirmation it
+   * ever landed. The returned boolean reflects that verification honestly —
+   * `true` only once the message's own text was confirmed on the pane and
+   * Enter was sent to submit it.
    */
   async notifyTaskSession(
     taskId: string,
@@ -832,8 +841,18 @@ export class SessionManager {
     }
 
     const backend = this.getBackend(session.backendType);
-    await backend.sendInput(session.backendSessionId, `${message}\r`);
-    return true;
+    if (!backend.redeliverPrompt) {
+      throw new Error(`${session.backendType} sessions do not support notifying a live session.`);
+    }
+
+    const taskRow = this.loadTaskRow(taskId);
+    return backend.redeliverPrompt(
+      taskId,
+      slot,
+      session.backendSessionId,
+      message,
+      taskRow?.agent_cli ?? undefined,
+    );
   }
 
   /**
@@ -864,8 +883,13 @@ export class SessionManager {
       throw new Error(`${session.backendType} sessions do not support re-delivering the initial prompt.`);
     }
 
-    await backend.redeliverPrompt(taskId, slot, session.backendSessionId, taskRow.initial_prompt);
-    return true;
+    return backend.redeliverPrompt(
+      taskId,
+      slot,
+      session.backendSessionId,
+      taskRow.initial_prompt,
+      taskRow.agent_cli ?? undefined,
+    );
   }
 
   async resizeSession(

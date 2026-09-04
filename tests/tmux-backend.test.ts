@@ -250,6 +250,11 @@ describe('TmuxBackend brief handling', () => {
     const calls: string[][] = [];
     let capturesSincePaste = 0;
     let pasted = false;
+    // The new paste-verification step's own capture-pane call is answered
+    // once, separately from `captureResponses` below — it isn't part of the
+    // submit-retry sequence those arrays script, just confirmation the paste
+    // itself rendered before the existing tests' submit-phase logic runs.
+    let pasteVerified = false;
     const runner: TmuxCommandRunner = async (args) => {
       calls.push(args);
       if (args[0] === 'has-session') {
@@ -260,6 +265,10 @@ describe('TmuxBackend brief handling', () => {
       }
       if (args[0] === 'send-keys' && args[3] === '-l') {
         literals.push(args[4] ?? '');
+      }
+      if (args[0] === 'capture-pane' && pasted && !pasteVerified) {
+        pasteVerified = true;
+        return { stdout: initialPrompt, stderr: '' };
       }
       if (args[0] === 'capture-pane' && pasted && options.captureResponses) {
         const responses = options.captureResponses;
@@ -283,6 +292,8 @@ describe('TmuxBackend brief handling', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: options.maxSubmitRetries ?? 0,
         submitRetryIntervalMs: options.submitRetryIntervalMs ?? 0,
+        // No process name to match in these mocks — skip the foreground-command gate.
+        foregroundCommandTimeoutMs: 0,
       },
     });
 
@@ -410,12 +421,121 @@ describe('TmuxBackend brief handling', () => {
     // the brief, plus 3 retries: 5 in total.
     expect(enterCalls(calls)).toHaveLength(5);
   });
+
+  it('never submits a paste whose own text never rendered — retries pasting instead of trusting a blind delay', async () => {
+    // Arrange — the pane stays empty no matter how many times the brief is
+    // pasted, simulating a large paste whose front gets silently dropped by
+    // the pane's own input handling before it ever renders.
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'has-session') {
+        throw new Error('missing');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 0,
+        pasteVerifyTimeoutMs: 0,
+        pasteVerifyIntervalMs: 0,
+        maxPasteAttempts: 3,
+      },
+    });
+
+    // Act
+    await backend.create({
+      taskId: 'never-lands',
+      taskTitle: 'Never lands',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/never-lands-0002',
+      agentCli: 'claude',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt: 'This never renders on the pane.',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — pasted up to the retry limit, but never submitted: the
+    // bootstrap command's own Enter is the only one sent, since submitting
+    // unverified content is exactly the failure this guards against.
+    expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
+    expect(enterCalls(calls)).toHaveLength(1);
+  });
 });
 
 describe('TmuxBackend.redeliverPrompt', () => {
   it('pastes a fresh brief file and submits it, without going through create()', async () => {
     // Arrange — the manual escape hatch: no prior create() call, just an
     // already-live session that automatic delivery failed to reach.
+    const calls: string[][] = [];
+    let pasted = false;
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'paste-buffer') {
+        pasted = true;
+      }
+      if (args[0] === 'capture-pane' && pasted) {
+        // Simulate the paste rendering, for the new paste-verification step.
+        return { stdout: 'Please continue where you left off.', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        // No process name to match in these mocks — skip the foreground-command gate.
+        foregroundCommandTimeoutMs: 0,
+      },
+    });
+
+    // Act
+    const delivered = await backend.redeliverPrompt(
+      'brieftask',
+      'primary',
+      'ab_brieftask_p',
+      'Please continue where you left off.',
+    );
+
+    // Assert
+    expect(delivered).toBe(true);
+    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
+    const pasteIndex = calls.findIndex((args) => args[0] === 'paste-buffer');
+    const enterIndex = calls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
+    expect(loadIndex).toBeGreaterThanOrEqual(0);
+    expect(pasteIndex).toBeGreaterThan(loadIndex);
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
+
+    const briefFile = calls[loadIndex]![3];
+    expect(readFileSync(briefFile!, 'utf8')).toBe('Please continue where you left off.');
+  });
+
+  it('resolves false, without submitting anything, when the pasted text never renders', async () => {
+    // Arrange — mirrors the create()-path "never lands" test, but through the
+    // manual redeliverPrompt escape hatch: the pane stays empty no matter how
+    // many times the brief is pasted.
     const calls: string[][] = [];
     const runner: TmuxCommandRunner = async (args) => {
       calls.push(args);
@@ -433,22 +553,26 @@ describe('TmuxBackend.redeliverPrompt', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 0,
+        pasteVerifyTimeoutMs: 0,
+        pasteVerifyIntervalMs: 0,
+        maxPasteAttempts: 3,
       },
     });
 
     // Act
-    await backend.redeliverPrompt('brieftask', 'primary', 'ab_brieftask_p', 'Please continue where you left off.');
+    const delivered = await backend.redeliverPrompt(
+      'never-lands',
+      'primary',
+      'ab_never-lands_p',
+      'This never renders on the pane.',
+    );
 
-    // Assert
-    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
-    const pasteIndex = calls.findIndex((args) => args[0] === 'paste-buffer');
-    const enterIndex = calls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
-    expect(loadIndex).toBeGreaterThanOrEqual(0);
-    expect(pasteIndex).toBeGreaterThan(loadIndex);
-    expect(enterIndex).toBeGreaterThan(pasteIndex);
-
-    const briefFile = calls[loadIndex]![3];
-    expect(readFileSync(briefFile!, 'utf8')).toBe('Please continue where you left off.');
+    // Assert — never submitted: pasted up to the retry limit, but no Enter
+    // sent for the brief itself.
+    expect(delivered).toBe(false);
+    expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
+    expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('Enter'))).toHaveLength(0);
   });
 });
 
@@ -484,6 +608,8 @@ describe('TmuxBackend auto-trust', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
+        // No process name to match in these mocks — skip the foreground-command gate.
+        foregroundCommandTimeoutMs: 0,
       },
     });
 
@@ -538,6 +664,8 @@ describe('TmuxBackend auto-trust', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
+        // No process name to match in these mocks — skip the foreground-command gate.
+        foregroundCommandTimeoutMs: 0,
       },
     });
 

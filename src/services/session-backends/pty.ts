@@ -1,4 +1,5 @@
 import { createRequire } from 'module';
+import { spawn } from 'child_process';
 import type {
   SessionBackend,
   SessionRecord,
@@ -26,11 +27,52 @@ try {
 
 type IPty = import('node-pty').IPty;
 
+export interface PtySeedOptions {
+  /** The exact id the interactive bootstrap script will independently resolve to. */
+  agentSessionId: string;
+  cwd: string;
+  prompt: string;
+}
+
+/**
+ * Seeds a fresh `claude` conversation headlessly, so the interactive pty's own
+ * resume-detection (session-bootstrap.sh's `compgen -G ... .jsonl`) finds a
+ * transcript already sitting under that session id and resumes it instead of
+ * starting blank.
+ *
+ * Spawned directly rather than through node-pty: this is a one-shot batch call
+ * with piped stdin, not an interactive terminal. Only `claude` is wired up —
+ * see resolveAgentArgs's own claude-only carve-outs in session-bootstrap.ts.
+ */
+export type PtySeedRunner = (opts: PtySeedOptions) => Promise<void>;
+
+function defaultPtySeedRunner({ agentSessionId, cwd, prompt }: PtySeedOptions): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', ['--session-id', agentSessionId, '--print'], {
+      cwd,
+      stdio: ['pipe', 'ignore', 'ignore'],
+    });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`claude --print seed exited with code ${String(code)}`));
+      }
+    });
+    // Avoid an unhandled EPIPE if claude exits before consuming all of stdin.
+    child.stdin.on('error', () => {});
+    child.stdin.write(prompt);
+    child.stdin.end();
+  });
+}
+
 export class PtyBackend implements SessionBackend {
   private ptys = new Map<string, IPty>();
 
   constructor(
     private onData?: (taskId: string, slot: SessionSlot, data: string) => void,
+    private seedRunner: PtySeedRunner = defaultPtySeedRunner,
   ) {}
 
   async healthCheck(): Promise<BackendHealth> {
@@ -86,6 +128,27 @@ export class PtyBackend implements SessionBackend {
         ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
         : undefined,
     })}\n`;
+
+    // Headless-seed a transcript before the interactive pty ever starts, so
+    // session-bootstrap.sh's own resume-check (unmodified) picks `--resume`
+    // on its own — see PtySeedRunner above. Claude-only: opts.agentCli may be
+    // 'codex', whose resume flags aren't wired up (session-bootstrap.ts), and
+    // this seed call is specifically `claude --session-id ... --print`.
+    if (opts.initialPrompt && opts.agentSessionId && opts.agentCli === 'claude') {
+      try {
+        await this.seedRunner({
+          agentSessionId: opts.agentSessionId,
+          cwd,
+          prompt: opts.initialPrompt,
+        });
+      } catch {
+        // Best-effort: session-bootstrap.sh's own resume-check simply won't
+        // match (no transcript was written), so it falls back to
+        // `--session-id` fresh, same as if this seeding never existed. Never
+        // let a failed seed block the interactive pty from opening.
+      }
+    }
+
     pty.write(checkoutCmd);
 
     this.ptys.set(backendSessionId, pty);

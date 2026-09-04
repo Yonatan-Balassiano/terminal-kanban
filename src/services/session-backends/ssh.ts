@@ -19,8 +19,11 @@ import { buildControlPath, TransportUnreachableError, type SshTransport } from '
 import {
   autoTrustIfPrompted,
   DEFAULT_POST_PASTE_DELAY_MS,
+  pasteAndVerify,
+  pasteMarker,
   sleep,
   submitAndVerify,
+  waitForForegroundCommand,
   waitForStablePane,
   type PaneIdleWaitOptions,
 } from './pane-idle.js';
@@ -348,7 +351,12 @@ export class SshTmuxBackend implements SessionBackend {
         // a minute in the worst case, and blocking the caller's own RPC round
         // trip that long risks its own timeout firing and retrying
         // `agentboard task create`, which would create a second card.
-        void this.deliverInitialPrompt(backendSessionId, remoteBriefFile).catch(() => {
+        void this.deliverInitialPrompt(
+          backendSessionId,
+          remoteBriefFile,
+          opts.agentCli,
+          opts.initialPrompt,
+        ).catch(() => {
           // Best-effort; nowhere useful to surface a failure from here.
         });
       }
@@ -429,11 +437,20 @@ export class SshTmuxBackend implements SessionBackend {
    *
    * Skipped when `remoteBriefFile` is gone: `session-bootstrap.sh`, running on
    * the remote host, deletes it itself on a resume.
+   *
+   * `agentCli` gates the paste on the CLI actually being the pane's
+   * foreground process yet — see {@link TmuxBackend}'s version for why.
+   *
+   * Resolves `true` once the paste has been verified and Enter sent to
+   * submit it, `false` when the paste never verified (nothing was
+   * submitted) or the brief file was gone (a resume — nothing to deliver).
    */
   private async deliverInitialPrompt(
     backendSessionId: string,
-    remoteBriefFile: string
-  ): Promise<void> {
+    remoteBriefFile: string,
+    agentCli?: string,
+    promptText?: string,
+  ): Promise<boolean> {
     const capture = async () =>
       (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout;
     await waitForStablePane(capture, this.paneIdleOptions);
@@ -453,16 +470,43 @@ export class SshTmuxBackend implements SessionBackend {
       await waitForStablePane(capture, this.paneIdleOptions);
     }
 
+    if (agentCli) {
+      await waitForForegroundCommand(
+        async () => {
+          const result = await this.remoteRunner(
+            buildTmuxListPanesArgs(TMUX_PANE_PROCESS_FORMAT, backendSessionId)
+          );
+          return parseTmuxPaneProcess(result.stdout).currentCommand;
+        },
+        agentCli,
+        this.paneIdleOptions,
+      );
+    }
+
     if (!(await this.transport.exists(remoteBriefFile))) {
-      return;
+      return false;
     }
 
     const bufferName = `agentboard_brief_${backendSessionId}`;
-    await this.remoteRunner(buildTmuxLoadBufferArgs(bufferName, remoteBriefFile));
-    await this.remoteRunner(buildTmuxPasteBufferArgs(bufferName, backendSessionId));
-    // An Enter sent right after the paste lands before the CLI has finished
-    // processing it and is silently dropped — see PaneIdleWaitOptions.
-    await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
+    const landed = await pasteAndVerify(
+      async () => {
+        await this.remoteRunner(buildTmuxLoadBufferArgs(bufferName, remoteBriefFile));
+        await this.remoteRunner(buildTmuxPasteBufferArgs(bufferName, backendSessionId));
+        // An Enter sent right after the paste lands before the CLI has
+        // finished processing it and is silently dropped — see
+        // PaneIdleWaitOptions.
+        await sleep(this.paneIdleOptions?.postPasteDelayMs ?? DEFAULT_POST_PASTE_DELAY_MS);
+      },
+      capture,
+      pasteMarker(promptText ?? ''),
+      this.paneIdleOptions,
+    );
+    if (!landed) {
+      // Whatever is on screen is unverified — do not submit it. Leaving it
+      // sitting there is a state `redeliverInitialPrompt` already knows how
+      // to fix; submitting a mangled fragment is not.
+      return false;
+    }
     await submitAndVerify(
       async () => (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout,
       async () => {
@@ -470,6 +514,7 @@ export class SshTmuxBackend implements SessionBackend {
       },
       this.paneIdleOptions,
     );
+    return true;
   }
 
   /**
@@ -477,9 +522,15 @@ export class SshTmuxBackend implements SessionBackend {
    * before the remote pane became responsive — see
    * `SessionBackend.redeliverPrompt`.
    */
-  async redeliverPrompt(taskId: string, slot: SessionSlot, backendSessionId: string, prompt: string): Promise<void> {
+  async redeliverPrompt(
+    taskId: string,
+    slot: SessionSlot,
+    backendSessionId: string,
+    prompt: string,
+    agentCli?: string,
+  ): Promise<boolean> {
     const remoteBriefFile = await this.ensureRemoteBrief(taskId, slot, prompt);
-    await this.deliverInitialPrompt(backendSessionId, remoteBriefFile);
+    return this.deliverInitialPrompt(backendSessionId, remoteBriefFile, agentCli, prompt);
   }
 
   async peekPane(backendSessionId: string): Promise<string> {

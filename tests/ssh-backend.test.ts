@@ -419,6 +419,73 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
     };
 
     const remoteCalls: string[][] = [];
+    let pasted = false;
+    const backend = new SshTmuxBackend({
+      transport: transport as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        remoteCalls.push(args);
+        if (args[0] === 'paste-buffer') {
+          pasted = true;
+        }
+        if (args[0] === 'capture-pane' && pasted) {
+          // Simulate the paste rendering, for the new paste-verification step.
+          return ok('Please continue where you left off.');
+        }
+        return ok();
+      },
+      localRunner: async () => ok(),
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        // No process name to match in these mocks — skip the foreground-command gate.
+        foregroundCommandTimeoutMs: 0,
+      },
+    });
+
+    // Act
+    const delivered = await backend.redeliverPrompt(
+      SESSION_NAME,
+      'primary',
+      SESSION_NAME,
+      'Please continue where you left off.',
+    );
+
+    // Assert
+    expect(delivered).toBe(true);
+    const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
+    const pasteIndex = remoteCalls.findIndex((args) => args[0] === 'paste-buffer');
+    const enterIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
+    expect(loadIndex).toBeGreaterThanOrEqual(0);
+    expect(pasteIndex).toBeGreaterThan(loadIndex);
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
+
+    const remoteBriefFile = remoteCalls[loadIndex]![3]!;
+    expect(writtenBriefs[remoteBriefFile]).toBe('Please continue where you left off.');
+  });
+
+  it('resolves false, without submitting anything, when the pasted text never renders', async () => {
+    // Arrange — the remote pane stays empty no matter how many times the
+    // brief is pasted, mirroring TmuxBackend's never-lands case.
+    const transport = {
+      host: 'test.host',
+      id: 'ssh:test.host',
+      isRemote: true,
+      exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+      exists: vi.fn(async () => true),
+      mkdirp: vi.fn(async () => undefined),
+      removeDir: vi.fn(async () => undefined),
+      writeFileIfChanged: vi.fn(async () => true),
+      reachability: vi.fn(async () => 'ok' as const),
+    };
+
+    const remoteCalls: string[][] = [];
     const backend = new SshTmuxBackend({
       transport: transport as never,
       host: 'test.host',
@@ -436,22 +503,26 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 0,
+        pasteVerifyTimeoutMs: 0,
+        pasteVerifyIntervalMs: 0,
+        maxPasteAttempts: 3,
       },
     });
 
     // Act
-    await backend.redeliverPrompt(SESSION_NAME, 'primary', SESSION_NAME, 'Please continue where you left off.');
+    const delivered = await backend.redeliverPrompt(
+      SESSION_NAME,
+      'primary',
+      SESSION_NAME,
+      'This never renders on the pane.',
+    );
 
-    // Assert
-    const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
-    const pasteIndex = remoteCalls.findIndex((args) => args[0] === 'paste-buffer');
-    const enterIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
-    expect(loadIndex).toBeGreaterThanOrEqual(0);
-    expect(pasteIndex).toBeGreaterThan(loadIndex);
-    expect(enterIndex).toBeGreaterThan(pasteIndex);
-
-    const remoteBriefFile = remoteCalls[loadIndex]![3]!;
-    expect(writtenBriefs[remoteBriefFile]).toBe('Please continue where you left off.');
+    // Assert — never submitted: pasted up to the retry limit, but no Enter
+    // sent for the brief itself.
+    expect(delivered).toBe(false);
+    expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
+    expect(remoteCalls.filter((args) => args[0] === 'send-keys' && args.includes('Enter'))).toHaveLength(0);
   });
 });
 
@@ -499,6 +570,8 @@ describe('SshTmuxBackend auto-trust', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
+        // No process name to match in these mocks — skip the foreground-command gate.
+        foregroundCommandTimeoutMs: 0,
       },
     });
 

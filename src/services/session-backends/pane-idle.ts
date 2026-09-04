@@ -28,6 +28,16 @@ export interface PaneIdleWaitOptions {
   maxSubmitRetries?: number;
   /** Gap between each check of whether the pane changed. */
   submitRetryIntervalMs?: number;
+  /** How long to wait for the agent CLI to become the pane's foreground process. */
+  foregroundCommandTimeoutMs?: number;
+  /** How often to re-check the pane's foreground process while waiting. */
+  foregroundCommandIntervalMs?: number;
+  /** How long to wait, per attempt, for a pasted brief's own start to render. */
+  pasteVerifyTimeoutMs?: number;
+  /** How often to re-check the pane while waiting for a paste to render. */
+  pasteVerifyIntervalMs?: number;
+  /** How many times to (re-)paste before giving up on this delivery. */
+  maxPasteAttempts?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -47,6 +57,31 @@ export const DEFAULT_POST_PASTE_DELAY_MS = 600;
 // for whatever this ceiling still doesn't cover.
 const DEFAULT_MAX_SUBMIT_RETRIES = 85;
 const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 2500;
+// The bootstrap script's own pre-launch work (checking out the base branch,
+// pulling, and so on) runs entirely before the agent CLI is even the pane's
+// foreground process, and can go silent for several seconds at a time on a
+// slow fetch — long enough for `waitForStablePane`'s "screen stopped
+// changing" heuristic to false-positive on "ready", landing the paste in a
+// plain shell instead of the CLI's own input box. That shell has no bracketed
+// paste request of its own, so the brief's embedded blank lines get read back
+// as separate Enters, submitting only the first line — a boilerplate subtask
+// notice, say — while the rest is left as stray, unsubmitted text.
+const DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS = 30_000;
+const DEFAULT_FOREGROUND_COMMAND_INTERVAL_MS = 500;
+// Confirmed live on a several-KB multi-paragraph brief: the pane ended up
+// with only the final paragraph as its first submitted message, its blank
+// lines rendered back as literal `\r` bytes rather than newlines within the
+// input box. Something between tmux's `paste-buffer` and the CLI's own input
+// handling can mangle a large burst — bracketed-paste negotiation is itself
+// a race no less real than the one `waitForForegroundCommand` guards against,
+// just one layer deeper (the process is already `claude`; its input handling
+// may not have finished initializing yet). Whatever the exact mechanism,
+// checking the pane actually shows the brief's own opening before trusting a
+// paste catches it regardless.
+const DEFAULT_PASTE_VERIFY_TIMEOUT_MS = 2_000;
+const DEFAULT_PASTE_VERIFY_INTERVAL_MS = 200;
+const DEFAULT_MAX_PASTE_ATTEMPTS = 3;
+const PASTE_MARKER_LENGTH = 24;
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,6 +159,109 @@ export async function waitForStablePane(
     previous = current;
     await sleep(intervalMs);
   }
+}
+
+/**
+ * Waits for the pane's foreground process to become the agent CLI itself,
+ * rather than the bootstrap script (or whatever it's currently shelling out
+ * to — `git`, `corepack`, ...) that runs ahead of it.
+ *
+ * `waitForStablePane` alone cannot tell those apart: a silent `git pull` looks
+ * exactly as "settled" as a CLI sitting at its input prompt. Pasting into the
+ * former lands the brief in a plain shell instead of the chat box — see
+ * {@link DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS}.
+ *
+ * Best-effort like the rest of this module: gives up and lets the caller
+ * proceed after the timeout rather than blocking forever if the process name
+ * never matches (a mismatch here is a reason to try anyway, not to hang).
+ */
+export async function waitForForegroundCommand(
+  getCurrentCommand: () => Promise<string | undefined>,
+  expectedCommand: string,
+  {
+    foregroundCommandTimeoutMs = DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS,
+    foregroundCommandIntervalMs = DEFAULT_FOREGROUND_COMMAND_INTERVAL_MS,
+  }: PaneIdleWaitOptions = {},
+): Promise<void> {
+  const deadline = Date.now() + foregroundCommandTimeoutMs;
+  while (Date.now() < deadline) {
+    const current = await getCurrentCommand();
+    if (current === expectedCommand) {
+      return;
+    }
+    await sleep(foregroundCommandIntervalMs);
+  }
+}
+
+function normalizeForMatch(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * A short, distinctive prefix of a brief, safe to search for in a captured
+ * pane even after tmux's own line-wrapped rendering reshuffles whitespace.
+ * Kept well under a typical terminal width so the marker itself can't
+ * straddle a wrap boundary and split across two captured rows.
+ */
+export function pasteMarker(prompt: string): string {
+  return normalizeForMatch(prompt).slice(0, PASTE_MARKER_LENGTH);
+}
+
+/**
+ * Waits for a pasted brief's own opening to actually show up on the pane.
+ *
+ * A paste that "should have" landed is not proof it did — see
+ * {@link DEFAULT_PASTE_VERIFY_TIMEOUT_MS}. An empty `marker` (nothing to
+ * verify against) always succeeds immediately.
+ */
+export async function waitForPasteToLand(
+  capture: () => Promise<string>,
+  marker: string,
+  {
+    pasteVerifyTimeoutMs = DEFAULT_PASTE_VERIFY_TIMEOUT_MS,
+    pasteVerifyIntervalMs = DEFAULT_PASTE_VERIFY_INTERVAL_MS,
+  }: PaneIdleWaitOptions = {},
+): Promise<boolean> {
+  if (!marker) {
+    return true;
+  }
+  const deadline = Date.now() + pasteVerifyTimeoutMs;
+  while (Date.now() < deadline) {
+    const current = normalizeForMatch(await capture());
+    if (current.includes(marker)) {
+      return true;
+    }
+    await sleep(pasteVerifyIntervalMs);
+  }
+  return false;
+}
+
+/**
+ * Pastes a brief and confirms its own opening rendered before trusting it —
+ * re-pasting (never typing, never guessing content is fine because a fixed
+ * delay elapsed) up to `maxPasteAttempts` times.
+ *
+ * Returns whether the paste is verified to have landed. A caller must not
+ * submit (send Enter) when this is `false` — the last attempt's content on
+ * screen is unverified, and submitting it risks committing exactly the
+ * mangled fragment this function exists to catch instead of a clean,
+ * recoverable "still sitting there unsubmitted" state for
+ * `redeliverInitialPrompt` to fix.
+ */
+export async function pasteAndVerify(
+  paste: () => Promise<void>,
+  capture: () => Promise<string>,
+  marker: string,
+  options: PaneIdleWaitOptions = {},
+): Promise<boolean> {
+  const { maxPasteAttempts = DEFAULT_MAX_PASTE_ATTEMPTS } = options;
+  for (let attempt = 0; attempt < maxPasteAttempts; attempt += 1) {
+    await paste();
+    if (await waitForPasteToLand(capture, marker, options)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
