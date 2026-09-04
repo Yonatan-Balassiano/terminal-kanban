@@ -171,6 +171,15 @@ export async function waitForStablePane(
  * former lands the brief in a plain shell instead of the chat box — see
  * {@link DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS}.
  *
+ * Matched by prefix, not exact equality: confirmed live, `codex`'s installed
+ * binary is invoked via a symlink to `codex-aarch64-apple-darwin`, and the
+ * kernel's own process-name field truncates that to `codex-aarch64-a` —
+ * never equal to the plain `codex` `agentCli` value, which silently defeated
+ * this gate for every codex session before this fix (`claude`'s own binary
+ * is short enough to never truncate, so its exact-match happened to work by
+ * coincidence). A prefix match covers both without needing to special-case
+ * either CLI's actual binary name.
+ *
  * Best-effort like the rest of this module: gives up and lets the caller
  * proceed after the timeout rather than blocking forever if the process name
  * never matches (a mismatch here is a reason to try anyway, not to hang).
@@ -186,7 +195,7 @@ export async function waitForForegroundCommand(
   const deadline = Date.now() + foregroundCommandTimeoutMs;
   while (Date.now() < deadline) {
     const current = await getCurrentCommand();
-    if (current === expectedCommand) {
+    if (current?.startsWith(expectedCommand)) {
       return;
     }
     await sleep(foregroundCommandIntervalMs);
