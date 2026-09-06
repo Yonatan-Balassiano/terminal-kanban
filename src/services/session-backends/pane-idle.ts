@@ -40,7 +40,7 @@ export interface PaneIdleWaitOptions {
   maxPasteAttempts?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 12_000;
+export const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_INTERVAL_MS = 400;
 const DEFAULT_STABLE_CHECKS = 2;
 export const DEFAULT_POST_PASTE_DELAY_MS = 600;
@@ -55,8 +55,8 @@ export const DEFAULT_POST_PASTE_DELAY_MS = 600;
 // session that is starting up anyway, never a running one, and
 // `redeliverInitialPrompt` (session-manager.ts) is the manual escape hatch
 // for whatever this ceiling still doesn't cover.
-const DEFAULT_MAX_SUBMIT_RETRIES = 85;
-const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 2500;
+export const DEFAULT_MAX_SUBMIT_RETRIES = 85;
+export const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 2500;
 // The bootstrap script's own pre-launch work (checking out the base branch,
 // pulling, and so on) runs entirely before the agent CLI is even the pane's
 // foreground process, and can go silent for several seconds at a time on a
@@ -66,7 +66,7 @@ const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 2500;
 // paste request of its own, so the brief's embedded blank lines get read back
 // as separate Enters, submitting only the first line — a boilerplate subtask
 // notice, say — while the rest is left as stray, unsubmitted text.
-const DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS = 30_000;
+export const DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS = 30_000;
 const DEFAULT_FOREGROUND_COMMAND_INTERVAL_MS = 500;
 // Confirmed live on a several-KB multi-paragraph brief: the pane ended up
 // with only the final paragraph as its first submitted message, its blank
@@ -78,10 +78,52 @@ const DEFAULT_FOREGROUND_COMMAND_INTERVAL_MS = 500;
 // may not have finished initializing yet). Whatever the exact mechanism,
 // checking the pane actually shows the brief's own opening before trusting a
 // paste catches it regardless.
-const DEFAULT_PASTE_VERIFY_TIMEOUT_MS = 2_000;
+export const DEFAULT_PASTE_VERIFY_TIMEOUT_MS = 2_000;
 const DEFAULT_PASTE_VERIFY_INTERVAL_MS = 200;
-const DEFAULT_MAX_PASTE_ATTEMPTS = 3;
+export const DEFAULT_MAX_PASTE_ATTEMPTS = 3;
 const PASTE_MARKER_LENGTH = 24;
+
+/**
+ * The wall-clock ceiling one full brief delivery can occupy, derived from the
+ * same retry budgets the delivery pipeline actually spends — not guessed.
+ *
+ * Every RPC caller that waits on a delivery (`redeliverInitialPrompt`,
+ * `notifyTaskSession` — see `src/cli/rpc.ts`) has to allow at least this long
+ * before calling the daemon dead. Getting that wrong is not cosmetic: a client
+ * that gives up early looks like a failure, the natural response is to run the
+ * command again, and a second run starts a *second* paste into the same pane.
+ * That is how one pane ended up holding 20 stacked, unsubmitted fragments.
+ *
+ * Derived rather than written down so that raising, say,
+ * {@link DEFAULT_MAX_SUBMIT_RETRIES} moves every caller's timeout with it
+ * instead of silently re-introducing that bug. Summed over the pipeline in
+ * `deliverInitialPrompt`'s own order:
+ *   - {@link waitForStablePane}, twice (once more after the trust prompt)
+ *   - {@link waitForForegroundCommand}
+ *   - {@link pasteAndVerify}: every attempt's verify window plus its post-paste pause
+ *   - {@link submitAndVerify}: every Enter retry
+ */
+export function deliveryBudgetMs(options: PaneIdleWaitOptions = {}): number {
+  const {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    postPasteDelayMs = DEFAULT_POST_PASTE_DELAY_MS,
+    maxSubmitRetries = DEFAULT_MAX_SUBMIT_RETRIES,
+    submitRetryIntervalMs = DEFAULT_SUBMIT_RETRY_INTERVAL_MS,
+    foregroundCommandTimeoutMs = DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS,
+    pasteVerifyTimeoutMs = DEFAULT_PASTE_VERIFY_TIMEOUT_MS,
+    maxPasteAttempts = DEFAULT_MAX_PASTE_ATTEMPTS,
+  } = options;
+
+  return (
+    timeoutMs * 2 +
+    foregroundCommandTimeoutMs +
+    maxPasteAttempts * (pasteVerifyTimeoutMs + postPasteDelayMs) +
+    maxSubmitRetries * submitRetryIntervalMs
+  );
+}
+
+/** {@link deliveryBudgetMs} with the shipped defaults — currently ~274s. */
+export const DEFAULT_DELIVERY_BUDGET_MS = deliveryBudgetMs();
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -246,13 +288,34 @@ export async function waitForPasteToLand(
 }
 
 /**
+ * What a delivery attempt did about getting its text onto the pane.
+ *
+ * `already-present` is not a failure — it is the duplicate-run case, and the
+ * one outcome that must never paste again; see {@link pasteAndVerify}.
+ */
+export type PasteOutcome = 'pasted' | 'already-present' | 'unverified';
+
+/**
  * Pastes a brief and confirms its own opening rendered before trusting it —
  * re-pasting (never typing, never guessing content is fine because a fixed
  * delay elapsed) up to `maxPasteAttempts` times.
  *
- * Returns whether the paste is verified to have landed. A caller must not
- * submit (send Enter) when this is `false` — the last attempt's content on
- * screen is unverified, and submitting it risks committing exactly the
+ * Pastes nothing at all when the pane *already* shows this exact brief's
+ * opening: that means an earlier delivery of the same text is already sitting
+ * there, and a second paste would stack a duplicate copy underneath the first
+ * rather than replace it — the failure that made a timed-out
+ * `redeliver-prompt` actively harmful to re-run (one pane was left holding 20
+ * stacked fragments, none submitted). The caller submits either way, so a
+ * repeat run still does the useful half of the job: it presses Enter on text
+ * that was already there.
+ *
+ * The check is deliberately one-sided. A false positive — the marker matching
+ * the same brief already *submitted* and still visible in the scrollback —
+ * costs one stray Enter into an idle CLI, which does nothing. A false
+ * negative costs exactly the stacked paste this exists to prevent.
+ *
+ * `unverified` means nothing on screen can be trusted; a caller must not
+ * submit (send Enter) then, since submitting risks committing exactly the
  * mangled fragment this function exists to catch instead of a clean,
  * recoverable "still sitting there unsubmitted" state for
  * `redeliverInitialPrompt` to fix.
@@ -262,15 +325,22 @@ export async function pasteAndVerify(
   capture: () => Promise<string>,
   marker: string,
   options: PaneIdleWaitOptions = {},
-): Promise<boolean> {
+): Promise<PasteOutcome> {
   const { maxPasteAttempts = DEFAULT_MAX_PASTE_ATTEMPTS } = options;
+
+  // An empty marker means there is nothing to recognise — every pane
+  // "contains" it — so this shortcut has to stay out of the way there.
+  if (marker && normalizeForMatch(await capture()).includes(marker)) {
+    return 'already-present';
+  }
+
   for (let attempt = 0; attempt < maxPasteAttempts; attempt += 1) {
     await paste();
     if (await waitForPasteToLand(capture, marker, options)) {
-      return true;
+      return 'pasted';
     }
   }
-  return false;
+  return 'unverified';
 }
 
 /**

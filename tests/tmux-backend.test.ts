@@ -586,6 +586,91 @@ describe('TmuxBackend.redeliverPrompt', () => {
   });
 });
 
+describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
+  const PROMPT = 'Please continue where you left off.';
+  const IDLE_OPTIONS = {
+    timeoutMs: 1000,
+    intervalMs: 0,
+    stableChecks: 1,
+    postPasteDelayMs: 0,
+    maxSubmitRetries: 0,
+    submitRetryIntervalMs: 0,
+    foregroundCommandTimeoutMs: 0,
+    pasteVerifyTimeoutMs: 20,
+    pasteVerifyIntervalMs: 1,
+  };
+
+  const enterCalls = (calls: string[][]): string[][] =>
+    calls.filter((args) => args[0] === 'send-keys' && args.includes('Enter'));
+
+  it('does not paste a second copy when the brief is already sitting in the pane', async () => {
+    // Arrange — what a user sees after a delivery that pasted but never got
+    // its Enter through: the brief is on screen, unsubmitted. Running
+    // redeliver-prompt again used to stack a second copy underneath it.
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'capture-pane') {
+        return { stdout: `> ${PROMPT}`, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: IDLE_OPTIONS,
+    });
+
+    // Act
+    const delivered = await backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
+
+    // Assert — nothing pasted, but the Enter the earlier run never landed is
+    // sent, which is the whole point of re-running the command.
+    expect(delivered).toBe(true);
+    expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
+    expect(enterCalls(calls)).toHaveLength(1);
+  });
+
+  it('joins a delivery already in flight rather than starting a second paste', async () => {
+    // Arrange — the original failure: the command looked like it had timed
+    // out, so it was run again while the first was still working.
+    const calls: string[][] = [];
+    let releaseFirstCapture: () => void = () => undefined;
+    const firstCaptureBlocked = new Promise<void>((resolve) => {
+      releaseFirstCapture = resolve;
+    });
+    let captures = 0;
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'capture-pane') {
+        captures += 1;
+        if (captures === 1) {
+          await firstCaptureBlocked;
+        }
+        return { stdout: '', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: { ...IDLE_OPTIONS, maxPasteAttempts: 1 },
+    });
+
+    // Act — the second call starts while the first is stuck on its first capture.
+    const first = backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
+    const second = backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
+    releaseFirstCapture();
+    const results = await Promise.all([first, second]);
+
+    // Assert — one delivery, one paste, and both callers get its real answer.
+    expect(results).toEqual([false, false]);
+    expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
+  });
+});
+
 describe('TmuxBackend auto-trust', () => {
   it('accepts a never-trusted-folder prompt (Down, then Enter) before delivering the brief', async () => {
     // Arrange — the pane shows the real trust screen until Down is sent, then

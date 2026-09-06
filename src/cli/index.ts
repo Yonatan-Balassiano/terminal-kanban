@@ -16,6 +16,7 @@ import {
 } from '../config/index.js';
 import { ensureRunning, isDaemonRunning, stopDaemon } from '../daemon/index.js';
 import { createRPCClient } from './rpc.js';
+import { DEFAULT_DELIVERY_BUDGET_MS } from '../services/session-backends/pane-idle.js';
 import type {
   AppConfig,
   DoctorCheck,
@@ -29,6 +30,25 @@ import type {
 // ============================================================
 // Helpers
 // ============================================================
+
+/**
+ * Says out loud that the next call blocks for as long as a pane delivery can
+ * take, before it starts blocking.
+ *
+ * Both delivery commands are synchronous on purpose — their answer is a
+ * verified outcome ("this text was seen on the pane, then Enter was sent"),
+ * which a fire-and-forget "queued" reply would throw away — but a CLI that
+ * sits silent for minutes reads as hung, and someone who thinks it hung runs
+ * it again. See `pane-idle.ts`'s `deliveryBudgetMs` for where the number
+ * comes from.
+ */
+function announceDeliveryWait(): void {
+  const minutes = Math.ceil(DEFAULT_DELIVERY_BUDGET_MS / 60_000);
+  console.log(
+    `Delivering — waiting for the pane to take it. A busy or still-starting session can hold this up to ~${minutes} min; ` +
+      'follow it from another shell with `agentboard fleet` (DELIVERY column).',
+  );
+}
 
 /** Map ConfigPaths (dbFile) to the shape expected by DaemonOpts / ensureRunning. */
 function daemonOpts(paths: ConfigPaths) {
@@ -948,6 +968,7 @@ export function buildCli(): Command {
             throw new Error(`Unknown task "${id}". No card with that id exists.`);
           }
 
+          announceDeliveryWait();
           const { delivered } = await rpc.call<{ delivered: boolean }>('notifyTaskSession', {
             taskId: id,
             message,
@@ -985,6 +1006,7 @@ export function buildCli(): Command {
             throw new Error(`Unknown task "${id}". No card with that id exists.`);
           }
 
+          announceDeliveryWait();
           const { delivered } = await rpc.call<{ delivered: boolean }>('redeliverInitialPrompt', {
             taskId: id,
           });

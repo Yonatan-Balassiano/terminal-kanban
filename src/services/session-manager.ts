@@ -834,6 +834,11 @@ export class SessionManager {
    * ever landed. The returned boolean reflects that verification honestly —
    * `true` only once the message's own text was confirmed on the pane and
    * Enter was sent to submit it.
+   *
+   * That machinery is patient by design, so this call can take minutes on a
+   * slow pane: any RPC client waiting on it needs at least
+   * `pane-idle.ts`'s `deliveryBudgetMs` before calling the daemon dead — see
+   * `rpcTimeoutMs` in `src/cli/rpc.ts`, which derives its timeout from it.
    */
   async notifyTaskSession(
     taskId: string,
@@ -871,6 +876,12 @@ export class SessionManager {
    * errors. Throws only when the session's own backend does not support
    * redelivery (PTY), since that is a real "can't do this" the caller should
    * surface.
+   *
+   * Safe to run twice: the backends refuse to start a second delivery into a
+   * pane that already has one in flight, and skip the paste entirely when this
+   * brief is already sitting on screen (`DeliveryGuard` and `pasteAndVerify`).
+   * Like notify, it can take minutes — see `pane-idle.ts`'s `deliveryBudgetMs`
+   * and the timeout `src/cli/rpc.ts` derives from it.
    */
   async redeliverInitialPrompt(taskId: string, slot: SessionSlot = 'primary'): Promise<boolean> {
     const session = this.getSession(taskId, slot);

@@ -16,6 +16,7 @@ import { BRIEF_FILE_MODE, briefRelativePath } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import { shellJoin } from '../shell-quote.js';
 import { buildControlPath, TransportUnreachableError, type SshTransport } from '../transport/index.js';
+import { DeliveryGuard } from './delivery-guard.js';
 import {
   autoTrustIfPrompted,
   DEFAULT_POST_PASTE_DELAY_MS,
@@ -114,6 +115,9 @@ export class SshTmuxBackend implements SessionBackend {
   private readonly idGenerator: () => string;
   private readonly now: () => number;
   private readonly paneIdleOptions?: PaneIdleWaitOptions;
+
+  /** One brief delivery per pane at a time — see {@link DeliveryGuard}. */
+  private readonly deliveries = new DeliveryGuard();
 
   private readonly inspectCache = new Map<string, InspectCacheEntry>();
   private remoteHome: string | null = null;
@@ -450,7 +454,20 @@ export class SshTmuxBackend implements SessionBackend {
    * submit it, `false` when the paste never verified (nothing was
    * submitted) or the brief file was gone (a resume — nothing to deliver).
    */
-  private async deliverInitialPrompt(
+  private deliverInitialPrompt(
+    backendSessionId: string,
+    remoteBriefFile: string,
+    agentCli?: string,
+    promptText?: string,
+  ): Promise<boolean> {
+    // Never two at once into the same pane — see {@link DeliveryGuard}.
+    return this.deliveries.run(backendSessionId, promptText ?? '', () =>
+      this.deliverToPane(backendSessionId, remoteBriefFile, agentCli, promptText),
+    );
+  }
+
+  /** {@link deliverInitialPrompt}'s body, minus the one-at-a-time guard. */
+  private async deliverToPane(
     backendSessionId: string,
     remoteBriefFile: string,
     agentCli?: string,
@@ -493,7 +510,7 @@ export class SshTmuxBackend implements SessionBackend {
     }
 
     const bufferName = `agentboard_brief_${backendSessionId}`;
-    const landed = await pasteAndVerify(
+    const outcome = await pasteAndVerify(
       async () => {
         await this.remoteRunner(buildTmuxLoadBufferArgs(bufferName, remoteBriefFile));
         await this.remoteRunner(buildTmuxPasteBufferArgs(bufferName, backendSessionId));
@@ -506,7 +523,10 @@ export class SshTmuxBackend implements SessionBackend {
       pasteMarker(promptText ?? ''),
       this.paneIdleOptions,
     );
-    if (!landed) {
+    // 'already-present' pasted nothing on purpose — this brief is still
+    // sitting on the pane from an earlier run — but the text is there, so it
+    // still wants the Enter the earlier run never got to send.
+    if (outcome === 'unverified') {
       // Whatever is on screen is unverified — do not submit it. Leaving it
       // sitting there is a state `redeliverInitialPrompt` already knows how
       // to fix; submitting a mangled fragment is not.

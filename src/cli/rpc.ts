@@ -4,8 +4,16 @@
 
 import * as net from 'net';
 import type { RPCRequest, RPCResponse, RPCEvent, RPCMethod } from '../types/index.js';
+import { DEFAULT_DELIVERY_BUDGET_MS } from '../services/session-backends/pane-idle.js';
 
-function rpcTimeoutMs(method: RPCMethod): number {
+/**
+ * Room on top of a delivery's own budget for the tmux/ssh round trips around
+ * it — resolving the pane, writing the brief file, and (over ssh) every
+ * capture that budget assumes is instant.
+ */
+const DELIVERY_RPC_MARGIN_MS = 30_000;
+
+export function rpcTimeoutMs(method: RPCMethod): number {
   switch (method) {
     case 'chatTurn':
       // A single chat turn may span multiple Ollama/tool-call rounds.
@@ -34,6 +42,15 @@ function rpcTimeoutMs(method: RPCMethod): number {
       return 120_000;
     case 'teleportTaskPreflight':
       return 20_000;
+    case 'redeliverInitialPrompt':
+    case 'notifyTaskSession':
+      // Both paste into a live pane and wait for the CLI to acknowledge it,
+      // which is minutes of patient retrying by design — not a hung daemon.
+      // Derived from `pane-idle.ts`'s own retry budget rather than guessed, so
+      // raising MAX_SUBMIT_RETRIES there moves this with it: on the 10s
+      // default these calls looked like failures, got re-run, and each re-run
+      // stacked another paste into the same pane.
+      return DEFAULT_DELIVERY_BUDGET_MS + DELIVERY_RPC_MARGIN_MS;
     default:
       return 10_000;
   }

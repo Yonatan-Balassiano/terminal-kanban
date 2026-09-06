@@ -470,6 +470,60 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
     expect(writtenBriefs[remoteBriefFile]).toBe('Please continue where you left off.');
   });
 
+  it('does not paste a second copy when the brief is already sitting in the remote pane', async () => {
+    // Arrange — the duplicate-run case, mirroring TmuxBackend's. Re-running
+    // the command used to stack another copy underneath the first.
+    const PROMPT = 'Please continue where you left off.';
+    const transport = {
+      host: 'test.host',
+      id: 'ssh:test.host',
+      isRemote: true,
+      exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+      exists: vi.fn(async () => true),
+      mkdirp: vi.fn(async () => undefined),
+      removeDir: vi.fn(async () => undefined),
+      writeFileIfChanged: vi.fn(async () => true),
+      reachability: vi.fn(async () => 'ok' as const),
+    };
+
+    const remoteCalls: string[][] = [];
+    const backend = new SshTmuxBackend({
+      transport: transport as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        remoteCalls.push(args);
+        if (args[0] === 'capture-pane') {
+          return ok(`> ${PROMPT}`);
+        }
+        return ok();
+      },
+      localRunner: async () => ok(),
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 0,
+        pasteVerifyTimeoutMs: 20,
+        pasteVerifyIntervalMs: 1,
+      },
+    });
+
+    // Act
+    const delivered = await backend.redeliverPrompt(SESSION_NAME, 'primary', SESSION_NAME, PROMPT);
+
+    // Assert — nothing re-pasted, but the missing Enter is still sent.
+    expect(delivered).toBe(true);
+    expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
+    expect(
+      remoteCalls.filter((args) => args[0] === 'send-keys' && args.includes('Enter')),
+    ).toHaveLength(1);
+  });
+
   it('resolves false, without submitting anything, when the pasted text never renders', async () => {
     // Arrange — the remote pane stays empty no matter how many times the
     // brief is pasted, mirroring TmuxBackend's never-lands case.
