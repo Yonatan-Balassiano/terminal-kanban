@@ -10,6 +10,7 @@ import type {
   BackendSessionInfo,
   CreateSessionOpts,
   GetBufferResult,
+  RedeliverPromptOptions,
   SessionBackend,
   SessionBackendType,
   SessionRecord,
@@ -2044,7 +2045,10 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     // Act
     const delivered = await manager.redeliverInitialPrompt(task.id);
 
-    // Assert
+    // Assert — and it is the one caller that opts into skipping the paste
+    // when this same brief is already sitting on the pane: its text is the
+    // card's stored brief, so a copy on screen is a re-send, not a new
+    // message. Notify must not pass this; see its own suite.
     expect(delivered).toBe(true);
     expect(redeliverPrompt).toHaveBeenCalledWith(
       task.id,
@@ -2052,6 +2056,7 @@ describe('SessionManager.redeliverInitialPrompt', () => {
       'ab_task_1234',
       'Fix the flaky test.',
       'claude',
+      { skipIfAlreadyOnPane: true },
     );
   });
 
@@ -2231,6 +2236,32 @@ describe('SessionManager.notifyTaskSession', () => {
       'claude',
     );
     expect(sendInput).not.toHaveBeenCalled();
+  });
+
+  it('never asks the backend to skip its paste — a repeated notice must not be dropped', async () => {
+    // Arrange — the same message sent twice, minutes apart, which is the
+    // ordinary shape of a nudge ("still on SEC-1?"). The first copy can still
+    // be on screen when the second arrives; if notify let the backend skip its
+    // paste on that match, the second message would never reach the agent and
+    // this method would report `true` anyway.
+    const redeliverPrompt = vi.fn<
+      [string, 'primary' | 'secondary', string, string, string?, RedeliverPromptOptions?],
+      Promise<boolean>
+    >(async () => true);
+    const task = board.createTask({ title: 'Notify me', repoId: 'repo-1' });
+    const { manager } = makeManager({ redeliverPrompt });
+    await manager.openSession(task.id);
+
+    // Act
+    await manager.notifyTaskSession(task.id, 'Please check SEC-1 progress.');
+    await manager.notifyTaskSession(task.id, 'Please check SEC-1 progress.');
+
+    // Assert — both deliveries went out, neither carrying the skip flag that
+    // is `redeliverInitialPrompt`'s alone.
+    expect(redeliverPrompt).toHaveBeenCalledTimes(2);
+    for (const call of redeliverPrompt.mock.calls) {
+      expect(call[5]?.skipIfAlreadyOnPane).toBeFalsy();
+    }
   });
 
   it('returns false honestly when the paste never verified, instead of a hardcoded true', async () => {
