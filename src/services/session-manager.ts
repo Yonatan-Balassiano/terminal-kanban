@@ -3,6 +3,7 @@ import { homedir } from 'os';
 import type {
   AgentCLI,
   AgentPermissionMode,
+  AttentionItem,
   BackendSessionInfo,
   FleetSessionStatus,
   SessionRecord,
@@ -57,6 +58,7 @@ interface SessionRow {
   branch: string | null;
   last_heartbeat: number | null;
   last_buffer_snapshot: string | null;
+  initial_prompt_delivered: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -139,6 +141,8 @@ function rowToRecord(row: SessionRow): SessionRecord {
     branch: row.branch ?? undefined,
     lastHeartbeat: row.last_heartbeat ?? undefined,
     lastBufferSnapshot: row.last_buffer_snapshot ?? undefined,
+    initialPromptDelivered:
+      row.initial_prompt_delivered === null ? undefined : row.initial_prompt_delivered === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -567,6 +571,7 @@ export class SessionManager {
       agentSessionId,
       initialPrompt: taskRow.initial_prompt ?? undefined,
       sessionName: taskRow.session_name ?? undefined,
+      onDeliveryResult: (delivered) => this.persistDeliveryOutcome(taskId, slot, delivered),
     };
     const createdSession = await backend.create(createOpts);
     const sessionRecord: SessionRecord = {
@@ -883,13 +888,33 @@ export class SessionManager {
       throw new Error(`${session.backendType} sessions do not support re-delivering the initial prompt.`);
     }
 
-    return backend.redeliverPrompt(
+    const delivered = await backend.redeliverPrompt(
       taskId,
       slot,
       session.backendSessionId,
       taskRow.initial_prompt,
       taskRow.agent_cli ?? undefined,
     );
+    this.persistDeliveryOutcome(taskId, slot, delivered);
+    return delivered;
+  }
+
+  /**
+   * Records whether the initial brief's paste was ever verified — the one
+   * signal `agentboard fleet`'s DELIVERY column and `getAttentionItems` read
+   * to tell a genuinely stuck session apart from one that's simply idle.
+   *
+   * Matched by (task, slot) rather than a session row id: the automatic
+   * delivery callback fires from inside `backend.create()`, before this
+   * class has assigned that session its own row id, so there is nothing
+   * else stable to match on at that point.
+   */
+  private persistDeliveryOutcome(taskId: string, slot: SessionSlot, delivered: boolean): void {
+    this.db
+      .prepare<[number, number, string, SessionSlot], void>(
+        `UPDATE sessions SET initial_prompt_delivered = ?, updated_at = ? WHERE task_id = ? AND slot = ?`,
+      )
+      .run(delivered ? 1 : 0, Date.now(), taskId, slot);
   }
 
   async resizeSession(
@@ -1421,11 +1446,63 @@ export class SessionManager {
         isBusy: activity?.isBusy ?? false,
         attentionNeeded: task?.sessionAttentionNeeded ?? false,
         trustPromptShowing,
+        delivered: session.initialPromptDelivered ?? null,
         createdAt: session.createdAt,
       });
     }
 
     return results;
+  }
+
+  /**
+   * Every card that wants a human right now, one reason each — the "poke N
+   * commands to find out what's waiting on me" problem `getFleetStatus`
+   * already solved for liveness, extended to attention.
+   *
+   * Task-driven, not session-driven: `getFleetStatus` only iterates *live*
+   * sessions, but a subtask's PR can open, or a reviewer can request
+   * changes, after the parent's own session has already ended — those cards
+   * still need to show up here. Session-level signals (delivery, the trust
+   * prompt) are cross-referenced from `getFleetStatus`'s own output, keyed
+   * by task id, rather than re-deriving them.
+   */
+  async getAttentionItems(): Promise<AttentionItem[]> {
+    const fleetByTaskId = new Map(
+      (await this.getFleetStatus()).map((row) => [row.taskId, row] as const)
+    );
+
+    const items: AttentionItem[] = [];
+    for (const task of this.board.getTasks()) {
+      if (task.archivedAt != null || task.trackId === 'done') {
+        continue;
+      }
+
+      const fleet = fleetByTaskId.get(task.id);
+      const reason =
+        fleet?.delivered === false
+          ? 'delivery unsubmitted'
+          : fleet?.trustPromptShowing
+            ? 'trust prompt showing'
+            : task.reviewState === 'changes_requested'
+              ? 'reviewer requested changes'
+              : task.childPrAlertTaskId
+                ? `subtask PR opened${this.describeChildPr(task.childPrAlertTaskId)}`
+                : task.sessionAttentionNeeded
+                  ? 'finished, waiting on you'
+                  : null;
+
+      if (reason) {
+        items.push({ taskId: task.id, taskTitle: task.title, reason });
+      }
+    }
+
+    return items;
+  }
+
+  /** " — #<pr>" when the alerting child's own PR number is known, else "". */
+  private describeChildPr(childTaskId: string): string {
+    const prNumber = this.board.getTask(childTaskId)?.prNumber;
+    return prNumber ? ` — #${prNumber}` : '';
   }
 
   // ---- heartbeat -------------------------------------------

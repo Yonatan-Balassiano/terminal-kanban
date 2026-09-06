@@ -356,9 +356,14 @@ export class SshTmuxBackend implements SessionBackend {
           remoteBriefFile,
           opts.agentCli,
           opts.initialPrompt,
-        ).catch(() => {
-          // Best-effort; nowhere useful to surface a failure from here.
-        });
+        )
+          .then((delivered) => {
+            opts.onDeliveryResult?.(delivered);
+          })
+          .catch(() => {
+            // Best-effort; nowhere useful to surface a failure from here.
+            opts.onDeliveryResult?.(false);
+          });
       }
     }
 

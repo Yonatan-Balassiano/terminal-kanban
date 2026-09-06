@@ -673,6 +673,11 @@ export async function dispatch(
         return { id: req.id, result: { sessions } };
       }
 
+      case 'getAttentionItems': {
+        const items = await services.session.getAttentionItems();
+        return { id: req.id, result: { items } };
+      }
+
       case 'watchSessionUpdates':
         // Handled at connection level so each client can watch a different task.
         return { id: req.id, result: { watchingTaskId: p['taskId'] ?? null } };

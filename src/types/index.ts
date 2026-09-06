@@ -245,6 +245,13 @@ export interface SessionRecord {
   branch?: string;
   lastHeartbeat?: number;
   lastBufferSnapshot?: string;
+  /**
+   * Whether the initial brief's paste was ever verified on screen before
+   * being submitted — undefined means no delivery attempt has run yet.
+   * `false` means it's still sitting unsubmitted; see
+   * `redeliverInitialPrompt`.
+   */
+  initialPromptDelivered?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -394,6 +401,15 @@ export interface CreateSessionOpts {
    * into a resumed conversation would re-run work the agent already did.
    */
   initialPrompt?: string;
+  /**
+   * Reports whether the automatic initial-prompt delivery (paste + retry
+   * inside `create()`) was ever verified on screen — the one delivery path
+   * `SessionManager` cannot observe directly, since it's fire-and-forget on
+   * purpose (see `deliverInitialPrompt`'s own comment on why). Backends that
+   * deliver via paste call this once delivery settles, success or failure;
+   * backends with nothing to deliver (no `initialPrompt`) never call it.
+   */
+  onDeliveryResult?: (delivered: boolean) => void;
 }
 
 export interface AttachMetadata {
@@ -443,7 +459,24 @@ export interface FleetSessionStatus {
    * Only ever set for tmux/ssh sessions — PTY has no separate pane to check.
    */
   trustPromptShowing: boolean;
+  /**
+   * Whether the initial brief's paste was ever verified on screen — `null`
+   * means no delivery attempt has run yet (or this backend doesn't track
+   * it), `false` means it's sitting unsubmitted and `redeliverInitialPrompt`
+   * is the fix.
+   */
+  delivered: boolean | null;
   createdAt: number;
+}
+
+/**
+ * One task that wants a human right now, and the single most-actionable
+ * reason why — see `SessionManager.getAttentionItems`'s priority order.
+ */
+export interface AttentionItem {
+  taskId: string;
+  taskTitle: string;
+  reason: string;
 }
 
 export interface BackendHealth {
@@ -511,6 +544,7 @@ export type RPCMethod =
   | 'notifyTaskSession'
   | 'redeliverInitialPrompt'
   | 'getFleetStatus'
+  | 'getAttentionItems'
   | 'watchSessionUpdates'
   | 'resizeSession'
   | 'getBuffer'

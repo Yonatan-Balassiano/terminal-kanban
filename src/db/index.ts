@@ -249,6 +249,9 @@ function applyAdditiveMigrations(db: Db): void {
   ensureColumn(db, 'tasks', 'parent_task_id', 'TEXT');
   ensureColumn(db, 'tasks', 'child_pr_alert_task_id', 'TEXT');
   ensureColumn(db, 'tasks', 'session_name', 'TEXT');
+  // Tri-state: NULL = no delivery attempt yet, 1 = verified and submitted,
+  // 0 = pasted but never verified (see pane-idle.ts's pasteAndVerify).
+  ensureColumn(db, 'sessions', 'initial_prompt_delivered', 'INTEGER');
 
   // Run after the column migrations: both tables have foreign keys into tasks,
   // which the rebuild above may have just replaced.

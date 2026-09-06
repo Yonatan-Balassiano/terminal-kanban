@@ -245,9 +245,11 @@ describe('TmuxBackend brief handling', () => {
     typed: string;
     longestLiteral: number;
     calls: string[][];
+    deliveryResults: boolean[];
   }> {
     const literals: string[] = [];
     const calls: string[][] = [];
+    const deliveryResults: boolean[] = [];
     let capturesSincePaste = 0;
     let pasted = false;
     // The new paste-verification step's own capture-pane call is answered
@@ -309,6 +311,7 @@ describe('TmuxBackend brief handling', () => {
       usesWorktree: false,
       sessionBootstrapScript: '/tmp/bootstrap.sh',
       initialPrompt,
+      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
     });
 
     // Delivery is fire-and-forget now (create() must not block its caller for
@@ -318,6 +321,7 @@ describe('TmuxBackend brief handling', () => {
 
     return {
       typed: literals.join(''),
+      deliveryResults,
       longestLiteral: literals.reduce((max, literal) => Math.max(max, literal.length), 0),
       calls,
     };
@@ -367,7 +371,10 @@ describe('TmuxBackend brief handling', () => {
     const brief = 'Fix $HOME "now"\nsecond line';
 
     // Act
-    const { calls } = await createWithBrief(brief);
+    const { calls, deliveryResults } = await createWithBrief(brief);
+
+    // Assert — the fire-and-forget onDeliveryResult callback reports success.
+    expect(deliveryResults).toEqual([true]);
 
     // Assert — capture-pane runs before the paste, and the paste comes from a
     // loaded buffer (never `send-keys -l`, which would submit after line one).
@@ -454,6 +461,7 @@ describe('TmuxBackend brief handling', () => {
     });
 
     // Act
+    const deliveryResults: boolean[] = [];
     await backend.create({
       taskId: 'never-lands',
       taskTitle: 'Never lands',
@@ -466,6 +474,7 @@ describe('TmuxBackend brief handling', () => {
       usesWorktree: false,
       sessionBootstrapScript: '/tmp/bootstrap.sh',
       initialPrompt: 'This never renders on the pane.',
+      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -473,6 +482,7 @@ describe('TmuxBackend brief handling', () => {
     // bootstrap command's own Enter is the only one sent, since submitting
     // unverified content is exactly the failure this guards against.
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
+    expect(deliveryResults).toEqual([false]);
     expect(enterCalls(calls)).toHaveLength(1);
   });
 });

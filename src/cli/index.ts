@@ -198,7 +198,18 @@ function printFleetTable(sessions: import('../types/index.js').FleetSessionStatu
     return;
   }
 
-  const header = ['TASK', 'TITLE', 'SLOT', 'BACKEND', 'STATUS', 'BUSY', 'ATTENTION', 'TRUST-PROMPT', 'AGE'];
+  const header = [
+    'TASK',
+    'TITLE',
+    'SLOT',
+    'BACKEND',
+    'STATUS',
+    'BUSY',
+    'ATTENTION',
+    'TRUST-PROMPT',
+    'DELIVERY',
+    'AGE',
+  ];
   const rows = sessions.map((s) => [
     s.taskId,
     s.taskTitle,
@@ -208,6 +219,7 @@ function printFleetTable(sessions: import('../types/index.js').FleetSessionStatu
     s.isBusy ? 'yes' : 'no',
     s.attentionNeeded ? 'yes' : 'no',
     s.trustPromptShowing ? 'STUCK' : '-',
+    s.delivered === null ? '-' : s.delivered ? 'verified' : 'UNSUBMITTED',
     formatFleetAge(Date.now() - s.createdAt),
   ]);
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
@@ -224,6 +236,32 @@ function printFleetTable(sessions: import('../types/index.js').FleetSessionStatu
       `\n${stuck.length} session(s) stuck on the trust prompt — this should self-resolve; if it doesn't, attach and accept it by hand.`,
     );
   }
+
+  const undelivered = sessions.filter((s) => s.delivered === false);
+  if (undelivered.length > 0) {
+    console.log(
+      `\n${undelivered.length} session(s) have an unsubmitted brief — run \`agentboard task redeliver-prompt <id>\` to nudge them.`,
+    );
+  }
+}
+
+/** Renders `getAttentionItems`'s rows — one line per card, one reason each. */
+function printAttentionTable(items: import('../types/index.js').AttentionItem[]): void {
+  if (items.length === 0) {
+    console.log('Nothing needs you right now.');
+    return;
+  }
+
+  const header = ['TASK', 'WHY'];
+  const rows = items.map((item) => [item.taskTitle, item.reason]);
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
+  const fmt = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i])).join('  ');
+  console.log(fmt(header));
+  console.log(widths.map((w) => '-'.repeat(w)).join('  '));
+  for (const row of rows) {
+    console.log(fmt(row));
+  }
+  console.log(`\n${items.length} card(s) need you.`);
 }
 
 function formatFleetAge(ms: number): string {
@@ -646,6 +684,36 @@ export function buildCli(): Command {
           console.log(JSON.stringify(sessions, null, 2));
         } else {
           printFleetTable(sessions);
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------
+  // attention
+  // ----------------------------------------------------------
+  program
+    .command('attention')
+    .description(
+      'List every card that wants a human right now, and why — replaces checking the badge, the PR picker, and fleet separately',
+    )
+    .option('--json', 'Output as JSON')
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+        const { items } = await rpc.call<{
+          items: import('../types/index.js').AttentionItem[];
+        }>('getAttentionItems');
+        rpc.disconnect();
+
+        if (opts.json) {
+          console.log(JSON.stringify(items, null, 2));
+        } else {
+          printAttentionTable(items);
         }
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);

@@ -526,6 +526,124 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
   });
 });
 
+describe('SshTmuxBackend.create initial delivery result', () => {
+  it('reports true via onDeliveryResult once the automatic paste verifies', async () => {
+    // Arrange
+    let pasted = false;
+    const backend = new SshTmuxBackend({
+      transport: {
+        host: 'test.host',
+        id: 'ssh:test.host',
+        isRemote: true,
+        exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+        exists: vi.fn(async () => true),
+        mkdirp: vi.fn(async () => undefined),
+        removeDir: vi.fn(async () => undefined),
+        writeFileIfChanged: vi.fn(async () => true),
+        reachability: vi.fn(async () => 'ok' as const),
+      } as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        if (args[0] === 'has-session') {
+          throw new Error('missing');
+        }
+        if (args[0] === 'paste-buffer') {
+          pasted = true;
+        }
+        if (args[0] === 'capture-pane' && pasted) {
+          return ok('Ship the thing.');
+        }
+        return ok();
+      },
+      localRunner: async (args) => {
+        if (args[0] === 'has-session') {
+          throw new Error('missing');
+        }
+        return ok();
+      },
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 0,
+      },
+    });
+
+    // Act
+    const deliveryResults: boolean[] = [];
+    await backend.create({
+      ...createOpts(),
+      initialPrompt: 'Ship the thing.',
+      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert
+    expect(deliveryResults).toEqual([true]);
+  });
+
+  it('reports false via onDeliveryResult when the pasted text never renders', async () => {
+    // Arrange
+    const backend = new SshTmuxBackend({
+      transport: {
+        host: 'test.host',
+        id: 'ssh:test.host',
+        isRemote: true,
+        exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+        exists: vi.fn(async () => true),
+        mkdirp: vi.fn(async () => undefined),
+        removeDir: vi.fn(async () => undefined),
+        writeFileIfChanged: vi.fn(async () => true),
+        reachability: vi.fn(async () => 'ok' as const),
+      } as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        if (args[0] === 'has-session') {
+          throw new Error('missing');
+        }
+        return ok();
+      },
+      localRunner: async (args) => {
+        if (args[0] === 'has-session') {
+          throw new Error('missing');
+        }
+        return ok();
+      },
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 0,
+        pasteVerifyTimeoutMs: 0,
+        pasteVerifyIntervalMs: 0,
+        maxPasteAttempts: 3,
+      },
+    });
+
+    // Act
+    const deliveryResults: boolean[] = [];
+    await backend.create({
+      ...createOpts(),
+      initialPrompt: 'This never renders on the pane.',
+      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert
+    expect(deliveryResults).toEqual([false]);
+  });
+});
+
 describe('SshTmuxBackend auto-trust', () => {
   it('accepts a never-trusted-folder prompt (Down, then Enter) before delivering the brief', async () => {
     // Arrange — the remote pane shows the real trust screen until Down is

@@ -2412,4 +2412,213 @@ describe('SessionManager.getFleetStatus', () => {
     // Assert
     expect(fleet).toEqual([]);
   });
+
+  it('reports delivered as null until a delivery attempt has actually run', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Fresh session', repoId: 'repo-1' });
+    const { manager } = makeManager();
+    await manager.openSession(task.id);
+
+    // Act
+    const fleet = await manager.getFleetStatus();
+
+    // Assert
+    expect(fleet[0]?.delivered).toBeNull();
+  });
+
+  it('reflects a redelivered prompt\'s real outcome, not a hardcoded value', async () => {
+    // Arrange
+    const redeliverPrompt = vi.fn<
+      [string, 'primary' | 'secondary', string, string, string?],
+      Promise<boolean>
+    >(async () => false);
+    const task = board.createTask({
+      title: 'Needs a nudge',
+      repoId: 'repo-1',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    const { manager } = makeManager({ redeliverPrompt });
+    await manager.openSession(task.id);
+
+    // Act
+    await manager.redeliverInitialPrompt(task.id);
+    const fleet = await manager.getFleetStatus();
+
+    // Assert
+    expect(fleet[0]?.delivered).toBe(false);
+  });
+});
+
+describe('SessionManager.getAttentionItems', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function makeManager(backendOverrides: Partial<SessionBackend> = {}) {
+    const create = vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+      id: 'session-1',
+      taskId: opts.taskId,
+      backendType: 'tmux',
+      backendSessionId: `ab_${opts.taskId}_p`,
+      status: 'active',
+      cwd: opts.cwd ?? opts.repoPath,
+      branch: opts.branch,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+
+    const backend: SessionBackend = {
+      create,
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({ command: '' })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+      ...backendOverrides,
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend
+    );
+
+    return { manager, backend };
+  }
+
+  it('surfaces a task whose live session just finished, with no other signal present', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'Just finished', repoId: 'repo-1' });
+    const { manager } = makeManager();
+    await manager.openSession(task.id);
+    board.setTaskSessionAttention(task.id);
+
+    // Act
+    const items = await manager.getAttentionItems();
+
+    // Assert
+    expect(items).toEqual([
+      { taskId: task.id, taskTitle: 'Just finished', reason: 'finished, waiting on you' },
+    ]);
+  });
+
+  it('surfaces a task whose reviewer requested changes, even with no live session', async () => {
+    // Arrange — no openSession call: this reason is task-level, not session-level.
+    const task = board.createTask({ title: 'Needs rework', repoId: 'repo-1' });
+    board.updateTaskSync(task.id, { reviewState: 'changes_requested' });
+    const { manager } = makeManager();
+
+    // Act
+    const items = await manager.getAttentionItems();
+
+    // Assert
+    expect(items).toEqual([
+      { taskId: task.id, taskTitle: 'Needs rework', reason: 'reviewer requested changes' },
+    ]);
+  });
+
+  it('surfaces a subtask PR alert, naming the PR number when the child card has one', async () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Parent card', repoId: 'repo-1' });
+    const child = board.createTask({ title: 'Subtask', repoId: 'repo-1', parentTaskId: parent.id });
+    board.updateTaskSync(child.id, { prNumber: 1495, prState: 'open' });
+    board.setChildPrAlert(parent.id, child.id);
+    const { manager } = makeManager();
+
+    // Act
+    const items = await manager.getAttentionItems();
+
+    // Assert
+    expect(items).toContainEqual({
+      taskId: parent.id,
+      taskTitle: 'Parent card',
+      reason: 'subtask PR opened — #1495',
+    });
+  });
+
+  it('surfaces a delivery-unsubmitted session ahead of a lower-priority reason on the same card', async () => {
+    // Arrange — both a stuck delivery and a finished-session flag are true;
+    // delivery unsubmitted is the more actionable, so it wins.
+    const redeliverPrompt = vi.fn<
+      [string, 'primary' | 'secondary', string, string, string?],
+      Promise<boolean>
+    >(async () => false);
+    const task = board.createTask({
+      title: 'Stuck and idle',
+      repoId: 'repo-1',
+      initialPrompt: 'Do the thing.',
+    });
+    const { manager } = makeManager({ redeliverPrompt });
+    await manager.openSession(task.id);
+    board.setTaskSessionAttention(task.id);
+    await manager.redeliverInitialPrompt(task.id);
+
+    // Act
+    const items = await manager.getAttentionItems();
+
+    // Assert
+    expect(items).toEqual([
+      { taskId: task.id, taskTitle: 'Stuck and idle', reason: 'delivery unsubmitted' },
+    ]);
+  });
+
+  it('excludes a task that has already reached done', async () => {
+    // Arrange
+    const task = board.createTask({ title: 'All wrapped up', repoId: 'repo-1' });
+    board.updateTaskSync(task.id, { reviewState: 'changes_requested' });
+    board.moveTask({ id: task.id, trackId: 'done' });
+    const { manager } = makeManager();
+
+    // Act
+    const items = await manager.getAttentionItems();
+
+    // Assert
+    expect(items).toEqual([]);
+  });
+
+  it('returns nothing when no card needs a human', async () => {
+    // Arrange
+    board.createTask({ title: 'Quietly running', repoId: 'repo-1' });
+    const { manager } = makeManager();
+
+    // Act
+    const items = await manager.getAttentionItems();
+
+    // Assert
+    expect(items).toEqual([]);
+  });
 });

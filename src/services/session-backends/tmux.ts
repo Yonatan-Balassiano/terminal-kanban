@@ -242,12 +242,17 @@ export class TmuxBackend implements SessionBackend {
           initialPromptFile,
           opts.agentCli,
           opts.initialPrompt,
-        ).catch(() => {
-          // Best-effort: a failure here leaves the brief typed but unsubmitted
-          // in the pane, same as the fixed-delay version before this always
-          // risked — there is nowhere useful to surface it from inside a
-          // detached backend call.
-        });
+        )
+          .then((delivered) => {
+            opts.onDeliveryResult?.(delivered);
+          })
+          .catch(() => {
+            // Best-effort: a failure here leaves the brief typed but unsubmitted
+            // in the pane, same as the fixed-delay version before this always
+            // risked — there is nowhere useful to surface it from inside a
+            // detached backend call.
+            opts.onDeliveryResult?.(false);
+          });
       }
     }
 
