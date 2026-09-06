@@ -312,6 +312,20 @@ export interface BoardSnapshot {
 
 // --------------- Session backend abstraction ----------------
 
+export interface RedeliverPromptOptions {
+  /**
+   * Let the delivery skip its paste when `prompt`'s own opening is already on
+   * the pane, and still send the Enter.
+   *
+   * Defaults to false — always paste. Only a caller re-sending text the pane
+   * was already given (`SessionManager.redeliverInitialPrompt`, whose text is
+   * the card's stored brief) may set it; see
+   * `PasteVerifyOptions.skipIfAlreadyOnPane` in `pane-idle.ts` for why a
+   * notify must not.
+   */
+  skipIfAlreadyOnPane?: boolean;
+}
+
 export interface SessionBackend {
   create(opts: CreateSessionOpts): Promise<SessionRecord>;
   attachMetadata(backendSessionId: string): Promise<AttachMetadata>;
@@ -345,6 +359,12 @@ export interface SessionBackend {
    * was sent to submit it, `false` when the paste never verified — in which
    * case nothing was submitted, and whatever is on screen is left as-is
    * rather than risking a mangled fragment.
+   *
+   * `options.skipIfAlreadyOnPane` is what tells those two callers apart, since
+   * nothing else about the call does: only a re-send of text the pane was
+   * already given may skip its paste when that text is still on screen. See
+   * `PasteVerifyOptions.skipIfAlreadyOnPane` in `pane-idle.ts` — for a notify,
+   * whose text is a brand-new message, skipping drops it and reports success.
    */
   redeliverPrompt?(
     taskId: string,
@@ -352,6 +372,7 @@ export interface SessionBackend {
     backendSessionId: string,
     prompt: string,
     agentCli?: string,
+    options?: RedeliverPromptOptions,
   ): Promise<boolean>;
   /**
    * A one-shot snapshot of a live pane's rendered content, for detecting a

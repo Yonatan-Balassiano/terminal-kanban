@@ -856,6 +856,11 @@ export class SessionManager {
     }
 
     const taskRow = this.loadTaskRow(taskId);
+    // No `skipIfAlreadyOnPane`: `message` is new text this pane was never
+    // given, so a marker match means a stale copy of an earlier notice still
+    // on screen — or merely a message that starts the same way — and skipping
+    // would drop this one while reporting `true`. Always paste. Stacking is
+    // `DeliveryGuard`'s job, and it still applies.
     return backend.redeliverPrompt(
       taskId,
       slot,
@@ -878,8 +883,10 @@ export class SessionManager {
    * surface.
    *
    * Safe to run twice: the backends refuse to start a second delivery into a
-   * pane that already has one in flight, and skip the paste entirely when this
-   * brief is already sitting on screen (`DeliveryGuard` and `pasteAndVerify`).
+   * pane that already has one in flight (`DeliveryGuard`), and this call —
+   * alone among the two, since its text is identical by construction — asks
+   * `pasteAndVerify` to skip the paste entirely when this brief is already
+   * sitting on screen.
    * Like notify, it can take minutes — see `pane-idle.ts`'s `deliveryBudgetMs`
    * and the timeout `src/cli/rpc.ts` derives from it.
    */
@@ -905,6 +912,11 @@ export class SessionManager {
       session.backendSessionId,
       taskRow.initial_prompt,
       taskRow.agent_cli ?? undefined,
+      // The one caller allowed to skip its paste: this text is the card's
+      // stored brief, so a copy already on the pane *is* this same brief from
+      // an earlier run, unsubmitted. Re-pasting would stack a duplicate under
+      // it; the Enter below is the half that was missing.
+      { skipIfAlreadyOnPane: true },
     );
     this.persistDeliveryOutcome(taskId, slot, delivered);
     return delivered;

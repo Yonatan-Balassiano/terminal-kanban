@@ -622,13 +622,47 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
       paneIdleOptions: IDLE_OPTIONS,
     });
 
-    // Act
-    const delivered = await backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
+    // Act — `skipIfAlreadyOnPane` is what `SessionManager.redeliverInitialPrompt`
+    // passes, and only it: the text is the card's stored brief, so a copy on
+    // screen is this same brief from an earlier run.
+    const delivered = await backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT, undefined, {
+      skipIfAlreadyOnPane: true,
+    });
 
     // Assert — nothing pasted, but the Enter the earlier run never landed is
     // sent, which is the whole point of re-running the command.
     expect(delivered).toBe(true);
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
+    expect(enterCalls(calls)).toHaveLength(1);
+  });
+
+  it('pastes a repeated notify even with the same text still on the pane', async () => {
+    // Arrange — the notify path, which is the same backend call without
+    // `skipIfAlreadyOnPane`. `agentboard task notify <id> "..."` run twice a
+    // couple of minutes apart is the ordinary shape of a nudge, and the first
+    // copy is usually still on the visible screen `capture-pane -p` reads.
+    // Skipping the paste there drops the message and still reports `true`.
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'capture-pane') {
+        return { stdout: `> ${PROMPT}`, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: IDLE_OPTIONS,
+    });
+
+    // Act — no options at all, exactly as `notifyTaskSession` calls it.
+    const delivered = await backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
+
+    // Assert — the message was actually pasted and submitted.
+    expect(delivered).toBe(true);
+    expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
     expect(enterCalls(calls)).toHaveLength(1);
   });
 

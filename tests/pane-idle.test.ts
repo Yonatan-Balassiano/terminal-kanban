@@ -70,9 +70,9 @@ describe('pasteAndVerify', () => {
   });
 
   it('does not paste again when the same brief is already sitting on the pane', async () => {
-    // Arrange — the duplicate-run case. A second paste would stack a copy
-    // underneath the first rather than replace it; that is what left one pane
-    // holding 20 unsubmitted fragments.
+    // Arrange — the duplicate-run case, which only a redelivery opts into. A
+    // second paste would stack a copy underneath the first rather than replace
+    // it; that is what left one pane holding 20 unsubmitted fragments.
     const pane = `❯ ${BRIEF}`;
     let pastes = 0;
 
@@ -83,7 +83,7 @@ describe('pasteAndVerify', () => {
       },
       async () => pane,
       pasteMarker(BRIEF),
-      FAST,
+      { ...FAST, skipIfAlreadyOnPane: true },
     );
 
     // Assert — the caller still submits on 'already-present', so a repeat run
@@ -105,12 +105,37 @@ describe('pasteAndVerify', () => {
       },
       async () => pane,
       pasteMarker(BRIEF),
-      FAST,
+      { ...FAST, skipIfAlreadyOnPane: true },
     );
 
     // Assert
     expect(outcome).toBe('already-present');
     expect(pastes).toBe(0);
+  });
+
+  it('pastes anyway when the caller did not opt into skipping — a notify must never be dropped', async () => {
+    // Arrange — the same pane as the test above, reached by the other caller.
+    // For a notify the text is a *new* message, so a marker match is a stale
+    // copy of an earlier notice (or a different message sharing its first 24
+    // characters), not a re-send of something already waiting to be submitted.
+    // Skipping it would drop the message and report success.
+    let pane = `❯ ${BRIEF}`;
+    let pastes = 0;
+
+    // Act — no skipIfAlreadyOnPane, which is the default.
+    const outcome = await pasteAndVerify(
+      async () => {
+        pastes += 1;
+        pane += `\n❯ ${BRIEF}`;
+      },
+      async () => pane,
+      pasteMarker(BRIEF),
+      FAST,
+    );
+
+    // Assert
+    expect(outcome).toBe('pasted');
+    expect(pastes).toBe(1);
   });
 
   it('still pastes when there is no marker to recognise — every pane "contains" an empty one', async () => {
@@ -150,6 +175,28 @@ describe('pasteAndVerify', () => {
     // Assert — one paste, not three, and nothing gets submitted on 'unverified'.
     expect(outcome).toBe('unverified');
     expect(pastes).toBe(1);
+  });
+
+  it('still retries on a pane that was already moving on its own before the paste', async () => {
+    // Arrange — an agent mid-generation, which is the normal state for a
+    // notify. Every capture differs from the last whether or not the paste
+    // landed, so the post-paste "the pane changed" check carries no
+    // information about the paste and must not cut the retry loop short.
+    // `waitForStablePane` runs earlier but returns on its timeout too, so it
+    // does not guarantee a still pane here.
+    let tick = 0;
+    const capture = async () => `thinking… ${(tick += 1)}`;
+    let pastes = 0;
+    const paste = async () => {
+      pastes += 1;
+    };
+
+    // Act — the paste is swallowed whole, so the marker never appears.
+    const outcome = await pasteAndVerify(paste, capture, pasteMarker(BRIEF), FAST);
+
+    // Assert — all three attempts spent, not one.
+    expect(outcome).toBe('unverified');
+    expect(pastes).toBe(3);
   });
 
   it('still retries when the paste left no trace at all — re-pasting stacks nothing there', async () => {

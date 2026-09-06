@@ -5,6 +5,7 @@ import type {
   BackendHealth,
   BackendSessionInfo,
   CreateSessionOpts,
+  RedeliverPromptOptions,
   SessionBackend,
   SessionRecord,
   SessionSlot,
@@ -315,10 +316,11 @@ export class TmuxBackend implements SessionBackend {
     briefFile: string,
     agentCli?: string,
     promptText?: string,
+    skipIfAlreadyOnPane = false,
   ): Promise<boolean> {
     // Never two at once into the same pane — see {@link DeliveryGuard}.
     return this.deliveries.run(backendSessionId, promptText ?? '', () =>
-      this.deliverToPane(backendSessionId, briefFile, agentCli, promptText),
+      this.deliverToPane(backendSessionId, briefFile, agentCli, promptText, skipIfAlreadyOnPane),
     );
   }
 
@@ -328,6 +330,7 @@ export class TmuxBackend implements SessionBackend {
     briefFile: string,
     agentCli?: string,
     promptText?: string,
+    skipIfAlreadyOnPane = false,
   ): Promise<boolean> {
     const target = await this.resolveInputTarget(backendSessionId);
     const capture = async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;
@@ -375,11 +378,12 @@ export class TmuxBackend implements SessionBackend {
       },
       capture,
       pasteMarker(promptText ?? ''),
-      this.paneIdleOptions,
+      { ...this.paneIdleOptions, skipIfAlreadyOnPane },
     );
     // 'already-present' pasted nothing on purpose — this brief is still
     // sitting on the pane from an earlier run — but the text is there, so it
-    // still wants the Enter the earlier run never got to send.
+    // still wants the Enter the earlier run never got to send. Only a
+    // redelivery ever reaches it; a notify always pastes.
     if (outcome === 'unverified') {
       // Whatever is on screen is unverified — do not submit it. Leaving it
       // sitting there is a state `redeliverInitialPrompt` already knows how
@@ -409,9 +413,16 @@ export class TmuxBackend implements SessionBackend {
     backendSessionId: string,
     prompt: string,
     agentCli?: string,
+    options: RedeliverPromptOptions = {},
   ): Promise<boolean> {
     const briefFile = writeLocalBrief(taskId, slot, prompt);
-    return this.deliverInitialPrompt(backendSessionId, briefFile, agentCli, prompt);
+    return this.deliverInitialPrompt(
+      backendSessionId,
+      briefFile,
+      agentCli,
+      prompt,
+      options.skipIfAlreadyOnPane ?? false,
+    );
   }
 
   async peekPane(backendSessionId: string): Promise<string> {

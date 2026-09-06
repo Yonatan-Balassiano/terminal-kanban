@@ -290,29 +290,49 @@ export async function waitForPasteToLand(
 /**
  * What a delivery attempt did about getting its text onto the pane.
  *
- * `already-present` is not a failure — it is the duplicate-run case, and the
- * one outcome that must never paste again; see {@link pasteAndVerify}.
+ * `already-present` is not a failure — it is the duplicate-run case, reached
+ * only when a caller opted into
+ * {@link PasteVerifyOptions.skipIfAlreadyOnPane}, and the one outcome that
+ * pasted nothing; see {@link pasteAndVerify}.
  */
 export type PasteOutcome = 'pasted' | 'already-present' | 'unverified';
+
+export interface PasteVerifyOptions extends PaneIdleWaitOptions {
+  /**
+   * Skip the paste entirely when the pane already shows this text's own
+   * opening, and report `already-present`.
+   *
+   * Only ever true for a *re-send of text the pane was already given* —
+   * `SessionManager.redeliverInitialPrompt`, whose text is the card's stored
+   * brief and so identical by construction. There, the match means an earlier
+   * delivery of that same brief is still sitting there unsubmitted, a second
+   * paste would stack a duplicate copy underneath the first rather than
+   * replace it (one pane was left holding 20 stacked fragments, none
+   * submitted), and re-sending was never wanted in the first place: the
+   * caller submits either way, so the repeat run still does the useful half
+   * of the job by pressing Enter on text that was already there.
+   *
+   * Defaults to false, and must stay that way, because the same funnel
+   * carries `notifyTaskSession`, whose text is a *new* message the pane has
+   * never been given. A match there is either a stale copy of an earlier,
+   * already-submitted notice still on screen, or — since the marker is only
+   * {@link PASTE_MARKER_LENGTH} characters — a different message that merely
+   * starts the same way. Skipping then drops the message and reports success,
+   * which is strictly worse than the duplicate paste it avoids. The
+   * protection notify actually needs against stacking is `DeliveryGuard`,
+   * which is concurrency-scoped and applies either way.
+   */
+  skipIfAlreadyOnPane?: boolean;
+}
 
 /**
  * Pastes a brief and confirms its own opening rendered before trusting it —
  * re-pasting (never typing, never guessing content is fine because a fixed
  * delay elapsed) up to `maxPasteAttempts` times.
  *
- * Pastes nothing at all when the pane *already* shows this exact brief's
- * opening: that means an earlier delivery of the same text is already sitting
- * there, and a second paste would stack a duplicate copy underneath the first
- * rather than replace it — the failure that made a timed-out
- * `redeliver-prompt` actively harmful to re-run (one pane was left holding 20
- * stacked fragments, none submitted). The caller submits either way, so a
- * repeat run still does the useful half of the job: it presses Enter on text
- * that was already there.
- *
- * The check is deliberately one-sided. A false positive — the marker matching
- * the same brief already *submitted* and still visible in the scrollback —
- * costs one stray Enter into an idle CLI, which does nothing. A false
- * negative costs exactly the stacked paste this exists to prevent.
+ * With {@link PasteVerifyOptions.skipIfAlreadyOnPane}, pastes nothing at all
+ * when the pane *already* shows this exact text's opening — see that option
+ * for when that is safe and when it silently drops a message.
  *
  * `unverified` means nothing on screen can be trusted; a caller must not
  * submit (send Enter) then, since submitting risks committing exactly the
@@ -324,30 +344,42 @@ export async function pasteAndVerify(
   paste: () => Promise<void>,
   capture: () => Promise<string>,
   marker: string,
-  options: PaneIdleWaitOptions = {},
+  options: PasteVerifyOptions = {},
 ): Promise<PasteOutcome> {
-  const { maxPasteAttempts = DEFAULT_MAX_PASTE_ATTEMPTS } = options;
+  const { maxPasteAttempts = DEFAULT_MAX_PASTE_ATTEMPTS, skipIfAlreadyOnPane = false } = options;
 
   // An empty marker means there is nothing to recognise — every pane
   // "contains" it — so this shortcut has to stay out of the way there.
-  if (marker && normalizeForMatch(await capture()).includes(marker)) {
+  if (skipIfAlreadyOnPane && marker && normalizeForMatch(await capture()).includes(marker)) {
     return 'already-present';
   }
 
   for (let attempt = 0; attempt < maxPasteAttempts; attempt += 1) {
+    // Two captures before the paste, not one. The post-paste comparison below
+    // can only attribute a change to the paste if the pane was otherwise
+    // still; a pane already producing output on its own — an agent
+    // mid-generation, the normal state for a notify — changes between any two
+    // captures, so that comparison would report "something landed" no matter
+    // what the paste did. `waitForStablePane` runs before all this but returns
+    // on its timeout as well as on stability, so it does not guarantee a
+    // static pane here.
+    const settling = await capture();
     const before = await capture();
+    const paneMovesOnItsOwn = before !== settling;
+
     await paste();
     if (await waitForPasteToLand(capture, marker, options)) {
       return 'pasted';
     }
-    if ((await capture()) !== before) {
-      // The pane changed but the brief's own opening is not on it: something
-      // landed, in a shape this cannot recognise — the mangled paste
-      // DEFAULT_PASTE_VERIFY_TIMEOUT_MS describes. Pasting again would stack a
-      // second copy under that mess rather than replace it, so stop here and
-      // report it unverified. Nothing is submitted either way, and an
-      // unsubmitted pane is a state `redeliverInitialPrompt` can still fix; a
-      // pane holding three overlapping copies is much harder to recover.
+    if (!paneMovesOnItsOwn && (await capture()) !== before) {
+      // The pane was still, then changed, and the brief's own opening is not
+      // on it: something landed, in a shape this cannot recognise — the
+      // mangled paste DEFAULT_PASTE_VERIFY_TIMEOUT_MS describes. Pasting again
+      // would stack a second copy under that mess rather than replace it, so
+      // stop here and report it unverified. Nothing is submitted either way,
+      // and an unsubmitted pane is a state `redeliverInitialPrompt` can still
+      // fix; a pane holding three overlapping copies is much harder to
+      // recover.
       //
       // A retry is still worth it when the pane did *not* change, which is the
       // case this loop was added for: a paste swallowed whole by

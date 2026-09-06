@@ -6,6 +6,7 @@ import type {
   BackendHealth,
   BackendSessionInfo,
   CreateSessionOpts,
+  RedeliverPromptOptions,
   SessionBackend,
   SessionRecord,
   SessionSlot,
@@ -459,10 +460,17 @@ export class SshTmuxBackend implements SessionBackend {
     remoteBriefFile: string,
     agentCli?: string,
     promptText?: string,
+    skipIfAlreadyOnPane = false,
   ): Promise<boolean> {
     // Never two at once into the same pane — see {@link DeliveryGuard}.
     return this.deliveries.run(backendSessionId, promptText ?? '', () =>
-      this.deliverToPane(backendSessionId, remoteBriefFile, agentCli, promptText),
+      this.deliverToPane(
+        backendSessionId,
+        remoteBriefFile,
+        agentCli,
+        promptText,
+        skipIfAlreadyOnPane,
+      ),
     );
   }
 
@@ -472,6 +480,7 @@ export class SshTmuxBackend implements SessionBackend {
     remoteBriefFile: string,
     agentCli?: string,
     promptText?: string,
+    skipIfAlreadyOnPane = false,
   ): Promise<boolean> {
     const capture = async () =>
       (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout;
@@ -521,11 +530,12 @@ export class SshTmuxBackend implements SessionBackend {
       },
       capture,
       pasteMarker(promptText ?? ''),
-      this.paneIdleOptions,
+      { ...this.paneIdleOptions, skipIfAlreadyOnPane },
     );
     // 'already-present' pasted nothing on purpose — this brief is still
     // sitting on the pane from an earlier run — but the text is there, so it
-    // still wants the Enter the earlier run never got to send.
+    // still wants the Enter the earlier run never got to send. Only a
+    // redelivery ever reaches it; a notify always pastes.
     if (outcome === 'unverified') {
       // Whatever is on screen is unverified — do not submit it. Leaving it
       // sitting there is a state `redeliverInitialPrompt` already knows how
@@ -553,9 +563,16 @@ export class SshTmuxBackend implements SessionBackend {
     backendSessionId: string,
     prompt: string,
     agentCli?: string,
+    options: RedeliverPromptOptions = {},
   ): Promise<boolean> {
     const remoteBriefFile = await this.ensureRemoteBrief(taskId, slot, prompt);
-    return this.deliverInitialPrompt(backendSessionId, remoteBriefFile, agentCli, prompt);
+    return this.deliverInitialPrompt(
+      backendSessionId,
+      remoteBriefFile,
+      agentCli,
+      prompt,
+      options.skipIfAlreadyOnPane ?? false,
+    );
   }
 
   async peekPane(backendSessionId: string): Promise<string> {

@@ -513,12 +513,75 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
       },
     });
 
-    // Act
-    const delivered = await backend.redeliverPrompt(SESSION_NAME, 'primary', SESSION_NAME, PROMPT);
+    // Act — `skipIfAlreadyOnPane` is `SessionManager.redeliverInitialPrompt`'s
+    // alone; without it this same call pastes (see the notify test below).
+    const delivered = await backend.redeliverPrompt(
+      SESSION_NAME,
+      'primary',
+      SESSION_NAME,
+      PROMPT,
+      undefined,
+      { skipIfAlreadyOnPane: true },
+    );
 
     // Assert — nothing re-pasted, but the missing Enter is still sent.
     expect(delivered).toBe(true);
     expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
+    expect(
+      remoteCalls.filter((args) => args[0] === 'send-keys' && args.includes('Enter')),
+    ).toHaveLength(1);
+  });
+
+  it('pastes a repeated notify even with the same text still on the remote pane', async () => {
+    // Arrange — the notify path, mirroring TmuxBackend's: same call, no
+    // `skipIfAlreadyOnPane`. The text is a new message, not a re-send, so a
+    // marker match must not stop it reaching the agent.
+    const PROMPT = 'Please check SEC-1 progress.';
+    const transport = {
+      host: 'test.host',
+      id: 'ssh:test.host',
+      isRemote: true,
+      exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+      exists: vi.fn(async () => true),
+      mkdirp: vi.fn(async () => undefined),
+      removeDir: vi.fn(async () => undefined),
+      writeFileIfChanged: vi.fn(async () => true),
+      reachability: vi.fn(async () => 'ok' as const),
+    };
+
+    const remoteCalls: string[][] = [];
+    const backend = new SshTmuxBackend({
+      transport: transport as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        remoteCalls.push(args);
+        if (args[0] === 'capture-pane') {
+          return ok(`> ${PROMPT}`);
+        }
+        return ok();
+      },
+      localRunner: async () => ok(),
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 0,
+        pasteVerifyTimeoutMs: 20,
+        pasteVerifyIntervalMs: 1,
+      },
+    });
+
+    // Act — exactly how `notifyTaskSession` calls it.
+    const delivered = await backend.redeliverPrompt(SESSION_NAME, 'primary', SESSION_NAME, PROMPT);
+
+    // Assert — pasted and submitted, not silently skipped.
+    expect(delivered).toBe(true);
+    expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
     expect(
       remoteCalls.filter((args) => args[0] === 'send-keys' && args.includes('Enter')),
     ).toHaveLength(1);
