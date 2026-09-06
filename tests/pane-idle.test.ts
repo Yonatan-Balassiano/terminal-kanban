@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   pasteAndVerify,
   pasteMarker,
+  submitAndVerify,
   waitForForegroundCommand,
 } from '../src/services/session-backends/pane-idle.js';
 
@@ -131,6 +132,42 @@ describe('pasteAndVerify', () => {
     expect(pastes).toBe(1);
   });
 
+  it('stops re-pasting once something has landed on the pane it cannot recognise', async () => {
+    // Arrange — the mangled-paste case: the text lands, but rendered in a
+    // shape the marker cannot match. Pasting again stacks a second copy under
+    // the mess instead of replacing it, which is how a pane ends up holding
+    // several overlapping fragments from a single delivery.
+    let pane = '';
+    let pastes = 0;
+    const paste = async () => {
+      pastes += 1;
+      pane += 'Read /tmp/brief.md \r that file\r';
+    };
+
+    // Act
+    const outcome = await pasteAndVerify(paste, async () => pane, pasteMarker(BRIEF), FAST);
+
+    // Assert — one paste, not three, and nothing gets submitted on 'unverified'.
+    expect(outcome).toBe('unverified');
+    expect(pastes).toBe(1);
+  });
+
+  it('still retries when the paste left no trace at all — re-pasting stacks nothing there', async () => {
+    // Arrange — the case this retry loop was added for: a paste swallowed
+    // whole by bracketed-paste negotiation leaves the pane untouched.
+    let pastes = 0;
+    const paste = async () => {
+      pastes += 1;
+    };
+
+    // Act
+    const outcome = await pasteAndVerify(paste, async () => 'an unchanged pane', pasteMarker(BRIEF), FAST);
+
+    // Assert
+    expect(outcome).toBe('unverified');
+    expect(pastes).toBe(3);
+  });
+
   it('reports unverified, without claiming a paste, when nothing ever renders', async () => {
     // Arrange
     let pastes = 0;
@@ -148,6 +185,49 @@ describe('pasteAndVerify', () => {
     // Assert — the caller must not send Enter on this.
     expect(outcome).toBe('unverified');
     expect(pastes).toBe(3);
+  });
+});
+
+
+describe('submitAndVerify', () => {
+  it('only ever re-sends Enter — the submit-retry loop has no way to paste again', async () => {
+    // Arrange — the pane never acknowledges anything, so every retry is spent.
+    // This is the loop that runs for minutes after a client has given up
+    // waiting, so it is the one that must not be able to add to the pane.
+    const sends: string[] = [];
+
+    // Act
+    await submitAndVerify(
+      async () => 'a pane that never changes',
+      async () => {
+        sends.push('Enter');
+      },
+      { maxSubmitRetries: 20, submitRetryIntervalMs: 0 },
+    );
+
+    // Assert — 21 Enters (the first plus every retry), and nothing else: the
+    // function is not even handed a paste to call.
+    expect(sends).toHaveLength(21);
+    expect(new Set(sends)).toEqual(new Set(['Enter']));
+  });
+
+  it('stops re-sending as soon as the pane reacts', async () => {
+    // Arrange
+    let sends = 0;
+    let pane = 'waiting';
+
+    // Act
+    await submitAndVerify(
+      async () => pane,
+      async () => {
+        sends += 1;
+        pane = 'submitted';
+      },
+      { maxSubmitRetries: 20, submitRetryIntervalMs: 0 },
+    );
+
+    // Assert
+    expect(sends).toBe(1);
   });
 });
 

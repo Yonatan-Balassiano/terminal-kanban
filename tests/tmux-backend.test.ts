@@ -632,6 +632,39 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
     expect(enterCalls(calls)).toHaveLength(1);
   });
 
+  it('never pastes again while the submit loop keeps retrying the Enter', async () => {
+    // Arrange — a pane that takes the paste but never reacts to Enter, so the
+    // submit loop spends its whole budget. That loop outlives the client call
+    // that started it, which is when stray pastes are hardest to attribute:
+    // it must only ever re-send Enter.
+    const calls: string[][] = [];
+    let pasted = false;
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'paste-buffer') {
+        pasted = true;
+      }
+      if (args[0] === 'capture-pane') {
+        return { stdout: pasted ? `> ${PROMPT}` : '', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: { ...IDLE_OPTIONS, maxSubmitRetries: 5 },
+    });
+
+    // Act
+    const delivered = await backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
+
+    // Assert — one paste, six Enters (the first plus five retries).
+    expect(delivered).toBe(true);
+    expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
+    expect(enterCalls(calls)).toHaveLength(6);
+  });
+
   it('joins a delivery already in flight rather than starting a second paste', async () => {
     // Arrange — the original failure: the command looked like it had timed
     // out, so it was run again while the first was still working.

@@ -335,9 +335,25 @@ export async function pasteAndVerify(
   }
 
   for (let attempt = 0; attempt < maxPasteAttempts; attempt += 1) {
+    const before = await capture();
     await paste();
     if (await waitForPasteToLand(capture, marker, options)) {
       return 'pasted';
+    }
+    if ((await capture()) !== before) {
+      // The pane changed but the brief's own opening is not on it: something
+      // landed, in a shape this cannot recognise — the mangled paste
+      // DEFAULT_PASTE_VERIFY_TIMEOUT_MS describes. Pasting again would stack a
+      // second copy under that mess rather than replace it, so stop here and
+      // report it unverified. Nothing is submitted either way, and an
+      // unsubmitted pane is a state `redeliverInitialPrompt` can still fix; a
+      // pane holding three overlapping copies is much harder to recover.
+      //
+      // A retry is still worth it when the pane did *not* change, which is the
+      // case this loop was added for: a paste swallowed whole by
+      // bracketed-paste negotiation leaves no trace, so re-pasting stacks
+      // nothing.
+      return 'unverified';
     }
   }
   return 'unverified';
