@@ -296,6 +296,7 @@ describe('TmuxBackend brief handling', () => {
         submitRetryIntervalMs: options.submitRetryIntervalMs ?? 0,
         // No process name to match in these mocks — skip the foreground-command gate.
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
       },
     });
 
@@ -454,6 +455,7 @@ describe('TmuxBackend brief handling', () => {
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 0,
         pasteVerifyIntervalMs: 0,
         maxPasteAttempts: 3,
@@ -518,6 +520,7 @@ describe('TmuxBackend.redeliverPrompt', () => {
         submitRetryIntervalMs: 0,
         // No process name to match in these mocks — skip the foreground-command gate.
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
       },
     });
 
@@ -564,6 +567,7 @@ describe('TmuxBackend.redeliverPrompt', () => {
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 0,
         pasteVerifyIntervalMs: 0,
         maxPasteAttempts: 3,
@@ -596,6 +600,7 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
     maxSubmitRetries: 0,
     submitRetryIntervalMs: 0,
     foregroundCommandTimeoutMs: 0,
+    trustPromptTimeoutMs: 0,
     pasteVerifyTimeoutMs: 20,
     pasteVerifyIntervalMs: 1,
   };
@@ -772,6 +777,7 @@ describe('TmuxBackend auto-trust', () => {
         submitRetryIntervalMs: 0,
         // No process name to match in these mocks — skip the foreground-command gate.
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
       },
     });
 
@@ -828,6 +834,7 @@ describe('TmuxBackend auto-trust', () => {
         submitRetryIntervalMs: 0,
         // No process name to match in these mocks — skip the foreground-command gate.
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
       },
     });
 
@@ -895,6 +902,8 @@ describe('TmuxBackend auto-trust', () => {
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 1000,
         foregroundCommandIntervalMs: 0,
+        trustPromptTimeoutMs: 1000,
+        trustPromptIntervalMs: 0,
       },
     });
 

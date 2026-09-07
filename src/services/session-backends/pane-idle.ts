@@ -38,6 +38,12 @@ export interface PaneIdleWaitOptions {
   pasteVerifyIntervalMs?: number;
   /** How many times to (re-)paste before giving up on this delivery. */
   maxPasteAttempts?: number;
+  /** How long to keep polling for the trust prompt before giving up on it. */
+  trustPromptTimeoutMs?: number;
+  /** How often to re-check the pane while polling for the trust prompt. */
+  trustPromptIntervalMs?: number;
+  /** Consecutive unchanged, non-trust-prompt captures before giving up early. */
+  trustPromptStableChecks?: number;
 }
 
 export const DEFAULT_TIMEOUT_MS = 12_000;
@@ -82,6 +88,15 @@ export const DEFAULT_PASTE_VERIFY_TIMEOUT_MS = 2_000;
 const DEFAULT_PASTE_VERIFY_INTERVAL_MS = 200;
 export const DEFAULT_MAX_PASTE_ATTEMPTS = 3;
 const PASTE_MARKER_LENGTH = 24;
+// Confirmed live: becoming the pane's foreground process (satisfying
+// waitForForegroundCommand) is not proof the CLI has finished rendering its
+// own first screen — the trust dialog can still appear afterward. A single
+// extra one-shot check right after waitForForegroundCommand narrows that gap
+// but does not close it, since the dialog can render later still. This has
+// to be a bounded poll, not another snapshot.
+export const DEFAULT_TRUST_PROMPT_TIMEOUT_MS = 3_000;
+const DEFAULT_TRUST_PROMPT_INTERVAL_MS = 200;
+const DEFAULT_TRUST_PROMPT_STABLE_CHECKS = 2;
 
 /**
  * The wall-clock ceiling one full brief delivery can occupy, derived from the
@@ -100,6 +115,8 @@ const PASTE_MARKER_LENGTH = 24;
  * `deliverInitialPrompt`'s own order:
  *   - {@link waitForStablePane}, twice (once more after the trust prompt)
  *   - {@link waitForForegroundCommand}
+ *   - {@link waitForTrustPromptAndDismiss}: the dialog can render even after
+ *     the CLI is confirmed foreground, so this is a bounded poll of its own
  *   - {@link pasteAndVerify}: every attempt's verify window plus its post-paste pause
  *   - {@link submitAndVerify}: every Enter retry
  */
@@ -112,11 +129,13 @@ export function deliveryBudgetMs(options: PaneIdleWaitOptions = {}): number {
     foregroundCommandTimeoutMs = DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS,
     pasteVerifyTimeoutMs = DEFAULT_PASTE_VERIFY_TIMEOUT_MS,
     maxPasteAttempts = DEFAULT_MAX_PASTE_ATTEMPTS,
+    trustPromptTimeoutMs = DEFAULT_TRUST_PROMPT_TIMEOUT_MS,
   } = options;
 
   return (
     timeoutMs * 2 +
     foregroundCommandTimeoutMs +
+    trustPromptTimeoutMs +
     maxPasteAttempts * (pasteVerifyTimeoutMs + postPasteDelayMs) +
     maxSubmitRetries * submitRetryIntervalMs
   );
@@ -164,6 +183,56 @@ export async function autoTrustIfPrompted(
   await sendDown();
   await sendEnter();
   return true;
+}
+
+/**
+ * Watches a pane for the trust prompt over a bounded window, dismissing it
+ * the instant it appears — not a fixed number of one-shot snapshots.
+ *
+ * `autoTrustIfPrompted` alone is a single check: fine when the prompt is
+ * already showing, but confirmed live to miss it when the dialog renders
+ * *after* the check ran — becoming the pane's foreground process (see
+ * `waitForForegroundCommand`) is not proof the CLI has finished painting its
+ * own first screen yet. Re-running that one-shot check again later narrows
+ * the gap but never closes it, since the dialog can just as easily render
+ * after the second check too. This polls instead: it keeps looking until
+ * either the prompt appears (dismissed immediately) or the pane has settled
+ * on something else for `trustPromptStableChecks` consecutive captures,
+ * meaning there is nothing left to wait for.
+ */
+export async function waitForTrustPromptAndDismiss(
+  capture: () => Promise<string>,
+  sendDown: () => Promise<void>,
+  sendEnter: () => Promise<void>,
+  {
+    trustPromptTimeoutMs = DEFAULT_TRUST_PROMPT_TIMEOUT_MS,
+    trustPromptIntervalMs = DEFAULT_TRUST_PROMPT_INTERVAL_MS,
+    trustPromptStableChecks = DEFAULT_TRUST_PROMPT_STABLE_CHECKS,
+  }: PaneIdleWaitOptions = {},
+): Promise<boolean> {
+  const deadline = Date.now() + trustPromptTimeoutMs;
+  let previous: string | null = null;
+  let stableCount = 0;
+
+  while (Date.now() < deadline) {
+    const current = await capture();
+    if (looksLikeTrustPrompt(current)) {
+      await sendDown();
+      await sendEnter();
+      return true;
+    }
+    if (previous !== null && current === previous) {
+      stableCount += 1;
+      if (stableCount >= trustPromptStableChecks) {
+        return false;
+      }
+    } else {
+      stableCount = 0;
+    }
+    previous = current;
+    await sleep(trustPromptIntervalMs);
+  }
+  return false;
 }
 
 /**

@@ -4,7 +4,10 @@ import {
   pasteMarker,
   submitAndVerify,
   waitForForegroundCommand,
+  waitForTrustPromptAndDismiss,
 } from '../src/services/session-backends/pane-idle.js';
+
+const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
 
 describe('waitForForegroundCommand', () => {
   it('matches an exact process name (claude, a short binary that never truncates)', async () => {
@@ -50,6 +53,85 @@ describe('waitForForegroundCommand', () => {
   });
 });
 
+describe('waitForTrustPromptAndDismiss', () => {
+  const FAST = { trustPromptTimeoutMs: 200, trustPromptIntervalMs: 5, trustPromptStableChecks: 2 };
+
+  it('dismisses the prompt the instant it is already showing', async () => {
+    let sent = false;
+    const result = await waitForTrustPromptAndDismiss(
+      async () => TRUST_SCREEN,
+      async () => {
+        sent = true;
+      },
+      async () => {},
+      FAST,
+    );
+    expect(result).toBe(true);
+    expect(sent).toBe(true);
+  });
+
+  it('catches the prompt even when it only renders partway through the polling window', async () => {
+    // Arrange — confirmed live: becoming the pane's foreground process is not
+    // proof the CLI has finished rendering its own first screen yet. This is
+    // the exact race a single one-shot check (before or after
+    // waitForForegroundCommand) can miss.
+    let checks = 0;
+    const capture = async () => {
+      checks += 1;
+      return checks < 3 ? '' : TRUST_SCREEN;
+    };
+    let downSent = false;
+    let enterSent = false;
+
+    // Act
+    const result = await waitForTrustPromptAndDismiss(
+      capture,
+      async () => {
+        downSent = true;
+      },
+      async () => {
+        enterSent = true;
+      },
+      FAST,
+    );
+
+    // Assert
+    expect(result).toBe(true);
+    expect(downSent).toBe(true);
+    expect(enterSent).toBe(true);
+  });
+
+  it('gives up once the pane settles on a screen that is not the trust prompt', async () => {
+    let sent = false;
+    const result = await waitForTrustPromptAndDismiss(
+      async () => '',
+      async () => {
+        sent = true;
+      },
+      async () => {},
+      FAST,
+    );
+    expect(result).toBe(false);
+    expect(sent).toBe(false);
+  });
+
+  it('never sends Down/Enter when it times out without ever seeing the prompt', async () => {
+    // Arrange — a pane that keeps changing (never stabilizes) and never
+    // shows the trust prompt within the window.
+    let n = 0;
+    let sent = false;
+    const result = await waitForTrustPromptAndDismiss(
+      async () => `frame-${(n += 1)}`,
+      async () => {
+        sent = true;
+      },
+      async () => {},
+      { trustPromptTimeoutMs: 30, trustPromptIntervalMs: 5, trustPromptStableChecks: 100 },
+    );
+    expect(result).toBe(false);
+    expect(sent).toBe(false);
+  });
+});
 
 describe('pasteAndVerify', () => {
   const FAST = { pasteVerifyTimeoutMs: 20, pasteVerifyIntervalMs: 1, maxPasteAttempts: 3 };

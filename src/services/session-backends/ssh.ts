@@ -27,6 +27,7 @@ import {
   submitAndVerify,
   waitForForegroundCommand,
   waitForStablePane,
+  waitForTrustPromptAndDismiss,
   type PaneIdleWaitOptions,
 } from './pane-idle.js';
 import {
@@ -513,10 +514,10 @@ export class SshTmuxBackend implements SessionBackend {
       );
     }
 
-    // Check again, now that the CLI is confirmed to be the pane's foreground
-    // process — see TmuxBackend's version of this same check for why the
-    // first one alone isn't enough.
-    if (await autoTrustIfPrompted(capture, sendTrustDown, sendTrustEnter)) {
+    // Watch for the dialog again, now that the CLI is confirmed to be the
+    // pane's foreground process — see TmuxBackend's version of this same
+    // check for why a bounded poll, not one more snapshot, is needed here.
+    if (await waitForTrustPromptAndDismiss(capture, sendTrustDown, sendTrustEnter, this.paneIdleOptions)) {
       await waitForStablePane(capture, this.paneIdleOptions);
     }
 

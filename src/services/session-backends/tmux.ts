@@ -25,6 +25,7 @@ import {
   submitAndVerify,
   waitForForegroundCommand,
   waitForStablePane,
+  waitForTrustPromptAndDismiss,
   type PaneIdleWaitOptions,
 } from './pane-idle.js';
 import {
@@ -361,13 +362,12 @@ export class TmuxBackend implements SessionBackend {
       );
     }
 
-    // Check again, now that the CLI is confirmed to be the pane's foreground
-    // process. The first check can run before the CLI has even started —
-    // waitForStablePane only proves the *screen* stopped changing, not that
-    // this specific dialog ever rendered — so becoming foreground is no
-    // guarantee it already showed and got dismissed. Missing it here means
-    // the eventual submit Enter lands on "No, exit" instead of the brief.
-    if (await autoTrustIfPrompted(capture, sendTrustDown, sendTrustEnter)) {
+    // Watch for the dialog again, now that the CLI is confirmed to be the
+    // pane's foreground process — a bounded poll, not one more snapshot,
+    // since the dialog can render at any point after becoming foreground,
+    // not just immediately. Missing it here means the eventual submit Enter
+    // lands on "No, exit" instead of the brief.
+    if (await waitForTrustPromptAndDismiss(capture, sendTrustDown, sendTrustEnter, this.paneIdleOptions)) {
       await waitForStablePane(capture, this.paneIdleOptions);
     }
 

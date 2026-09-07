@@ -446,6 +446,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         submitRetryIntervalMs: 0,
         // No process name to match in these mocks — skip the foreground-command gate.
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
       },
     });
 
@@ -508,6 +509,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 20,
         pasteVerifyIntervalMs: 1,
       },
@@ -571,6 +573,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 20,
         pasteVerifyIntervalMs: 1,
       },
@@ -621,6 +624,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 0,
         pasteVerifyIntervalMs: 0,
         maxPasteAttempts: 3,
@@ -688,6 +692,7 @@ describe('SshTmuxBackend.create initial delivery result', () => {
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
       },
     });
 
@@ -741,6 +746,7 @@ describe('SshTmuxBackend.create initial delivery result', () => {
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 0,
         pasteVerifyIntervalMs: 0,
         maxPasteAttempts: 3,
@@ -807,6 +813,7 @@ describe('SshTmuxBackend auto-trust', () => {
         submitRetryIntervalMs: 0,
         // No process name to match in these mocks — skip the foreground-command gate.
         foregroundCommandTimeoutMs: 0,
+        trustPromptTimeoutMs: 0,
       },
     });
 
@@ -880,6 +887,8 @@ describe('SshTmuxBackend auto-trust', () => {
         submitRetryIntervalMs: 0,
         foregroundCommandTimeoutMs: 1000,
         foregroundCommandIntervalMs: 0,
+        trustPromptTimeoutMs: 1000,
+        trustPromptIntervalMs: 0,
       },
     });
 
