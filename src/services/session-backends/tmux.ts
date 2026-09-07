@@ -15,10 +15,6 @@ import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { writeLocalBrief } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
-import {
-  defaultLocalClaudeSeedRunner,
-  type ClaudeSeedRunner,
-} from './claude-seed.js';
 import { DeliveryGuard } from './delivery-guard.js';
 import {
   autoTrustIfPrompted,
@@ -78,8 +74,6 @@ export interface TmuxBackendOptions {
   now?: () => number;
   /** Overridable so tests don't sit through real polling intervals. */
   paneIdleOptions?: PaneIdleWaitOptions;
-  /** Overridable so tests don't spawn a real local `claude` process. */
-  seedRunner?: ClaudeSeedRunner;
 }
 
 /** Runs `tmux` on the machine the daemon is running on. */
@@ -102,7 +96,6 @@ export class TmuxBackend implements SessionBackend {
   private idGenerator: () => string;
   private now: () => number;
   private paneIdleOptions?: PaneIdleWaitOptions;
-  private seedRunner: ClaudeSeedRunner;
   /** One brief delivery per pane at a time — see {@link DeliveryGuard}. */
   private readonly deliveries = new DeliveryGuard();
 
@@ -111,7 +104,6 @@ export class TmuxBackend implements SessionBackend {
     this.idGenerator = options.idGenerator ?? generateId;
     this.now = options.now ?? Date.now;
     this.paneIdleOptions = options.paneIdleOptions;
-    this.seedRunner = options.seedRunner ?? defaultLocalClaudeSeedRunner;
   }
 
   private async ensureSessionSurvivesDetach(backendSessionId: string): Promise<void> {
@@ -240,41 +232,32 @@ export class TmuxBackend implements SessionBackend {
         // session-bootstrap.sh). The daemon, not argv, delivers the contents.
         initialPromptFile,
       });
-
-      if (initialPromptFile && opts.agentSessionId && opts.agentCli === 'claude') {
-        // Seed a transcript headlessly before the pane's own bootstrap script
-        // runs its resume-check — see {@link seedThenLaunch}. Not awaited: a
-        // headless seed runs a full agent turn, which can take well past this
-        // RPC's own timeout, same reasoning as the plain delivery path below.
-        void this.seedThenLaunch(backendSessionId, cwd, opts, bootstrapCommand, initialPromptFile);
-      } else {
-        await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
-        if (initialPromptFile) {
-          // Not awaited: delivery can take well over a minute in the worst case
-          // (a slow SessionStart hook chain — confirmed live), and this method's
-          // caller is a synchronous RPC round trip an agent's own Bash tool call
-          // is waiting on. Blocking that long risked the caller's own timeout
-          // firing first and retrying `agentboard task create`, which — since
-          // createTask is not idempotent — would create a second card instead
-          // of just being patient. The session record below is returned as soon
-          // as the pane exists; delivery finishes (or gives up) in the background.
-          void this.deliverInitialPrompt(
-            backendSessionId,
-            initialPromptFile,
-            opts.agentCli,
-            opts.initialPrompt,
-          )
-            .then((delivered) => {
-              opts.onDeliveryResult?.(delivered);
-            })
-            .catch(() => {
-              // Best-effort: a failure here leaves the brief typed but unsubmitted
-              // in the pane, same as the fixed-delay version before this always
-              // risked — there is nowhere useful to surface it from inside a
-              // detached backend call.
-              opts.onDeliveryResult?.(false);
-            });
-        }
+      await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
+      if (initialPromptFile) {
+        // Not awaited: delivery can take well over a minute in the worst case
+        // (a slow SessionStart hook chain — confirmed live), and this method's
+        // caller is a synchronous RPC round trip an agent's own Bash tool call
+        // is waiting on. Blocking that long risked the caller's own timeout
+        // firing first and retrying `agentboard task create`, which — since
+        // createTask is not idempotent — would create a second card instead
+        // of just being patient. The session record below is returned as soon
+        // as the pane exists; delivery finishes (or gives up) in the background.
+        void this.deliverInitialPrompt(
+          backendSessionId,
+          initialPromptFile,
+          opts.agentCli,
+          opts.initialPrompt,
+        )
+          .then((delivered) => {
+            opts.onDeliveryResult?.(delivered);
+          })
+          .catch(() => {
+            // Best-effort: a failure here leaves the brief typed but unsubmitted
+            // in the pane, same as the fixed-delay version before this always
+            // risked — there is nowhere useful to surface it from inside a
+            // detached backend call.
+            opts.onDeliveryResult?.(false);
+          });
       }
     }
 
@@ -306,71 +289,6 @@ export class TmuxBackend implements SessionBackend {
     for (const invocation of buildTmuxSendInputCommands(target, data)) {
       await this.runner(invocation.args);
     }
-  }
-
-  /**
-   * Seeds a fresh `claude` conversation headlessly before the pane's own
-   * bootstrap script runs its resume-check, then sends the bootstrap command
-   * that opens the interactive session.
-   *
-   * Mirrors {@link PtyBackend}'s already-validated headless-seed pattern,
-   * extended to a real pane: the bootstrap command cannot be sent until the
-   * seed either lands a transcript or gives up, or session-bootstrap.sh's own
-   * `compgen -G .../*.jsonl` resume-check could race the seed and pick a
-   * fresh session instead. Unawaited from `create()` — see there for why —
-   * so this entire sequence, bootstrap command included, runs in the
-   * background instead of blocking the RPC caller.
-   *
-   * `deliverInitialPrompt` still runs afterward regardless of whether seeding
-   * worked: on a genuine resume it finds `briefFile` already deleted
-   * (session-bootstrap.sh's own doing — see there) and no-ops past the paste,
-   * but it is the same call that dismisses the trust dialog, which the
-   * headless seed does NOT pre-clear (confirmed live: `hasTrustDialogAccepted`
-   * stays false after a `--print` run in a never-before-seen directory) — so
-   * it must still run either way.
-   */
-  private async seedThenLaunch(
-    backendSessionId: string,
-    cwd: string,
-    opts: CreateSessionOpts,
-    bootstrapCommand: string,
-    briefFile: string,
-  ): Promise<void> {
-    let seeded = false;
-    try {
-      await this.seedRunner({
-        agentSessionId: opts.agentSessionId!,
-        cwd,
-        prompt: opts.initialPrompt!,
-      });
-      seeded = true;
-    } catch {
-      // Best-effort: session-bootstrap.sh's own resume-check simply won't
-      // match (no transcript was written), so it falls back to a fresh
-      // `--session-id` session, same as if this seeding never existed.
-    }
-
-    try {
-      await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
-    } catch {
-      opts.onDeliveryResult?.(false);
-      return;
-    }
-
-    const delivered = await this.deliverInitialPrompt(
-      backendSessionId,
-      briefFile,
-      opts.agentCli,
-      opts.initialPrompt,
-    ).catch(() => false);
-
-    // A successful seed plus a vanished brief file means session-bootstrap.sh
-    // found the seeded transcript and resumed it — the mission was delivered
-    // via that headless turn, and `deliverInitialPrompt` above just found
-    // nothing left to paste. Without this, a seeded resume would misreport
-    // as an unsubmitted delivery to `agentboard fleet`/`attention`.
-    const deliveredViaSeed = seeded && !existsSync(briefFile);
-    opts.onDeliveryResult?.(delivered || deliveredViaSeed);
   }
 
   /**

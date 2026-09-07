@@ -15,7 +15,7 @@ import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { BRIEF_FILE_MODE, briefRelativePath } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
-import { shellJoin, shellQuote } from '../shell-quote.js';
+import { shellJoin } from '../shell-quote.js';
 import { buildControlPath, TransportUnreachableError, type SshTransport } from '../transport/index.js';
 import { DeliveryGuard } from './delivery-guard.js';
 import {
@@ -64,22 +64,6 @@ const INSPECT_CACHE_MS = 1_500;
 const REMOTE_BOOTSTRAP_RELATIVE_PATH = '.agentboard/session-bootstrap.sh';
 const REMOTE_BOOTSTRAP_MODE = 0o755;
 
-/**
- * A headless `claude --print` seed runs a full agent turn over SSH — far
- * longer than the few-second admin commands {@link SshTransport}'s own
- * default command timeout is tuned for.
- */
-const REMOTE_SEED_TIMEOUT_MS = 120_000;
-
-export interface SshClaudeSeedOptions {
-  agentSessionId: string;
-  cwd: string;
-  /** Already written to the remote host by {@link ensureRemoteBrief}. */
-  remoteBriefFile: string;
-}
-
-export type SshClaudeSeedRunner = (opts: SshClaudeSeedOptions) => Promise<void>;
-
 export interface SshTmuxBackendOptions {
   /** Transport for the remote host; also supplies the ControlMaster socket. */
   transport: SshTransport;
@@ -94,8 +78,6 @@ export interface SshTmuxBackendOptions {
   now?: () => number;
   /** Overridable so tests don't sit through real polling intervals. */
   paneIdleOptions?: PaneIdleWaitOptions;
-  /** Overridable so tests don't spawn a real remote `claude` process. */
-  seedRunner?: SshClaudeSeedRunner;
 }
 
 interface InspectCacheEntry {
@@ -135,7 +117,6 @@ export class SshTmuxBackend implements SessionBackend {
   private readonly idGenerator: () => string;
   private readonly now: () => number;
   private readonly paneIdleOptions?: PaneIdleWaitOptions;
-  private readonly seedRunner: SshClaudeSeedRunner;
 
   /** One brief delivery per pane at a time — see {@link DeliveryGuard}. */
   private readonly deliveries = new DeliveryGuard();
@@ -154,28 +135,12 @@ export class SshTmuxBackend implements SessionBackend {
     this.idGenerator = options.idGenerator ?? generateId;
     this.now = options.now ?? Date.now;
     this.paneIdleOptions = options.paneIdleOptions;
-    this.seedRunner = options.seedRunner ?? this.createDefaultSeedRunner();
   }
 
   private createTransportRunner(): TmuxCommandRunner {
     return async (args: string[]): Promise<TmuxCommandResult> => {
       const result = await this.transport.exec(['tmux', ...args]);
       return { stdout: result.stdout, stderr: result.stderr };
-    };
-  }
-
-  /**
-   * Feeds the seed prompt from the already-written remote brief file via
-   * shell redirection rather than piping it over `exec` directly: unlike
-   * `defaultLocalClaudeSeedRunner`'s direct stdin write, {@link SshTransport}
-   * has no stdin-piping primitive — every `exec` call round-trips through a
-   * single shell command line, which a multi-KB brief would blow past (see
-   * {@link SshTransport.copyFileTo}'s own docstring for the same limit).
-   */
-  private createDefaultSeedRunner(): SshClaudeSeedRunner {
-    return async ({ agentSessionId, cwd, remoteBriefFile }) => {
-      const script = `${shellJoin(['claude', '--session-id', agentSessionId, '--print'])} < ${shellQuote(remoteBriefFile)}`;
-      await this.transport.exec(['sh', '-c', script], { cwd, timeoutMs: REMOTE_SEED_TIMEOUT_MS });
     };
   }
 
@@ -385,36 +350,26 @@ export class SshTmuxBackend implements SessionBackend {
         // brief's contents are delivered separately, once the pane is ready.
         initialPromptFile: remoteBriefFile,
       });
+      await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       this.rememberInspect(backendSessionId, { backendSessionId, status: 'active' });
-
-      if (remoteBriefFile && opts.agentSessionId && opts.agentCli === 'claude') {
-        // Seed a transcript headlessly on the remote host before the pane's
-        // own bootstrap script runs its resume-check — see
-        // {@link seedThenLaunch}. Not awaited, same reasoning as the plain
-        // delivery path below: a headless turn over SSH can run well past
-        // this RPC's own timeout.
-        void this.seedThenLaunch(backendSessionId, cwd, opts, bootstrapCommand, remoteBriefFile);
-      } else {
-        await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
-        if (remoteBriefFile) {
-          // Not awaited — see TmuxBackend for why: delivery can take well over
-          // a minute in the worst case, and blocking the caller's own RPC round
-          // trip that long risks its own timeout firing and retrying
-          // `agentboard task create`, which would create a second card.
-          void this.deliverInitialPrompt(
-            backendSessionId,
-            remoteBriefFile,
-            opts.agentCli,
-            opts.initialPrompt,
-          )
-            .then((delivered) => {
-              opts.onDeliveryResult?.(delivered);
-            })
-            .catch(() => {
-              // Best-effort; nowhere useful to surface a failure from here.
-              opts.onDeliveryResult?.(false);
-            });
-        }
+      if (remoteBriefFile) {
+        // Not awaited — see TmuxBackend for why: delivery can take well over
+        // a minute in the worst case, and blocking the caller's own RPC round
+        // trip that long risks its own timeout firing and retrying
+        // `agentboard task create`, which would create a second card.
+        void this.deliverInitialPrompt(
+          backendSessionId,
+          remoteBriefFile,
+          opts.agentCli,
+          opts.initialPrompt,
+        )
+          .then((delivered) => {
+            opts.onDeliveryResult?.(delivered);
+          })
+          .catch(() => {
+            // Best-effort; nowhere useful to surface a failure from here.
+            opts.onDeliveryResult?.(false);
+          });
       }
     }
 
@@ -483,68 +438,6 @@ export class SshTmuxBackend implements SessionBackend {
     for (const invocation of buildTmuxSendInputCommands(backendSessionId, data)) {
       await this.remoteRunner(invocation.args);
     }
-  }
-
-  /**
-   * Seeds a fresh `claude` conversation headlessly on the remote host before
-   * the pane's own bootstrap script runs its resume-check, then sends the
-   * bootstrap command that opens the interactive session. Mirrors
-   * {@link TmuxBackend.seedThenLaunch} — see there for the full rationale,
-   * including why `deliverInitialPrompt` still runs afterward regardless of
-   * whether seeding worked (it is also what dismisses the trust dialog, which
-   * the headless seed does not pre-clear).
-   */
-  private async seedThenLaunch(
-    backendSessionId: string,
-    cwd: string,
-    opts: CreateSessionOpts,
-    bootstrapCommand: string,
-    remoteBriefFile: string,
-  ): Promise<void> {
-    let seeded = false;
-    try {
-      await this.seedRunner({
-        agentSessionId: opts.agentSessionId!,
-        cwd,
-        remoteBriefFile,
-      });
-      seeded = true;
-    } catch {
-      // Best-effort — see TmuxBackend.seedThenLaunch for why.
-    }
-
-    try {
-      await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
-    } catch {
-      opts.onDeliveryResult?.(false);
-      return;
-    }
-
-    let delivered = false;
-    try {
-      delivered = await this.deliverInitialPrompt(
-        backendSessionId,
-        remoteBriefFile,
-        opts.agentCli,
-        opts.initialPrompt,
-      );
-    } catch {
-      // Fall through — a successful seed may still mean this delivered.
-    }
-
-    let deliveredViaSeed = false;
-    if (seeded && !delivered) {
-      try {
-        // A successful seed plus a vanished brief file means
-        // session-bootstrap.sh found the seeded transcript and resumed it —
-        // see TmuxBackend.seedThenLaunch for why this check matters.
-        deliveredViaSeed = !(await this.transport.exists(remoteBriefFile));
-      } catch {
-        // Connection trouble here shouldn't crash this background chain either.
-      }
-    }
-
-    opts.onDeliveryResult?.(delivered || deliveredViaSeed);
   }
 
   /**
