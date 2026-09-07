@@ -486,15 +486,14 @@ export class SshTmuxBackend implements SessionBackend {
       (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout;
     await waitForStablePane(capture, this.paneIdleOptions);
 
-    const trusted = await autoTrustIfPrompted(
-      capture,
-      async () => {
-        await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Down']);
-      },
-      async () => {
-        await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Enter']);
-      },
-    );
+    const sendTrustDown = async () => {
+      await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Down']);
+    };
+    const sendTrustEnter = async () => {
+      await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Enter']);
+    };
+
+    const trusted = await autoTrustIfPrompted(capture, sendTrustDown, sendTrustEnter);
     if (trusted) {
       // The prompt just gave way to the CLI's own startup, hooks included —
       // wait for that to settle too before treating the pane as ready.
@@ -512,6 +511,13 @@ export class SshTmuxBackend implements SessionBackend {
         agentCli,
         this.paneIdleOptions,
       );
+    }
+
+    // Check again, now that the CLI is confirmed to be the pane's foreground
+    // process — see TmuxBackend's version of this same check for why the
+    // first one alone isn't enough.
+    if (await autoTrustIfPrompted(capture, sendTrustDown, sendTrustEnter)) {
+      await waitForStablePane(capture, this.paneIdleOptions);
     }
 
     if (!(await this.transport.exists(remoteBriefFile))) {

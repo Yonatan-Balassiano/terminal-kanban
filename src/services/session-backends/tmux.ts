@@ -336,15 +336,14 @@ export class TmuxBackend implements SessionBackend {
     const capture = async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;
     await waitForStablePane(capture, this.paneIdleOptions);
 
-    const trusted = await autoTrustIfPrompted(
-      capture,
-      async () => {
-        await this.runner(['send-keys', '-t', target, 'Down']);
-      },
-      async () => {
-        await this.runner(['send-keys', '-t', target, 'Enter']);
-      },
-    );
+    const sendTrustDown = async () => {
+      await this.runner(['send-keys', '-t', target, 'Down']);
+    };
+    const sendTrustEnter = async () => {
+      await this.runner(['send-keys', '-t', target, 'Enter']);
+    };
+
+    const trusted = await autoTrustIfPrompted(capture, sendTrustDown, sendTrustEnter);
     if (trusted) {
       // The prompt just gave way to the CLI's own startup, hooks included —
       // wait for that to settle too before treating the pane as ready.
@@ -360,6 +359,16 @@ export class TmuxBackend implements SessionBackend {
         agentCli,
         this.paneIdleOptions,
       );
+    }
+
+    // Check again, now that the CLI is confirmed to be the pane's foreground
+    // process. The first check can run before the CLI has even started —
+    // waitForStablePane only proves the *screen* stopped changing, not that
+    // this specific dialog ever rendered — so becoming foreground is no
+    // guarantee it already showed and got dismissed. Missing it here means
+    // the eventual submit Enter lands on "No, exit" instead of the brief.
+    if (await autoTrustIfPrompted(capture, sendTrustDown, sendTrustEnter)) {
+      await waitForStablePane(capture, this.paneIdleOptions);
     }
 
     if (!existsSync(briefFile)) {

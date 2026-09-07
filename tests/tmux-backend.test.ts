@@ -850,6 +850,80 @@ describe('TmuxBackend auto-trust', () => {
     // Assert
     expect(calls.some((args) => args[0] === 'send-keys' && args[3] === 'Down')).toBe(false);
   });
+
+  it('catches the trust prompt on the second check, when it only renders after the CLI is already foreground', async () => {
+    // Arrange — the pane shows nothing (not even the bootstrap script's own
+    // output) on the very first capture, as if claude's process hasn't
+    // started yet; by the time waitForForegroundCommand confirms it's
+    // foreground, the trust screen has appeared. A single one-shot check
+    // right after waitForStablePane would miss this entirely.
+    const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
+    const calls: string[][] = [];
+    let trustAccepted = false;
+    let foregroundConfirmed = false;
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'has-session') {
+        throw new Error('missing');
+      }
+      if (args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}')) {
+        foregroundConfirmed = true;
+        return { stdout: '1 claude', stderr: '' };
+      }
+      if (args[0] === 'send-keys' && args[3] === 'Down') {
+        trustAccepted = true;
+      }
+      if (args[0] === 'capture-pane') {
+        if (trustAccepted) {
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: foregroundConfirmed ? TRUST_SCREEN : '', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 1000,
+        foregroundCommandIntervalMs: 0,
+      },
+    });
+
+    // Act
+    await backend.create({
+      taskId: 'latetrust',
+      taskTitle: 'Trust screen renders late',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/late-trust-0001',
+      agentCli: 'claude',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — the second check caught it: Down was sent, after the
+    // foreground process was confirmed, and the brief was still delivered.
+    const foregroundIndex = calls.findIndex(
+      (args) => args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}'),
+    );
+    const downIndex = calls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
+    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
+    expect(downIndex).toBeGreaterThan(foregroundIndex);
+    expect(loadIndex).toBeGreaterThan(downIndex);
+  });
 });
 
 describe('TmuxBackend.peekPane', () => {

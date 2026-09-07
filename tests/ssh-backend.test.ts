@@ -825,6 +825,78 @@ describe('SshTmuxBackend auto-trust', () => {
     expect(trustEnterIndex).toBeGreaterThan(downIndex);
     expect(loadIndex).toBeGreaterThan(trustEnterIndex);
   });
+
+  it('catches the trust prompt on the second check, when it only renders after the CLI is already foreground', async () => {
+    // Arrange — mirrors TmuxBackend's equivalent test: nothing on the very
+    // first capture, as if claude's process hasn't started yet; the trust
+    // screen only appears once waitForForegroundCommand confirms it's
+    // foreground.
+    const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
+    let trustAccepted = false;
+    let foregroundConfirmed = false;
+    const remoteCalls: string[][] = [];
+    const transport = {
+      host: 'test.host',
+      id: 'ssh:test.host',
+      isRemote: true,
+      exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+      exists: vi.fn(async () => true),
+      mkdirp: vi.fn(async () => undefined),
+      removeDir: vi.fn(async () => undefined),
+      writeFileIfChanged: vi.fn(async () => true),
+      reachability: vi.fn(async () => 'ok' as const),
+    };
+
+    const backend = new SshTmuxBackend({
+      transport: transport as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        remoteCalls.push(args);
+        if (args[0] === 'has-session') fail();
+        if (args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}')) {
+          foregroundConfirmed = true;
+          return ok('1 claude');
+        }
+        if (args[0] === 'send-keys' && args[3] === 'Down') {
+          trustAccepted = true;
+        }
+        if (args[0] === 'capture-pane') {
+          if (trustAccepted) {
+            return ok('');
+          }
+          return ok(foregroundConfirmed ? TRUST_SCREEN : '');
+        }
+        return ok();
+      },
+      localRunner: async () => ok(),
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        foregroundCommandTimeoutMs: 1000,
+        foregroundCommandIntervalMs: 0,
+      },
+    });
+
+    // Act
+    await backend.create({ ...createOpts(), initialPrompt: 'Fix the flaky test.' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — the second check caught it: Down was sent after the
+    // foreground process was confirmed, and the brief was still delivered.
+    const foregroundIndex = remoteCalls.findIndex(
+      (args) => args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}'),
+    );
+    const downIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
+    const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
+    expect(downIndex).toBeGreaterThan(foregroundIndex);
+    expect(loadIndex).toBeGreaterThan(downIndex);
+  });
 });
 
 describe('SshTmuxBackend.peekPane', () => {
