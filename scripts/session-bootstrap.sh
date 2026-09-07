@@ -146,4 +146,15 @@ fi
 # free-text, so eval is what re-splits it back into distinct arguments.
 eval "set -- $session_args $agent_args"
 
-"$command_name" "$@"
+# exec, not a plain call: this is the last line of the script, nothing runs
+# after it, so there is no reason to keep this process around as a wrapper.
+# A plain call leaves bash sitting between the pane's shell and the agent,
+# and tmux's own pane_current_command does not reliably walk through that
+# extra layer to report the agent as the pane's foreground process — which
+# is what the daemon's delivery pipeline (pane-idle.ts's
+# waitForForegroundCommand) polls before pasting the card's brief in. Without
+# exec here, a slow enough bootstrap step (a large git fetch on a shared,
+# non-worktree checkout, confirmed live) can outlast that poll's timeout,
+# and the brief gets pasted into whatever is still on screen instead of into
+# the agent — verified as "delivered" even though nothing received it.
+exec "$command_name" "$@"
