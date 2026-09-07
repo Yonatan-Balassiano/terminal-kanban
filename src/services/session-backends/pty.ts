@@ -1,5 +1,4 @@
 import { createRequire } from 'module';
-import { spawn } from 'child_process';
 import type {
   SessionBackend,
   SessionRecord,
@@ -13,6 +12,11 @@ import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { writeLocalBrief } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
+import {
+  defaultLocalClaudeSeedRunner,
+  type ClaudeSeedOptions,
+  type ClaudeSeedRunner,
+} from './claude-seed.js';
 
 const require = createRequire(import.meta.url);
 
@@ -27,52 +31,17 @@ try {
 
 type IPty = import('node-pty').IPty;
 
-export interface PtySeedOptions {
-  /** The exact id the interactive bootstrap script will independently resolve to. */
-  agentSessionId: string;
-  cwd: string;
-  prompt: string;
-}
-
-/**
- * Seeds a fresh `claude` conversation headlessly, so the interactive pty's own
- * resume-detection (session-bootstrap.sh's `compgen -G ... .jsonl`) finds a
- * transcript already sitting under that session id and resumes it instead of
- * starting blank.
- *
- * Spawned directly rather than through node-pty: this is a one-shot batch call
- * with piped stdin, not an interactive terminal. Only `claude` is wired up —
- * see resolveAgentArgs's own claude-only carve-outs in session-bootstrap.ts.
- */
-export type PtySeedRunner = (opts: PtySeedOptions) => Promise<void>;
-
-function defaultPtySeedRunner({ agentSessionId, cwd, prompt }: PtySeedOptions): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['--session-id', agentSessionId, '--print'], {
-      cwd,
-      stdio: ['pipe', 'ignore', 'ignore'],
-    });
-    child.once('error', reject);
-    child.once('close', (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`claude --print seed exited with code ${String(code)}`));
-      }
-    });
-    // Avoid an unhandled EPIPE if claude exits before consuming all of stdin.
-    child.stdin.on('error', () => {});
-    child.stdin.write(prompt);
-    child.stdin.end();
-  });
-}
+/** @deprecated Use {@link ClaudeSeedOptions} from `./claude-seed.js` instead. */
+export type PtySeedOptions = ClaudeSeedOptions;
+/** @deprecated Use {@link ClaudeSeedRunner} from `./claude-seed.js` instead. */
+export type PtySeedRunner = ClaudeSeedRunner;
 
 export class PtyBackend implements SessionBackend {
   private ptys = new Map<string, IPty>();
 
   constructor(
     private onData?: (taskId: string, slot: SessionSlot, data: string) => void,
-    private seedRunner: PtySeedRunner = defaultPtySeedRunner,
+    private seedRunner: ClaudeSeedRunner = defaultLocalClaudeSeedRunner,
   ) {}
 
   async healthCheck(): Promise<BackendHealth> {

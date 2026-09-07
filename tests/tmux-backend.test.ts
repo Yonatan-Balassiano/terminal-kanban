@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync, unlinkSync } from 'fs';
 import {
   buildTmuxAttachCommand,
   buildTmuxSendInputCommands,
   TmuxBackend,
   type TmuxCommandRunner,
 } from '../src/services/session-backends/tmux.js';
+import { localBriefPath } from '../src/services/session-brief.js';
+import type { ClaudeSeedOptions } from '../src/services/session-backends/claude-seed.js';
 
 describe('TmuxBackend', () => {
   it('builds fallback attach commands', () => {
@@ -486,6 +488,164 @@ describe('TmuxBackend brief handling', () => {
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
     expect(deliveryResults).toEqual([false]);
     expect(enterCalls(calls)).toHaveLength(1);
+  });
+});
+
+describe('TmuxBackend headless seeding', () => {
+  const fastPaneIdleOptions = {
+    timeoutMs: 1000,
+    intervalMs: 0,
+    stableChecks: 1,
+    postPasteDelayMs: 0,
+    maxSubmitRetries: 0,
+    submitRetryIntervalMs: 0,
+    foregroundCommandTimeoutMs: 0,
+    trustPromptTimeoutMs: 0,
+  };
+
+  it('seeds headlessly before sending the bootstrap command, when agentSessionId and agentCli=claude are set', async () => {
+    // Arrange
+    const order: string[] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      if (args[0] === 'has-session') throw new Error('missing');
+      if (args[0] === 'send-keys' && args[3] === '-l') order.push('bootstrap-typed');
+      return { stdout: '', stderr: '' };
+    };
+    const seedCalls: ClaudeSeedOptions[] = [];
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: fastPaneIdleOptions,
+      seedRunner: async (opts) => {
+        seedCalls.push(opts);
+        order.push('seeded');
+      },
+    });
+
+    // Act
+    const deliveryResults: boolean[] = [];
+    await backend.create({
+      taskId: 'seedtask',
+      taskTitle: 'Seeded task',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/seeded-task-0001',
+      agentCli: 'claude',
+      agentSessionId: 'agent-session-xyz',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt: 'Do the seeded thing.',
+      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — seeded with exactly the mission, and strictly before the pane
+    // ever sees the bootstrap command (a race here would leave
+    // session-bootstrap.sh's resume-check nothing to find yet).
+    expect(seedCalls).toEqual([
+      { agentSessionId: 'agent-session-xyz', cwd: '/tmp/repo', prompt: 'Do the seeded thing.' },
+    ]);
+    expect(order).toEqual(['seeded', 'bootstrap-typed']);
+  });
+
+  it('reports delivered=true when a successful seed leads to a resume (bootstrap script already deleted the brief file)', async () => {
+    // Arrange — session-bootstrap.sh deletes the brief file itself once its
+    // own resume-check finds the transcript the seed just wrote.
+    const briefPath = localBriefPath('resumetask', 'primary');
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'has-session') throw new Error('missing');
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: fastPaneIdleOptions,
+      seedRunner: async () => {
+        if (existsSync(briefPath)) unlinkSync(briefPath);
+      },
+    });
+
+    // Act
+    const deliveryResults: boolean[] = [];
+    await backend.create({
+      taskId: 'resumetask',
+      taskTitle: 'Resume task',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/resume-task-0001',
+      agentCli: 'claude',
+      agentSessionId: 'agent-session-resumed',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt: 'This should be resumed via the seed.',
+      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — delivered via the headless turn, not a pane paste.
+    expect(deliveryResults).toEqual([true]);
+    expect(calls.some((args) => args[0] === 'paste-buffer')).toBe(false);
+  });
+
+  it('falls back to the normal typed-paste delivery when the headless seed fails', async () => {
+    // Arrange
+    const literals: string[] = [];
+    let pasted = false;
+    let pasteVerified = false;
+    const runner: TmuxCommandRunner = async (args) => {
+      if (args[0] === 'has-session') throw new Error('missing');
+      if (args[0] === 'paste-buffer') pasted = true;
+      if (args[0] === 'send-keys' && args[3] === '-l') literals.push(args[4] ?? '');
+      if (args[0] === 'capture-pane' && pasted && !pasteVerified) {
+        pasteVerified = true;
+        return { stdout: 'Fix the flaky test.', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = new TmuxBackend({
+      runner,
+      idGenerator: () => 'session-1',
+      now: () => 123,
+      paneIdleOptions: fastPaneIdleOptions,
+      seedRunner: async () => {
+        throw new Error('claude --print seed exited with code 1');
+      },
+    });
+
+    // Act
+    const deliveryResults: boolean[] = [];
+    await backend.create({
+      taskId: 'seedfailtask',
+      taskTitle: 'Seed fails',
+      slot: 'primary',
+      repoPath: '/tmp/repo',
+      branch: 'ab/seed-fails-0001',
+      agentCli: 'claude',
+      agentSessionId: 'agent-session-seedfail',
+      cwd: '/tmp/repo',
+      baseBranch: 'main',
+      usesWorktree: false,
+      sessionBootstrapScript: '/tmp/bootstrap.sh',
+      initialPrompt: 'Fix the flaky test.',
+      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert — falls back exactly like the seed never existed: a fresh
+    // session, brief typed as a path, delivered via the normal paste.
+    expect(deliveryResults).toEqual([true]);
+    expect(literals.join('')).toContain('AGENTBOARD_INITIAL_PROMPT_FILE=');
   });
 });
 
