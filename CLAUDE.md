@@ -87,6 +87,24 @@ Sessions are either PTY-backed (embedded in the TUI terminal pane) or tmux-backe
 - If you change Go TUI code, run `npm run build:go` and relaunch the TUI
 - Tests use `vitest` — no jest globals; use `import { describe, it, expect } from 'vitest'`
 
+## Changing AgentBoard? Update the skill in the same PR
+
+`skills/agentboard/SKILL.md` is the instruction set every agent working an AgentBoard card reads, and people copy it into their own `~/.claude/skills/`. A stale copy is worse than none: it reads as authoritative and sends agents down paths that no longer exist.
+
+It is part of the change, not a follow-up, whenever you touch:
+
+- **the CLI an agent drives** — `task create` and its flags, `notify`, `restart`, `redeliver-prompt`, `delete`, `ls`, `fleet`, `attention`, `repos ls`;
+- **what a `fleet` column means** — `BUSY`, `DELIVERY`, `TRUST-PROMPT` and `PANE` all carry semantics an agent acts on;
+- **how a brief reaches an agent**, or how sessions are named, auto-linked as subtasks, or notified about a subtask's PR;
+- **what cleanup preserves** — including the `refs/agentboard/archive/<taskId>` name itself.
+
+Adding a command without a line in the skill is the same defect pointing the other way: agents will not find it.
+
+Two rules, both learned by getting this wrong:
+
+1. **Verify against the CLI; do not write from memory.** Run the command and read its output. This file *and* the old skill both claimed `agentboard repos` lists repos — it is a command group that prints help, and `repos ls` is the listing. The error survived because nobody ran it.
+2. **The command's own `--help` is documentation too.** `redeliver-prompt`'s description outlived the delivery pipeline it described by five PRs, and it is the first thing an agent reads. Update it with the behaviour, and check the command list in `README.md` while you are there.
+
 ## Creating sub-tasks (`agentboard task create`)
 
 An agent working a card in this repo can spin off follow-up work as a new card via `agentboard task create <title> --repo <id> --description "..."`. Before doing so:
