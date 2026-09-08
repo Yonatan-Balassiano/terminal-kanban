@@ -23,7 +23,6 @@ import {
   pasteMarker,
   sleep,
   submitAndVerify,
-  waitForForegroundCommand,
   waitForStablePane,
   waitForTrustPromptAndDismiss,
   type PaneIdleWaitOptions,
@@ -233,32 +232,19 @@ export class TmuxBackend implements SessionBackend {
         initialPromptFile,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
-      if (initialPromptFile) {
-        // Not awaited: delivery can take well over a minute in the worst case
-        // (a slow SessionStart hook chain — confirmed live), and this method's
-        // caller is a synchronous RPC round trip an agent's own Bash tool call
-        // is waiting on. Blocking that long risked the caller's own timeout
-        // firing first and retrying `agentboard task create`, which — since
-        // createTask is not idempotent — would create a second card instead
-        // of just being patient. The session record below is returned as soon
-        // as the pane exists; delivery finishes (or gives up) in the background.
-        void this.deliverInitialPrompt(
-          backendSessionId,
-          initialPromptFile,
-          opts.agentCli,
-          opts.initialPrompt,
-        )
-          .then((delivered) => {
-            opts.onDeliveryResult?.(delivered);
-          })
-          .catch(() => {
-            // Best-effort: a failure here leaves the brief typed but unsubmitted
-            // in the pane, same as the fixed-delay version before this always
-            // risked — there is nowhere useful to surface it from inside a
-            // detached backend call.
-            opts.onDeliveryResult?.(false);
-          });
-      }
+      // The brief rides the bootstrap command's own argv from here — see
+      // session-bootstrap.sh. Nothing is pasted into this pane, so there is no
+      // delivery to wait for, retry, or verify.
+      //
+      // The trust dialog still has to be answered, though, and it is the one
+      // thing that can stall an unattended session before the CLI ever reads
+      // its argv: on a worktree Claude Code has not seen before it opens with
+      // "do you trust this folder", default-highlighted on "No, exit". Left
+      // alone, a --start'ed card sits there forever. Not awaited, for the same
+      // reason delivery never was — the caller is a synchronous RPC round trip
+      // an agent's Bash call is blocked on, and `createTask` is not idempotent,
+      // so a client timeout that retries would mint a second card.
+      void this.dismissTrustPromptInBackground(backendSessionId);
     }
 
     const now = this.now();
@@ -292,36 +278,67 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /**
-   * Delivers the card's brief once the pane looks ready for it, instead of
-   * trusting the agent CLI to have picked it up from argv on its own.
+   * Answers Claude Code's first-run trust dialog on a freshly spawned pane.
    *
-   * Skipped when `briefFile` is gone: `session-bootstrap.sh` deletes it itself
-   * when the pane turned out to be resuming an existing conversation, which is
-   * the one signal both sides need to agree the brief should not be replayed.
+   * Split out of brief delivery, which no longer touches the pane at all. This
+   * is now the only thing the daemon types into a starting session, and it
+   * exists because the dialog blocks the CLI before it reads its own argv:
+   * AgentBoard created this worktree itself, under a repo the user registered,
+   * so the trust is implicit, but nobody is watching an unattended card to
+   * answer it.
    *
-   * `agentCli` — the same 'claude'/'codex' name session-bootstrap.sh execs as
-   * its `command_name` — gates the paste on that process actually being the
-   * pane's foreground command. Without it, a slow `git checkout`/`pull` in the
-   * bootstrap script ahead of the CLI can look "stable" to
-   * {@link waitForStablePane} and take the paste itself: a plain shell has no
-   * bracketed-paste request of its own, so the brief's blank lines read back
-   * as separate Enters and only its first line — the subtask notice,
-   * typically — ends up submitted.
+   * Deliberately never a bare Enter — the default-highlighted option is
+   * "No, exit", so an Enter alone quits the CLI.
+   *
+   * Fully best-effort: a pane with no dialog settles and this returns having
+   * sent nothing.
+   */
+  private async dismissTrustPromptInBackground(backendSessionId: string): Promise<void> {
+    try {
+      const target = await this.resolveInputTarget(backendSessionId);
+      const capture = async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;
+      await waitForTrustPromptAndDismiss(
+        capture,
+        async () => {
+          await this.runner(['send-keys', '-t', target, 'Down']);
+        },
+        async () => {
+          await this.runner(['send-keys', '-t', target, 'Enter']);
+        },
+        this.paneIdleOptions,
+      );
+    } catch {
+      // A pane that went away, or a tmux that refused — neither is worth
+      // failing a session over.
+    }
+  }
+
+  /**
+   * Delivers text into an already-running session's pane.
+   *
+   * Only reached by `redeliverPrompt` now — `notifyTaskSession` and the manual
+   * `redeliver-prompt` escape hatch. A card's *opening* brief no longer comes
+   * through here at all: it rides the agent CLI's own argv at launch (see
+   * session-bootstrap.sh), which removed every startup race this path used to
+   * have to guess its way around.
+   *
+   * What remains is the genuinely terminal-bound case — typing into a CLI that
+   * is already up — where there is no channel other than the pane, so the
+   * paste still has to be verified on screen before its Enter is trusted.
    *
    * Resolves `true` once the paste has been verified and Enter sent to
    * submit it, `false` when the paste never verified (nothing was
-   * submitted) or the brief file was gone (a resume — nothing to deliver).
+   * submitted) or the brief file was gone.
    */
   private deliverInitialPrompt(
     backendSessionId: string,
     briefFile: string,
-    agentCli?: string,
     promptText?: string,
     skipIfAlreadyOnPane = false,
   ): Promise<boolean> {
     // Never two at once into the same pane — see {@link DeliveryGuard}.
     return this.deliveries.run(backendSessionId, promptText ?? '', () =>
-      this.deliverToPane(backendSessionId, briefFile, agentCli, promptText, skipIfAlreadyOnPane),
+      this.deliverToPane(backendSessionId, briefFile, promptText, skipIfAlreadyOnPane),
     );
   }
 
@@ -329,7 +346,6 @@ export class TmuxBackend implements SessionBackend {
   private async deliverToPane(
     backendSessionId: string,
     briefFile: string,
-    agentCli?: string,
     promptText?: string,
     skipIfAlreadyOnPane = false,
   ): Promise<boolean> {
@@ -344,30 +360,13 @@ export class TmuxBackend implements SessionBackend {
       await this.runner(['send-keys', '-t', target, 'Enter']);
     };
 
+    // Still worth a check, cheaply: this path also runs against a session that
+    // was only just created, whose dialog the background dismissal may not have
+    // reached yet. A bare Enter on that dialog selects "No, exit".
     const trusted = await autoTrustIfPrompted(capture, sendTrustDown, sendTrustEnter);
     if (trusted) {
       // The prompt just gave way to the CLI's own startup, hooks included —
       // wait for that to settle too before treating the pane as ready.
-      await waitForStablePane(capture, this.paneIdleOptions);
-    }
-
-    if (agentCli) {
-      await waitForForegroundCommand(
-        async () => {
-          const result = await this.runner(buildTmuxListPanesArgs(TMUX_PANE_PROCESS_FORMAT, target));
-          return parseTmuxPaneProcess(result.stdout).currentCommand;
-        },
-        agentCli,
-        this.paneIdleOptions,
-      );
-    }
-
-    // Watch for the dialog again, now that the CLI is confirmed to be the
-    // pane's foreground process — a bounded poll, not one more snapshot,
-    // since the dialog can render at any point after becoming foreground,
-    // not just immediately. Missing it here means the eventual submit Enter
-    // lands on "No, exit" instead of the brief.
-    if (await waitForTrustPromptAndDismiss(capture, sendTrustDown, sendTrustEnter, this.paneIdleOptions)) {
       await waitForStablePane(capture, this.paneIdleOptions);
     }
 
@@ -428,7 +427,6 @@ export class TmuxBackend implements SessionBackend {
     return this.deliverInitialPrompt(
       backendSessionId,
       briefFile,
-      agentCli,
       prompt,
       options.skipIfAlreadyOnPane ?? false,
     );

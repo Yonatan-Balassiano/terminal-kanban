@@ -298,6 +298,114 @@ describe('session-bootstrap.sh agent session resume', () => {
   });
 });
 
+describe('session-bootstrap.sh initial brief', () => {
+  const SESSION_ID = '5f3a1c2e-9b47-4d80-a1f6-2c8e7d4b0913';
+
+  /**
+   * Runs the real bootstrap with a fake agent that writes every argument it
+   * received to a file, so the brief can be compared byte-for-byte rather than
+   * through a shell echo that would normalise its whitespace.
+   */
+  async function runWithBrief({
+    brief,
+    existingConversation = false,
+  }: {
+    brief?: string;
+    existingConversation?: boolean;
+  }): Promise<{ args: string[]; briefFile: string }> {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-brief-'));
+    try {
+      const argsFile = join(dir, 'received-args');
+      const fake = join(dir, 'claude');
+      // printf '%s\0' keeps arguments separable even when one contains newlines.
+      writeFileSync(fake, `#!/bin/bash\nprintf '%s\\0' "$@" > ${JSON.stringify(argsFile)}\n`);
+      chmodSync(fake, 0o755);
+
+      const claudeConfig = join(dir, 'claude-config');
+      if (existingConversation) {
+        const project = join(claudeConfig, 'projects', '-some-checkout');
+        mkdirSync(project, { recursive: true });
+        writeFileSync(join(project, `${SESSION_ID}.jsonl`), '{}\n');
+      }
+
+      const briefFile = join(dir, 'brief.txt');
+      if (brief !== undefined) {
+        writeFileSync(briefFile, brief);
+      }
+
+      const command = buildNewSessionBootstrapCommand({
+        repoPath: dir,
+        branch: 'ab/api-0001',
+        agentCli: 'claude',
+        usesWorktree: true,
+        cwd: dir,
+        sessionBootstrapScript: BOOTSTRAP,
+        agentSessionId: SESSION_ID,
+        ...(brief !== undefined ? { initialPromptFile: briefFile } : {}),
+      });
+
+      await execFileAsync('bash', ['-c', command], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env['PATH'] ?? ''}`,
+          CLAUDE_CONFIG_DIR: claudeConfig,
+        },
+      });
+
+      const raw = readFileSync(argsFile, 'utf8');
+      // Trailing empty element from the final NUL separator.
+      const args = raw.split('\0').slice(0, -1);
+      return { args, briefFile };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('hands the brief to the agent as a single argument, byte for byte', async () => {
+    // Arrange — everything a pasted brief used to mangle: blank lines (which
+    // tmux rewrote to carriage returns), quotes, $VARS and backticks.
+    const brief = 'Fix the thing.\n\n- a "quoted" $VAR and `backticks`\n- second bullet\n';
+
+    // Act
+    const { args } = await runWithBrief({ brief });
+
+    // Assert — one argument, not several, and unexpanded.
+    expect(args[args.length - 1]).toBe(brief.replace(/\n+$/, ''));
+  });
+
+  it('carries a brief far larger than the pane input limit', async () => {
+    // Arrange — the ~4 KB pane-input truncation that originally forced the
+    // brief off the command line only ever applied to what is typed into the
+    // pane. The contents travel in a file, so size stops mattering.
+    const brief = `Start.\n${'x'.repeat(40_000)}\nEnd.`;
+
+    // Act
+    const { args } = await runWithBrief({ brief });
+
+    // Assert
+    expect(args[args.length - 1]).toBe(brief);
+  });
+
+  it('does not replay the brief into a resumed conversation', async () => {
+    // Arrange + Act — the agent already did this work.
+    const { args } = await runWithBrief({ brief: 'Do the thing.', existingConversation: true });
+
+    // Assert
+    expect(args).toContain('--resume');
+    expect(args.some((arg) => arg.includes('Do the thing.'))).toBe(false);
+  });
+
+  it('removes the brief file either way, so a reopen cannot re-read it', async () => {
+    // Act
+    const { briefFile } = await runWithBrief({ brief: 'Do the thing.' });
+
+    // Assert
+    expect(existsSync(briefFile)).toBe(false);
+  });
+
+});
+
 describe('session-bootstrap.sh worktree marker file', () => {
   /**
    * Runs the real bootstrap through a real shell, with a fake agent that does
@@ -381,7 +489,7 @@ describe('session-bootstrap.sh opening prompt', () => {
    *
    * One argument per line is the point: a brief that arrived split across
    * several arguments, or with its `$` and backticks expanded by the shell, is
-   * exactly the corruption the base64 round trip exists to prevent.
+   * exactly the corruption that reading it from a file avoids.
    */
   async function runBootstrap({
     initialPrompt,
@@ -474,37 +582,38 @@ describe('session-bootstrap.sh opening prompt', () => {
     expect(command.length).toBeLessThan(1024);
   });
 
-  it('never hands the brief to the agent as an argument, however unruly its contents', async () => {
+  it('hands the brief to the agent unexpanded, however unruly its contents', async () => {
     // Arrange — quotes, `$`, backticks and a newline all in one brief, plus
-    // enough bulk that it could never have ridden the command line. Delivery
-    // is the daemon's job now (see TmuxBackend.deliverInitialPrompt); the
-    // script's job is only to leave the file for it to find.
+    // enough bulk that it could never have ridden the command line itself.
+    // Only the file's path travels through argv construction; the contents are
+    // read by the script, so the shell never gets a chance to expand them.
     const prompt = `Fix $HOME "now" and \`date\`\nsecond line\n${'x'.repeat(8000)}`;
 
     // Act
     const { stdout, briefFileExists } = await runBootstrap({ initialPrompt: prompt });
 
-    // Assert — nothing from the brief reaches argv, and the file survives.
-    expect(stdout).not.toContain('ARG<');
-    expect(briefFileExists).toBe(true);
+    // Assert — reaches the agent verbatim, with $HOME and `date` untouched.
+    expect(stdout).toContain('ARG<Fix $HOME "now" and `date`');
+    // Consumed, so a reopen of this card cannot replay it.
+    expect(briefFileExists).toBe(false);
   });
 
-  it('leaves the brief file for the daemon when the card is claiming a fresh conversation id', async () => {
+  it('passes the brief alongside the session flag when claiming a fresh conversation id', async () => {
     // Act
     const { stdout, briefFileExists } = await runBootstrap({
       initialPrompt: 'Ship the thing',
       agentSessionId: SESSION_ID,
     });
 
-    // Assert — the session flag still rides argv; the brief itself no longer does.
+    // Assert — both ride argv: the flag pins the conversation, the brief opens it.
     expect(stdout).toContain(`ARG<--session-id>`);
-    expect(stdout).not.toContain('ARG<Ship the thing>');
-    expect(briefFileExists).toBe(true);
+    expect(stdout).toContain('ARG<Ship the thing>');
+    expect(briefFileExists).toBe(false);
   });
 
-  it('deletes the brief file for a resumed conversation, so nothing gets delivered', async () => {
+  it('never replays the brief into a resumed conversation', async () => {
     // Arrange + Act — the agent already did this work; replaying the brief would
-    // start it over. Deletion is the signal the daemon checks for.
+    // start it over.
     const { stdout, briefFileExists } = await runBootstrap({
       initialPrompt: 'Ship the thing',
       agentSessionId: SESSION_ID,

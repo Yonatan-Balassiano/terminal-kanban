@@ -28,10 +28,6 @@ export interface PaneIdleWaitOptions {
   maxSubmitRetries?: number;
   /** Gap between each check of whether the pane changed. */
   submitRetryIntervalMs?: number;
-  /** How long to wait for the agent CLI to become the pane's foreground process. */
-  foregroundCommandTimeoutMs?: number;
-  /** How often to re-check the pane's foreground process while waiting. */
-  foregroundCommandIntervalMs?: number;
   /** How long to wait, per attempt, for a pasted brief's own start to render. */
   pasteVerifyTimeoutMs?: number;
   /** How often to re-check the pane while waiting for a paste to render. */
@@ -63,37 +59,24 @@ export const DEFAULT_POST_PASTE_DELAY_MS = 600;
 // for whatever this ceiling still doesn't cover.
 export const DEFAULT_MAX_SUBMIT_RETRIES = 85;
 export const DEFAULT_SUBMIT_RETRY_INTERVAL_MS = 2500;
-// The bootstrap script's own pre-launch work (checking out the base branch,
-// pulling, and so on) runs entirely before the agent CLI is even the pane's
-// foreground process, and can go silent for several seconds at a time on a
-// slow fetch — long enough for `waitForStablePane`'s "screen stopped
-// changing" heuristic to false-positive on "ready", landing the paste in a
-// plain shell instead of the CLI's own input box. That shell has no bracketed
-// paste request of its own, so the brief's embedded blank lines get read back
-// as separate Enters, submitting only the first line — a boilerplate subtask
-// notice, say — while the rest is left as stray, unsubmitted text.
-export const DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS = 30_000;
-const DEFAULT_FOREGROUND_COMMAND_INTERVAL_MS = 500;
 // Confirmed live on a several-KB multi-paragraph brief: the pane ended up
 // with only the final paragraph as its first submitted message, its blank
 // lines rendered back as literal `\r` bytes rather than newlines within the
 // input box. Something between tmux's `paste-buffer` and the CLI's own input
-// handling can mangle a large burst — bracketed-paste negotiation is itself
-// a race no less real than the one `waitForForegroundCommand` guards against,
-// just one layer deeper (the process is already `claude`; its input handling
-// may not have finished initializing yet). Whatever the exact mechanism,
-// checking the pane actually shows the brief's own opening before trusting a
-// paste catches it regardless.
+// handling can mangle a large burst. Part of that was the paste flags — see
+// `buildTmuxPasteBufferArgs`, which was replacing every linefeed with a
+// carriage return — but bracketed-paste negotiation is a race of its own, one
+// layer deeper: the process is already the agent CLI, yet its input handling
+// may not have finished initializing. Checking the pane actually shows the
+// text's own opening before trusting a paste catches both.
 export const DEFAULT_PASTE_VERIFY_TIMEOUT_MS = 2_000;
 const DEFAULT_PASTE_VERIFY_INTERVAL_MS = 200;
 export const DEFAULT_MAX_PASTE_ATTEMPTS = 3;
 const PASTE_MARKER_LENGTH = 24;
-// Confirmed live: becoming the pane's foreground process (satisfying
-// waitForForegroundCommand) is not proof the CLI has finished rendering its
-// own first screen — the trust dialog can still appear afterward. A single
-// extra one-shot check right after waitForForegroundCommand narrows that gap
-// but does not close it, since the dialog can render later still. This has
-// to be a bounded poll, not another snapshot.
+// The dialog does not necessarily render the moment the CLI starts — a slow
+// SessionStart hook chain can hold it back — so a one-shot check misses it,
+// and a second one-shot check only narrows the gap rather than closing it.
+// This has to be a bounded poll, not a snapshot.
 export const DEFAULT_TRUST_PROMPT_TIMEOUT_MS = 3_000;
 const DEFAULT_TRUST_PROMPT_INTERVAL_MS = 200;
 const DEFAULT_TRUST_PROMPT_STABLE_CHECKS = 2;
@@ -114,9 +97,7 @@ const DEFAULT_TRUST_PROMPT_STABLE_CHECKS = 2;
  * instead of silently re-introducing that bug. Summed over the pipeline in
  * `deliverInitialPrompt`'s own order:
  *   - {@link waitForStablePane}, twice (once more after the trust prompt)
- *   - {@link waitForForegroundCommand}
- *   - {@link waitForTrustPromptAndDismiss}: the dialog can render even after
- *     the CLI is confirmed foreground, so this is a bounded poll of its own
+ *   - {@link waitForTrustPromptAndDismiss}: a bounded poll of its own
  *   - {@link pasteAndVerify}: every attempt's verify window plus its post-paste pause
  *   - {@link submitAndVerify}: every Enter retry
  */
@@ -126,7 +107,6 @@ export function deliveryBudgetMs(options: PaneIdleWaitOptions = {}): number {
     postPasteDelayMs = DEFAULT_POST_PASTE_DELAY_MS,
     maxSubmitRetries = DEFAULT_MAX_SUBMIT_RETRIES,
     submitRetryIntervalMs = DEFAULT_SUBMIT_RETRY_INTERVAL_MS,
-    foregroundCommandTimeoutMs = DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS,
     pasteVerifyTimeoutMs = DEFAULT_PASTE_VERIFY_TIMEOUT_MS,
     maxPasteAttempts = DEFAULT_MAX_PASTE_ATTEMPTS,
     trustPromptTimeoutMs = DEFAULT_TRUST_PROMPT_TIMEOUT_MS,
@@ -134,7 +114,6 @@ export function deliveryBudgetMs(options: PaneIdleWaitOptions = {}): number {
 
   return (
     timeoutMs * 2 +
-    foregroundCommandTimeoutMs +
     trustPromptTimeoutMs +
     maxPasteAttempts * (pasteVerifyTimeoutMs + postPasteDelayMs) +
     maxSubmitRetries * submitRetryIntervalMs
@@ -191,11 +170,9 @@ export async function autoTrustIfPrompted(
  *
  * `autoTrustIfPrompted` alone is a single check: fine when the prompt is
  * already showing, but confirmed live to miss it when the dialog renders
- * *after* the check ran — becoming the pane's foreground process (see
- * `waitForForegroundCommand`) is not proof the CLI has finished painting its
- * own first screen yet. Re-running that one-shot check again later narrows
- * the gap but never closes it, since the dialog can just as easily render
- * after the second check too. This polls instead: it keeps looking until
+ * *after* the check ran. Re-running that one-shot check later narrows the gap
+ * but never closes it, since the dialog can just as easily render after the
+ * second check too. This polls instead: it keeps looking until
  * either the prompt appears (dismissed immediately) or the pane has settled
  * on something else for `trustPromptStableChecks` consecutive captures,
  * meaning there is nothing left to wait for.
@@ -269,47 +246,6 @@ export async function waitForStablePane(
     }
     previous = current;
     await sleep(intervalMs);
-  }
-}
-
-/**
- * Waits for the pane's foreground process to become the agent CLI itself,
- * rather than the bootstrap script (or whatever it's currently shelling out
- * to — `git`, `corepack`, ...) that runs ahead of it.
- *
- * `waitForStablePane` alone cannot tell those apart: a silent `git pull` looks
- * exactly as "settled" as a CLI sitting at its input prompt. Pasting into the
- * former lands the brief in a plain shell instead of the chat box — see
- * {@link DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS}.
- *
- * Matched by prefix, not exact equality: confirmed live, `codex`'s installed
- * binary is invoked via a symlink to `codex-aarch64-apple-darwin`, and the
- * kernel's own process-name field truncates that to `codex-aarch64-a` —
- * never equal to the plain `codex` `agentCli` value, which silently defeated
- * this gate for every codex session before this fix (`claude`'s own binary
- * is short enough to never truncate, so its exact-match happened to work by
- * coincidence). A prefix match covers both without needing to special-case
- * either CLI's actual binary name.
- *
- * Best-effort like the rest of this module: gives up and lets the caller
- * proceed after the timeout rather than blocking forever if the process name
- * never matches (a mismatch here is a reason to try anyway, not to hang).
- */
-export async function waitForForegroundCommand(
-  getCurrentCommand: () => Promise<string | undefined>,
-  expectedCommand: string,
-  {
-    foregroundCommandTimeoutMs = DEFAULT_FOREGROUND_COMMAND_TIMEOUT_MS,
-    foregroundCommandIntervalMs = DEFAULT_FOREGROUND_COMMAND_INTERVAL_MS,
-  }: PaneIdleWaitOptions = {},
-): Promise<void> {
-  const deadline = Date.now() + foregroundCommandTimeoutMs;
-  while (Date.now() < deadline) {
-    const current = await getCurrentCommand();
-    if (current?.startsWith(expectedCommand)) {
-      return;
-    }
-    await sleep(foregroundCommandIntervalMs);
   }
 }
 

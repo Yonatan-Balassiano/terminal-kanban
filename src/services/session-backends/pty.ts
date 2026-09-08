@@ -12,11 +12,6 @@ import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
 import { writeLocalBrief } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
-import {
-  defaultLocalClaudeSeedRunner,
-  type ClaudeSeedOptions,
-  type ClaudeSeedRunner,
-} from './claude-seed.js';
 
 const require = createRequire(import.meta.url);
 
@@ -31,18 +26,10 @@ try {
 
 type IPty = import('node-pty').IPty;
 
-/** @deprecated Use {@link ClaudeSeedOptions} from `./claude-seed.js` instead. */
-export type PtySeedOptions = ClaudeSeedOptions;
-/** @deprecated Use {@link ClaudeSeedRunner} from `./claude-seed.js` instead. */
-export type PtySeedRunner = ClaudeSeedRunner;
-
 export class PtyBackend implements SessionBackend {
   private ptys = new Map<string, IPty>();
 
-  constructor(
-    private onData?: (taskId: string, slot: SessionSlot, data: string) => void,
-    private seedRunner: ClaudeSeedRunner = defaultLocalClaudeSeedRunner,
-  ) {}
+  constructor(private onData?: (taskId: string, slot: SessionSlot, data: string) => void) {}
 
   async healthCheck(): Promise<BackendHealth> {
     if (nodePty !== null) {
@@ -98,26 +85,17 @@ export class PtyBackend implements SessionBackend {
         : undefined,
     })}\n`;
 
-    // Headless-seed a transcript before the interactive pty ever starts, so
-    // session-bootstrap.sh's own resume-check (unmodified) picks `--resume`
-    // on its own — see PtySeedRunner above. Claude-only: opts.agentCli may be
-    // 'codex', whose resume flags aren't wired up (session-bootstrap.ts), and
-    // this seed call is specifically `claude --session-id ... --print`.
-    if (opts.initialPrompt && opts.agentSessionId && opts.agentCli === 'claude') {
-      try {
-        await this.seedRunner({
-          agentSessionId: opts.agentSessionId,
-          cwd,
-          prompt: opts.initialPrompt,
-        });
-      } catch {
-        // Best-effort: session-bootstrap.sh's own resume-check simply won't
-        // match (no transcript was written), so it falls back to
-        // `--session-id` fresh, same as if this seeding never existed. Never
-        // let a failed seed block the interactive pty from opening.
-      }
-    }
-
+    // No headless seeding any more. It existed only because a pty had no way
+    // to hand its agent an opening brief — this backend cannot paste into its
+    // own pty — so the brief was replayed into a `claude --print` run first,
+    // purely so session-bootstrap.sh's resume-check would find a transcript.
+    // That was expensive and unsupervised: `--print` runs with tool access, so
+    // the seed did not merely receive the mission, it executed it (~4 minutes
+    // of real tool calls, observed) before the interactive pane ever opened.
+    //
+    // session-bootstrap.sh now hands the brief to the CLI as argv, exactly as
+    // it does for tmux and ssh, so a pty session gets its brief from the same
+    // one mechanism as every other backend and nothing runs ahead of it.
     pty.write(checkoutCmd);
 
     this.ptys.set(backendSessionId, pty);

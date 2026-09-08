@@ -267,6 +267,16 @@ describe('TmuxBackend brief handling', () => {
       captureResponses?: string[];
       maxSubmitRetries?: number;
       submitRetryIntervalMs?: number;
+      /**
+       * Also run a re-delivery afterwards, and report only what that did.
+       *
+       * `create()` no longer pastes anything — the brief rides the agent CLI's
+       * own argv (see session-bootstrap.sh) — so every assertion about pasting,
+       * verifying and submitting now belongs to the one path that still types
+       * into a pane: `redeliverPrompt`, behind `task notify` and the manual
+       * `redeliver-prompt` escape hatch.
+       */
+      redeliver?: boolean;
     } = {},
   ): Promise<{
     typed: string;
@@ -342,10 +352,25 @@ describe('TmuxBackend brief handling', () => {
       onDeliveryResult: (delivered) => deliveryResults.push(delivered),
     });
 
-    // Delivery is fire-and-forget now (create() must not block its caller for
-    // up to two minutes) — give its chain of zero-delay timers a real tick to
-    // finish before asserting on what it did.
+    // The background trust-prompt watch is fire-and-forget — give its chain of
+    // zero-delay timers a real tick to finish before asserting on the calls.
     await new Promise((resolve) => setTimeout(resolve, 50));
+
+    if (options.redeliver) {
+      const createCalls = calls.length;
+      deliveryResults.push(
+        await backend.redeliverPrompt(
+          'brieftask',
+          'primary',
+          'ab_long_brief_brie_p',
+          initialPrompt,
+          'claude',
+        ),
+      );
+      // Only what the re-delivery itself did, so create()'s own setup calls
+      // don't have to be threaded through every assertion below.
+      calls.splice(0, createCalls);
+    }
 
     return {
       typed: literals.join(''),
@@ -399,7 +424,7 @@ describe('TmuxBackend brief handling', () => {
     const brief = 'First paragraph.\n\nSecond paragraph.';
 
     // Act
-    const { calls } = await createWithBrief(brief);
+    const { calls } = await createWithBrief(brief, { redeliver: true });
 
     // Assert — both flags, or the agent receives a corrupted brief.
     //   -r  keeps the linefeeds. tmux's documented default rewrites every LF
@@ -414,14 +439,14 @@ describe('TmuxBackend brief handling', () => {
     expect(paste).toContain('-p');
   });
 
-  it('delivers the brief by pasting it in once the pane settles, not by typing it', async () => {
+  it('re-delivers by pasting once the pane settles, not by typing', async () => {
     // Arrange
     const brief = 'Fix $HOME "now"\nsecond line';
 
     // Act
-    const { calls, deliveryResults } = await createWithBrief(brief);
+    const { calls, deliveryResults } = await createWithBrief(brief, { redeliver: true });
 
-    // Assert — the fire-and-forget onDeliveryResult callback reports success.
+    // Assert — the re-delivery reports a verified paste.
     expect(deliveryResults).toEqual([true]);
 
     // Assert — capture-pane runs before the paste, and the paste comes from a
@@ -429,8 +454,6 @@ describe('TmuxBackend brief handling', () => {
     const captureIndex = calls.findIndex((args) => args[0] === 'capture-pane');
     const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
     const pasteIndex = calls.findIndex((args) => args[0] === 'paste-buffer');
-    // The bootstrap command's own submit also sends an Enter, earlier on —
-    // the one that matters here is the last one, after the paste.
     const enterIndex = calls
       .map((args, index) => ({ args, index }))
       .filter(({ args }) => args[0] === 'send-keys' && args.includes('Enter'))
@@ -455,84 +478,26 @@ describe('TmuxBackend brief handling', () => {
   it('stops as soon as the pane shows the Enter took, without over-sending it', async () => {
     // Arrange — the pane changes on the very first post-submit check.
     const { calls } = await createWithBrief('Ship the thing', {
+      redeliver: true,
       captureResponses: ['idle, brief sitting in the box', 'Cogitating…'],
       maxSubmitRetries: 3,
     });
 
-    // Assert — the bootstrap command's own Enter plus exactly one for the
-    // brief; no retries once the change was confirmed.
-    expect(enterCalls(calls)).toHaveLength(2);
+    // Assert — exactly one Enter; no retries once the change was confirmed.
+    expect(enterCalls(calls)).toHaveLength(1);
   });
 
   it('resends Enter when the pane never changes, up to the retry limit', async () => {
     // Arrange — the pane looks identical on every check: the Enter that
     // should have submitted the brief was dropped, over and over.
     const { calls } = await createWithBrief('Ship the thing', {
+      redeliver: true,
       captureResponses: ['idle, brief still sitting in the box'],
       maxSubmitRetries: 3,
     });
 
-    // Assert — the bootstrap command's own Enter, plus the initial attempt at
-    // the brief, plus 3 retries: 5 in total.
-    expect(enterCalls(calls)).toHaveLength(5);
-  });
-
-  it('never submits a paste whose own text never rendered — retries pasting instead of trusting a blind delay', async () => {
-    // Arrange — the pane stays empty no matter how many times the brief is
-    // pasted, simulating a large paste whose front gets silently dropped by
-    // the pane's own input handling before it ever renders.
-    const calls: string[][] = [];
-    const runner: TmuxCommandRunner = async (args) => {
-      calls.push(args);
-      if (args[0] === 'has-session') {
-        throw new Error('missing');
-      }
-      return { stdout: '', stderr: '' };
-    };
-
-    const backend = new TmuxBackend({
-      runner,
-      idGenerator: () => 'session-1',
-      now: () => 123,
-      paneIdleOptions: {
-        timeoutMs: 1000,
-        intervalMs: 0,
-        stableChecks: 1,
-        postPasteDelayMs: 0,
-        maxSubmitRetries: 0,
-        submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 0,
-        trustPromptTimeoutMs: 0,
-        pasteVerifyTimeoutMs: 0,
-        pasteVerifyIntervalMs: 0,
-        maxPasteAttempts: 3,
-      },
-    });
-
-    // Act
-    const deliveryResults: boolean[] = [];
-    await backend.create({
-      taskId: 'never-lands',
-      taskTitle: 'Never lands',
-      slot: 'primary',
-      repoPath: '/tmp/repo',
-      branch: 'ab/never-lands-0002',
-      agentCli: 'claude',
-      cwd: '/tmp/repo',
-      baseBranch: 'main',
-      usesWorktree: false,
-      sessionBootstrapScript: '/tmp/bootstrap.sh',
-      initialPrompt: 'This never renders on the pane.',
-      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // Assert — pasted up to the retry limit, but never submitted: the
-    // bootstrap command's own Enter is the only one sent, since submitting
-    // unverified content is exactly the failure this guards against.
-    expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
-    expect(deliveryResults).toEqual([false]);
-    expect(enterCalls(calls)).toHaveLength(1);
+    // Assert — the initial attempt plus 3 retries.
+    expect(enterCalls(calls)).toHaveLength(4);
   });
 });
 
@@ -791,7 +756,7 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
 });
 
 describe('TmuxBackend auto-trust', () => {
-  it('accepts a never-trusted-folder prompt (Down, then Enter) before delivering the brief', async () => {
+  it('accepts a never-trusted-folder prompt (Down, then Enter) on session start', async () => {
     // Arrange — the pane shows the real trust screen until Down is sent, then
     // settles on the CLI's normal ready screen for everything after.
     const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
@@ -822,9 +787,8 @@ describe('TmuxBackend auto-trust', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        // No process name to match in these mocks — skip the foreground-command gate.
-        foregroundCommandTimeoutMs: 0,
-        trustPromptTimeoutMs: 0,
+        trustPromptTimeoutMs: 1000,
+        trustPromptIntervalMs: 0,
       },
     });
 
@@ -844,17 +808,17 @@ describe('TmuxBackend auto-trust', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // Assert — Down before Enter (never a bare Enter, which would pick the
-    // default-highlighted "No, exit"), and the trust dance happens before
-    // the brief is ever pasted in.
+    // Assert — Down before Enter, never a bare Enter, which would pick the
+    // default-highlighted "No, exit" and quit the CLI. This is the only thing
+    // the daemon types into a starting session now; the brief itself reaches
+    // the agent through its own argv, so nothing is pasted here.
     const downIndex = calls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
     const trustEnterIndex = calls.findIndex(
       (args, i) => args[0] === 'send-keys' && args.includes('Enter') && i > downIndex,
     );
-    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
     expect(downIndex).toBeGreaterThanOrEqual(0);
     expect(trustEnterIndex).toBeGreaterThan(downIndex);
-    expect(loadIndex).toBeGreaterThan(trustEnterIndex);
+    expect(calls.some((args) => args[0] === 'load-buffer')).toBe(false);
   });
 
   it('never sends Down when the trust prompt is not showing', async () => {
@@ -905,33 +869,29 @@ describe('TmuxBackend auto-trust', () => {
     expect(calls.some((args) => args[0] === 'send-keys' && args[3] === 'Down')).toBe(false);
   });
 
-  it('catches the trust prompt on the second check, when it only renders after the CLI is already foreground', async () => {
-    // Arrange — the pane shows nothing (not even the bootstrap script's own
-    // output) on the very first capture, as if claude's process hasn't
-    // started yet; by the time waitForForegroundCommand confirms it's
-    // foreground, the trust screen has appeared. A single one-shot check
-    // right after waitForStablePane would miss this entirely.
+  it('catches a trust prompt that only renders after the first capture', async () => {
+    // Arrange — the pane shows nothing on the very first capture, as if the
+    // agent's process hasn't painted yet, and the trust screen appears only
+    // afterwards. A one-shot check would miss this entirely, which is why the
+    // dismissal is a bounded poll rather than a snapshot.
     const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
     const calls: string[][] = [];
     let trustAccepted = false;
-    let foregroundConfirmed = false;
+    let captures = 0;
     const runner: TmuxCommandRunner = async (args) => {
       calls.push(args);
       if (args[0] === 'has-session') {
         throw new Error('missing');
       }
-      if (args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}')) {
-        foregroundConfirmed = true;
-        return { stdout: '1 claude', stderr: '' };
-      }
       if (args[0] === 'send-keys' && args[3] === 'Down') {
         trustAccepted = true;
       }
       if (args[0] === 'capture-pane') {
+        captures += 1;
         if (trustAccepted) {
           return { stdout: '', stderr: '' };
         }
-        return { stdout: foregroundConfirmed ? TRUST_SCREEN : '', stderr: '' };
+        return { stdout: captures > 1 ? TRUST_SCREEN : '', stderr: '' };
       }
       return { stdout: '', stderr: '' };
     };
@@ -947,8 +907,6 @@ describe('TmuxBackend auto-trust', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 1000,
-        foregroundCommandIntervalMs: 0,
         trustPromptTimeoutMs: 1000,
         trustPromptIntervalMs: 0,
       },
@@ -970,15 +928,13 @@ describe('TmuxBackend auto-trust', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // Assert — the second check caught it: Down was sent, after the
-    // foreground process was confirmed, and the brief was still delivered.
-    const foregroundIndex = calls.findIndex(
-      (args) => args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}'),
-    );
+    // Assert — the poll caught it on a later capture, and answered it with
+    // Down before Enter rather than a bare Enter.
     const downIndex = calls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
-    const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
-    expect(downIndex).toBeGreaterThan(foregroundIndex);
-    expect(loadIndex).toBeGreaterThan(downIndex);
+    expect(downIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      calls.findIndex((args, i) => args[0] === 'send-keys' && args.includes('Enter') && i > downIndex),
+    ).toBeGreaterThan(downIndex);
   });
 });
 
