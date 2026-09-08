@@ -102,7 +102,8 @@ function stubRpc(handlers: Record<string, unknown> = {}, boardOverride?: BoardSn
       return handlers[method];
     }
     if (method === 'getBoard') return board;
-    if (method === 'deleteTask') return null;
+    if (method === 'deleteTask')
+      return { archivedShas: [], archiveRef: 'refs/agentboard/archive/task-1' };
     throw new Error(`unexpected RPC: ${method}`);
   });
   const disconnect = vi.fn();
@@ -173,9 +174,41 @@ describe('agentboard task delete', () => {
     await run('task-1', '--force');
 
     // Assert
-    expect(call).toHaveBeenCalledWith('deleteTask', { id: 'task-1' });
+    expect(call).toHaveBeenCalledWith('deleteTask', { id: 'task-1', purge: false });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Deleted task task-1'));
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('says where the agent\'s uncommitted work was kept', async () => {
+    // Arrange — agents write their findings into the worktree they work in, so
+    // a delete that says only "Deleted" leaves people assuming it is gone.
+    const { call } = stubRpc({
+      deleteTask: { archivedShas: ['abc1234'], archiveRef: 'refs/agentboard/archive/task-1' },
+    });
+
+    // Act
+    await run('task-1', '--force');
+
+    // Assert
+    expect(call).toHaveBeenCalledWith('deleteTask', { id: 'task-1', purge: false });
+    const printed = logSpy.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(printed).toContain('abc1234');
+    expect(printed).toContain('refs/agentboard/archive/task-1');
+    expect(printed).toContain('git log -p');
+  });
+
+  it('destroys uncommitted work only when --purge is given', async () => {
+    // Arrange — --force skips the confirmation; --purge is the separate,
+    // explicit decision to throw the work away.
+    const { call } = stubRpc({
+      deleteTask: { archivedShas: [], archiveRef: 'refs/agentboard/archive/task-1' },
+    });
+
+    // Act
+    await run('task-1', '--force', '--purge');
+
+    // Assert
+    expect(call).toHaveBeenCalledWith('deleteTask', { id: 'task-1', purge: true });
   });
 
   it('refuses an unknown task rather than calling deleteTask blind', async () => {

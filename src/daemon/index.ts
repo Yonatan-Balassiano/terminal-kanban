@@ -604,7 +604,12 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   sync.transports = transports;
   // Fires on reaching done, not on a merge: a card whose pull requests have
   // landed but whose change has not shipped still needs its worktrees.
-  sync.onTaskMergedOrClosed = (taskId) => taskLifecycle.cleanupTaskResources(taskId);
+  sync.onTaskMergedOrClosed = async (taskId) => {
+    // Archives uncommitted work before removing the worktree, same as a
+    // delete — a card reaching done is the other moment an agent's notes
+    // silently disappeared.
+    await taskLifecycle.cleanupTaskResources(taskId);
+  };
   if (release) {
     sync.isFullyReleased = (taskId) => release.isFullyReleased(taskId);
   }

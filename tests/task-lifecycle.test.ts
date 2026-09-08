@@ -32,6 +32,127 @@ describe('TaskLifecycleService', () => {
     rmSync(worktreePath, { recursive: true, force: true });
   });
 
+  it("archives an agent's uncommitted work before removing its worktree", async () => {
+    // Arrange — the case that nearly cost a real 257-line investigation
+    // report: agents write their findings into the worktree they are working
+    // in, so removing it was also deleting the agent's output, silently.
+    const task = board.createTask({ title: 'Has findings', repoId: 'repo-1' });
+    board.setTaskWorktree(task.id, worktreePath);
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-1', branchName: 'ab/has-findings' });
+    board.setTaskBranchWorktree(board.getTaskBranches(task.id)[0]!.id, worktreePath);
+
+    const git = {
+      removeWorktreeAsync: vi.fn(),
+      stageAndCommitWip: vi.fn(async () => 'abc1234'),
+      updateRef: vi.fn(),
+    };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateSession: vi.fn(),
+      terminateTaskSessions: vi.fn(),
+    } as never);
+
+    // Act
+    const result = await lifecycle.deleteTask(task.id);
+
+    // Assert — committed, pinned under a ref that outlives the branch, and
+    // only then removed. The ref matters: recovery has to survive the branch
+    // being deleted too, and stay plain git.
+    expect(git.stageAndCommitWip).toHaveBeenCalledWith(
+      worktreePath,
+      expect.stringContaining('[agentboard archive]'),
+    );
+    expect(git.updateRef).toHaveBeenCalledWith(
+      worktreePath,
+      `refs/agentboard/archive/${task.id}`,
+      'abc1234',
+    );
+    expect(git.removeWorktreeAsync).toHaveBeenCalled();
+    expect(result.archivedShas).toEqual(['abc1234']);
+  });
+
+  it('reports nothing archived when the worktree was already clean', async () => {
+    // Arrange — stageAndCommitWip returns null for a clean tree, and a card
+    // deleted with nothing outstanding should not claim it saved something.
+    const task = board.createTask({ title: 'Clean', repoId: 'repo-1' });
+    board.setTaskWorktree(task.id, worktreePath);
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-1', branchName: 'ab/clean' });
+    board.setTaskBranchWorktree(board.getTaskBranches(task.id)[0]!.id, worktreePath);
+
+    const git = {
+      removeWorktreeAsync: vi.fn(),
+      stageAndCommitWip: vi.fn(async () => null),
+      updateRef: vi.fn(),
+    };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateSession: vi.fn(),
+      terminateTaskSessions: vi.fn(),
+    } as never);
+
+    // Act
+    const result = await lifecycle.deleteTask(task.id);
+
+    // Assert
+    expect(result.archivedShas).toEqual([]);
+    expect(git.updateRef).not.toHaveBeenCalled();
+  });
+
+  it('destroys uncommitted work only when explicitly purged', async () => {
+    // Arrange — `--force` means "do not ask me", not "do not keep it".
+    // Conflating those is what made deletion quietly lossy.
+    const task = board.createTask({ title: 'Purge me', repoId: 'repo-1' });
+    board.setTaskWorktree(task.id, worktreePath);
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-1', branchName: 'ab/purge-me' });
+    board.setTaskBranchWorktree(board.getTaskBranches(task.id)[0]!.id, worktreePath);
+
+    const git = {
+      removeWorktreeAsync: vi.fn(),
+      stageAndCommitWip: vi.fn(async () => 'abc1234'),
+      updateRef: vi.fn(),
+    };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateSession: vi.fn(),
+      terminateTaskSessions: vi.fn(),
+    } as never);
+
+    // Act
+    const result = await lifecycle.deleteTask(task.id, { purge: true });
+
+    // Assert
+    expect(git.stageAndCommitWip).not.toHaveBeenCalled();
+    expect(git.removeWorktreeAsync).toHaveBeenCalled();
+    expect(result.archivedShas).toEqual([]);
+  });
+
+  it('still deletes a card whose worktree is too broken to archive', async () => {
+    // Arrange — a corrupt worktree must never make a card undeletable, which
+    // is the same rule the removal path already follows.
+    const task = board.createTask({ title: 'Broken', repoId: 'repo-1' });
+    board.setTaskWorktree(task.id, worktreePath);
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-1', branchName: 'ab/broken' });
+    board.setTaskBranchWorktree(board.getTaskBranches(task.id)[0]!.id, worktreePath);
+
+    const git = {
+      removeWorktreeAsync: vi.fn(),
+      stageAndCommitWip: vi.fn(async () => {
+        throw new Error('not a git repository');
+      }),
+      updateRef: vi.fn(),
+    };
+    const lifecycle = new TaskLifecycleService(db, board, git as never, {
+      terminateSession: vi.fn(),
+      terminateTaskSessions: vi.fn(),
+    } as never);
+
+    // Act
+    const result = await lifecycle.deleteTask(task.id);
+
+    // Assert — the card is gone, and the caller is told nothing was saved
+    // rather than being left to assume it was.
+    expect(result.archivedShas).toEqual([]);
+    expect(git.removeWorktreeAsync).toHaveBeenCalled();
+    expect(board.getTask(task.id)).toBeNull();
+  });
+
   it('removes the worktree when archiving a task without an active session', async () => {
     const task = board.createTask({ title: 'Archive me', repoId: 'repo-1' });
     board.setTaskWorktree(task.id, worktreePath);

@@ -447,6 +447,19 @@ export class GitService {
    * Returns null when nothing was staged — an already-clean tree has no WIP
    * commit to make.
    */
+  /**
+   * Points a ref at a commit, creating it if needed.
+   *
+   * Used to pin work archived out of a worktree that is about to be removed,
+   * under `refs/agentboard/archive/<taskId>`. A plain ref rather than a branch
+   * or a stash on purpose: it survives the branch being deleted, keeps the
+   * commit safe from garbage collection, does not show up in `git branch`, and
+   * is recoverable with ordinary git — no bespoke restore path to maintain.
+   */
+  async updateRef(repoPath: string, ref: string, sha: string): Promise<void> {
+    await this.run(gitArgv(repoPath, 'update-ref', ref, sha), repoPath);
+  }
+
   async stageAndCommitWip(repoPath: string, message: string): Promise<string | null> {
     const excludePatterns = [
       '.env',
