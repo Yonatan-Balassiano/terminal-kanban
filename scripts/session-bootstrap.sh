@@ -127,24 +127,41 @@ if [[ -n "$agent_session_id" && "$agent" == "claude" ]]; then
   fi
 fi
 
-# The card's brief file. It is no longer typed into argv here — a multi-line
-# brief handed to the CLI as a positional argument depends on the CLI's own
-# startup (its SessionStart hooks included) processing it correctly before the
-# prompt is submitted, which is not reliable. The daemon delivers it instead,
-# once this pane is up, by pasting it in directly (see TmuxBackend/SshTmuxBackend).
-#
-# Only a fresh conversation gets it: replaying the brief into a --resume would
-# hand the agent work it has already done. Deleting the file here — rather
-# than leaving it for the daemon to notice "this is a resume" itself — is the
-# one signal both sides need: the daemon delivers the brief if and only if the
-# file it wrote is still there once the pane comes up.
-if [[ -n "$initial_prompt_file" && "$resuming" == "1" ]]; then
-  rm -f "$initial_prompt_file"
-fi
-
 # agent_args is a shell-quoted argument list built by the daemon, not user
 # free-text, so eval is what re-splits it back into distinct arguments.
 eval "set -- $session_args $agent_args"
+
+# The card's brief, handed to the agent CLI as its opening prompt.
+#
+# This is argv, not a paste into the pane. The daemon used to wait for the pane
+# to look ready and then paste the brief in, which meant guessing at four things
+# it could not observe — whether the CLI had started, whether it was listening,
+# whether the text arrived intact, and whether Enter submitted it — and getting
+# any one of them wrong left the brief sitting in the input box, unsubmitted,
+# with the card silently doing nothing. argv has none of those failure modes:
+# the kernel hands the string to the process before it runs, so there is no
+# race to lose and no partial arrival to detect.
+#
+# The reason this was abandoned in 5c62f10 no longer holds. Two other bugs were
+# in play then: the brief rode the command line typed into the pane, which the
+# tty truncated at ~4 KB (fixed separately in d06977a, which moved the contents
+# into a file so only this path travels through argv), and the CLI was not
+# exec'd, so it was not the pane's foreground process (fixed in f9c6883).
+# Re-verified directly against claude 2.1.263: a 42 KB brief containing quotes,
+# $VARS, backticks and blank lines arrives byte-for-byte and is submitted
+# without anything touching the pane.
+#
+# Appended after the eval above, which resets "$@".
+#
+# Only a fresh conversation gets it: replaying the brief into a --resume would
+# hand the agent work it has already done. The file is removed either way, so a
+# reopened card never re-reads a stale brief.
+if [[ -n "$initial_prompt_file" ]]; then
+  if [[ "$resuming" != "1" && -f "$initial_prompt_file" ]]; then
+    set -- "$@" "$(cat "$initial_prompt_file")"
+  fi
+  rm -f "$initial_prompt_file"
+fi
 
 # exec, not a plain call: this is the last line of the script, nothing runs
 # after it, so there is no reason to keep this process around as a wrapper.

@@ -444,8 +444,6 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        // No process name to match in these mocks — skip the foreground-command gate.
-        foregroundCommandTimeoutMs: 0,
         trustPromptTimeoutMs: 0,
       },
     });
@@ -508,7 +506,6 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 0,
         trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 20,
         pasteVerifyIntervalMs: 1,
@@ -572,7 +569,6 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 0,
         trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 20,
         pasteVerifyIntervalMs: 1,
@@ -623,7 +619,6 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 0,
         trustPromptTimeoutMs: 0,
         pasteVerifyTimeoutMs: 0,
         pasteVerifyIntervalMs: 0,
@@ -647,10 +642,14 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
   });
 });
 
-describe('SshTmuxBackend.create initial delivery result', () => {
-  it('reports true via onDeliveryResult once the automatic paste verifies', async () => {
-    // Arrange
-    let pasted = false;
+describe('SshTmuxBackend.create initial brief', () => {
+  it('never pastes the brief into the pane — it rides the agent CLI argv', async () => {
+    // Arrange — the remote session-bootstrap.sh reads the brief file and hands
+    // its contents to the agent as an argument, so there is nothing for the
+    // daemon to type, wait for, or verify. Everything the old paste pipeline
+    // guessed at (is the CLI up, is it listening, did the text arrive intact,
+    // did Enter submit it) simply stops being a question.
+    const remoteCalls: string[][] = [];
     const backend = new SshTmuxBackend({
       transport: {
         host: 'test.host',
@@ -665,66 +664,7 @@ describe('SshTmuxBackend.create initial delivery result', () => {
       } as never,
       host: 'test.host',
       remoteRunner: async (args) => {
-        if (args[0] === 'has-session') {
-          throw new Error('missing');
-        }
-        if (args[0] === 'paste-buffer') {
-          pasted = true;
-        }
-        if (args[0] === 'capture-pane' && pasted) {
-          return ok('Ship the thing.');
-        }
-        return ok();
-      },
-      localRunner: async (args) => {
-        if (args[0] === 'has-session') {
-          throw new Error('missing');
-        }
-        return ok();
-      },
-      idGenerator: () => 'session-id',
-      now: () => 1_000,
-      paneIdleOptions: {
-        timeoutMs: 1000,
-        intervalMs: 0,
-        stableChecks: 1,
-        postPasteDelayMs: 0,
-        maxSubmitRetries: 0,
-        submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 0,
-        trustPromptTimeoutMs: 0,
-      },
-    });
-
-    // Act
-    const deliveryResults: boolean[] = [];
-    await backend.create({
-      ...createOpts(),
-      initialPrompt: 'Ship the thing.',
-      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // Assert
-    expect(deliveryResults).toEqual([true]);
-  });
-
-  it('reports false via onDeliveryResult when the pasted text never renders', async () => {
-    // Arrange
-    const backend = new SshTmuxBackend({
-      transport: {
-        host: 'test.host',
-        id: 'ssh:test.host',
-        isRemote: true,
-        exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
-        exists: vi.fn(async () => true),
-        mkdirp: vi.fn(async () => undefined),
-        removeDir: vi.fn(async () => undefined),
-        writeFileIfChanged: vi.fn(async () => true),
-        reachability: vi.fn(async () => 'ok' as const),
-      } as never,
-      host: 'test.host',
-      remoteRunner: async (args) => {
+        remoteCalls.push(args);
         if (args[0] === 'has-session') {
           throw new Error('missing');
         }
@@ -745,30 +685,22 @@ describe('SshTmuxBackend.create initial delivery result', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 0,
         trustPromptTimeoutMs: 0,
-        pasteVerifyTimeoutMs: 0,
-        pasteVerifyIntervalMs: 0,
-        maxPasteAttempts: 3,
       },
     });
 
     // Act
-    const deliveryResults: boolean[] = [];
-    await backend.create({
-      ...createOpts(),
-      initialPrompt: 'This never renders on the pane.',
-      onDeliveryResult: (delivered) => deliveryResults.push(delivered),
-    });
+    await backend.create({ ...createOpts(), initialPrompt: 'Ship the thing.' });
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // Assert
-    expect(deliveryResults).toEqual([false]);
+    expect(remoteCalls.filter((args) => args[0] === 'load-buffer')).toHaveLength(0);
+    expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
   });
 });
 
 describe('SshTmuxBackend auto-trust', () => {
-  it('accepts a never-trusted-folder prompt (Down, then Enter) before delivering the brief', async () => {
+  it('accepts a never-trusted-folder prompt (Down, then Enter) on session start', async () => {
     // Arrange — the remote pane shows the real trust screen until Down is
     // sent, then settles on the CLI's normal ready screen for everything
     // after — mirrors TmuxBackend's equivalent test.
@@ -811,9 +743,8 @@ describe('SshTmuxBackend auto-trust', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        // No process name to match in these mocks — skip the foreground-command gate.
-        foregroundCommandTimeoutMs: 0,
-        trustPromptTimeoutMs: 0,
+        trustPromptTimeoutMs: 1000,
+        trustPromptIntervalMs: 0,
       },
     });
 
@@ -821,26 +752,27 @@ describe('SshTmuxBackend auto-trust', () => {
     await backend.create({ ...createOpts(), initialPrompt: 'Fix the flaky test.' });
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // Assert — Down before Enter (never a bare Enter), and the trust dance
-    // happens before the brief is ever pasted in.
+    // Assert — Down before Enter, never a bare Enter, which would pick the
+    // default-highlighted "No, exit" and quit the CLI.
     const downIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
     const trustEnterIndex = remoteCalls.findIndex(
       (args, i) => args[0] === 'send-keys' && args.includes('Enter') && i > downIndex,
     );
-    const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
     expect(downIndex).toBeGreaterThanOrEqual(0);
     expect(trustEnterIndex).toBeGreaterThan(downIndex);
-    expect(loadIndex).toBeGreaterThan(trustEnterIndex);
+    // Nothing is pasted on a session start any more — the brief reaches the
+    // agent through its own argv.
+    expect(remoteCalls.some((args) => args[0] === 'load-buffer')).toBe(false);
   });
 
-  it('catches the trust prompt on the second check, when it only renders after the CLI is already foreground', async () => {
+  it('catches a trust prompt that only renders after the first capture', async () => {
     // Arrange — mirrors TmuxBackend's equivalent test: nothing on the very
     // first capture, as if claude's process hasn't started yet; the trust
     // screen only appears once waitForForegroundCommand confirms it's
     // foreground.
     const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
     let trustAccepted = false;
-    let foregroundConfirmed = false;
+    let captures = 0;
     const remoteCalls: string[][] = [];
     const transport = {
       host: 'test.host',
@@ -861,7 +793,7 @@ describe('SshTmuxBackend auto-trust', () => {
         remoteCalls.push(args);
         if (args[0] === 'has-session') fail();
         if (args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}')) {
-          foregroundConfirmed = true;
+          captures += 0;
           return ok('1 claude');
         }
         if (args[0] === 'send-keys' && args[3] === 'Down') {
@@ -871,7 +803,8 @@ describe('SshTmuxBackend auto-trust', () => {
           if (trustAccepted) {
             return ok('');
           }
-          return ok(foregroundConfirmed ? TRUST_SCREEN : '');
+          captures += 1;
+          return ok(captures > 1 ? TRUST_SCREEN : '');
         }
         return ok();
       },
@@ -885,8 +818,6 @@ describe('SshTmuxBackend auto-trust', () => {
         postPasteDelayMs: 0,
         maxSubmitRetries: 0,
         submitRetryIntervalMs: 0,
-        foregroundCommandTimeoutMs: 1000,
-        foregroundCommandIntervalMs: 0,
         trustPromptTimeoutMs: 1000,
         trustPromptIntervalMs: 0,
       },
@@ -902,9 +833,12 @@ describe('SshTmuxBackend auto-trust', () => {
       (args) => args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}'),
     );
     const downIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args[3] === 'Down');
-    const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
-    expect(downIndex).toBeGreaterThan(foregroundIndex);
-    expect(loadIndex).toBeGreaterThan(downIndex);
+    expect(downIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      remoteCalls.findIndex(
+        (args, i) => args[0] === 'send-keys' && args.includes('Enter') && i > downIndex,
+      ),
+    ).toBeGreaterThan(downIndex);
   });
 });
 

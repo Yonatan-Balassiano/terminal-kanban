@@ -3,55 +3,10 @@ import {
   pasteAndVerify,
   pasteMarker,
   submitAndVerify,
-  waitForForegroundCommand,
   waitForTrustPromptAndDismiss,
 } from '../src/services/session-backends/pane-idle.js';
 
 const TRUST_SCREEN = 'Quick safety check\n  No, exit\n❯ Yes, I trust this folder';
-
-describe('waitForForegroundCommand', () => {
-  it('matches an exact process name (claude, a short binary that never truncates)', async () => {
-    const resolves = await raceResolved(
-      waitForForegroundCommand(async () => 'claude', 'claude', {
-        foregroundCommandTimeoutMs: 50,
-        foregroundCommandIntervalMs: 5,
-      }),
-    );
-    expect(resolves).toBe(true);
-  });
-
-  it("matches codex's real process name, truncated by the OS to codex-aarch64-a via its symlinked binary", async () => {
-    // Confirmed live: `codex` resolves to `codex-aarch64-apple-darwin`, and
-    // the kernel's process-name field truncates that — an exact-equality
-    // check against the plain `agentCli` value 'codex' never matches this.
-    const resolves = await raceResolved(
-      waitForForegroundCommand(async () => 'codex-aarch64-a', 'codex', {
-        foregroundCommandTimeoutMs: 50,
-        foregroundCommandIntervalMs: 5,
-      }),
-    );
-    expect(resolves).toBe(true);
-  });
-
-  it('does not match an unrelated process name (still the bootstrap shell)', async () => {
-    const resolves = await raceResolved(
-      waitForForegroundCommand(async () => 'bash', 'claude', {
-        foregroundCommandTimeoutMs: 30,
-        foregroundCommandIntervalMs: 5,
-      }),
-    );
-    expect(resolves).toBe(false);
-  });
-
-  it('gives up and returns after the timeout when the process name never matches', async () => {
-    const start = Date.now();
-    await waitForForegroundCommand(async () => 'bash', 'claude', {
-      foregroundCommandTimeoutMs: 30,
-      foregroundCommandIntervalMs: 5,
-    });
-    expect(Date.now() - start).toBeGreaterThanOrEqual(25);
-  });
-});
 
 describe('waitForTrustPromptAndDismiss', () => {
   const FAST = { trustPromptTimeoutMs: 200, trustPromptIntervalMs: 5, trustPromptStableChecks: 2 };
@@ -74,7 +29,7 @@ describe('waitForTrustPromptAndDismiss', () => {
     // Arrange — confirmed live: becoming the pane's foreground process is not
     // proof the CLI has finished rendering its own first screen yet. This is
     // the exact race a single one-shot check (before or after
-    // waitForForegroundCommand) can miss.
+    // a one-shot check) can miss.
     let checks = 0;
     const capture = async () => {
       checks += 1;
