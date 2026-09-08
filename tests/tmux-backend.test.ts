@@ -6,6 +6,7 @@ import {
   TmuxBackend,
   type TmuxCommandRunner,
 } from '../src/services/session-backends/tmux.js';
+import type { PromptDeliveryOutcome } from '../src/types/index.js';
 
 describe('TmuxBackend', () => {
   it('builds fallback attach commands', () => {
@@ -282,11 +283,11 @@ describe('TmuxBackend brief handling', () => {
     typed: string;
     longestLiteral: number;
     calls: string[][];
-    deliveryResults: boolean[];
+    deliveryResults: (boolean | PromptDeliveryOutcome)[];
   }> {
     const literals: string[] = [];
     const calls: string[][] = [];
-    const deliveryResults: boolean[] = [];
+    const deliveryResults: (boolean | PromptDeliveryOutcome)[] = [];
     let capturesSincePaste = 0;
     let pasted = false;
     // The new paste-verification step's own capture-pane call is answered
@@ -447,7 +448,7 @@ describe('TmuxBackend brief handling', () => {
     const { calls, deliveryResults } = await createWithBrief(brief, { redeliver: true });
 
     // Assert — the re-delivery reports a verified paste.
-    expect(deliveryResults).toEqual([true]);
+    expect(deliveryResults).toEqual(['delivered']);
 
     // Assert — capture-pane runs before the paste, and the paste comes from a
     // loaded buffer (never `send-keys -l`, which would submit after line one).
@@ -545,7 +546,7 @@ describe('TmuxBackend.redeliverPrompt', () => {
     );
 
     // Assert
-    expect(delivered).toBe(true);
+    expect(delivered).toBe('delivered');
     const loadIndex = calls.findIndex((args) => args[0] === 'load-buffer');
     const pasteIndex = calls.findIndex((args) => args[0] === 'paste-buffer');
     const enterIndex = calls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
@@ -596,7 +597,7 @@ describe('TmuxBackend.redeliverPrompt', () => {
 
     // Assert — never submitted: pasted up to the retry limit, but no Enter
     // sent for the brief itself.
-    expect(delivered).toBe(false);
+    expect(delivered).toBe('not-delivered');
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
     expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('Enter'))).toHaveLength(0);
   });
@@ -648,7 +649,7 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
 
     // Assert — nothing pasted, but the Enter the earlier run never landed is
     // sent, which is the whole point of re-running the command.
-    expect(delivered).toBe(true);
+    expect(delivered).toBe('delivered');
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
     expect(enterCalls(calls)).toHaveLength(1);
   });
@@ -678,7 +679,7 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
     const delivered = await backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
 
     // Assert — the message was actually pasted and submitted.
-    expect(delivered).toBe(true);
+    expect(delivered).toBe('delivered');
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
     expect(enterCalls(calls)).toHaveLength(1);
   });
@@ -710,8 +711,11 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
     // Act
     const delivered = await backend.redeliverPrompt('t1', 'primary', 'ab_t1_p', PROMPT);
 
-    // Assert — one paste, six Enters (the first plus five retries).
-    expect(delivered).toBe(true);
+    // Assert — one paste, six Enters (the first plus five retries), and the
+    // honest verdict: every Enter left the pane exactly as it was, so the text
+    // is sitting in the input box unsubmitted. This used to resolve like a
+    // clean submit, which is what made issue #46's state unreportable.
+    expect(delivered).toBe('unsubmitted');
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
     expect(enterCalls(calls)).toHaveLength(6);
   });
@@ -750,7 +754,7 @@ describe('TmuxBackend.redeliverPrompt is safe to repeat', () => {
     const results = await Promise.all([first, second]);
 
     // Assert — one delivery, one paste, and both callers get its real answer.
-    expect(results).toEqual([false, false]);
+    expect(results).toEqual(['not-delivered', 'not-delivered']);
     expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
   });
 });

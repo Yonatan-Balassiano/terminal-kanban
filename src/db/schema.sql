@@ -240,7 +240,15 @@ CREATE TABLE IF NOT EXISTS pending_messages (
   body TEXT NOT NULL,
   -- The card that sent it, when a card sent it. NULL for a person.
   from_task_id TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- Set when a session was launched to carry this message, cleared/removed
+  -- once that hand-off is resolved. A row is NOT deleted at launch: the pane
+  -- may die before the agent ever reads it. See PendingMessageService.
+  claimed_session_id TEXT,
+  claimed_at INTEGER,
+  -- The prompt file the claiming session was supposed to read. Its continued
+  -- existence is the proof the hand-off never happened.
+  claim_notice_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_pending_messages_task ON pending_messages(task_id, slot);

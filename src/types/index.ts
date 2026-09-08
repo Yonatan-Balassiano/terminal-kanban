@@ -355,10 +355,18 @@ export interface SessionBackend {
    * Only backends that deliver prompts via paste implement this — PTY's
    * delivery path is argv-based and has no equivalent to re-run.
    *
-   * Resolves `true` when the paste was verified to have rendered and Enter
-   * was sent to submit it, `false` when the paste never verified — in which
-   * case nothing was submitted, and whatever is on screen is left as-is
-   * rather than risking a mangled fragment.
+   * Resolves:
+   *
+   * - `delivered` — the paste was verified on the pane and the Enter that
+   *   submitted it was confirmed to have done something.
+   * - `unsubmitted` — the paste is verifiably sitting in the input box and
+   *   every Enter sent after it changed nothing. The text is *there*; only
+   *   the submit failed. Distinct from `not-delivered` because the two need
+   *   opposite handling: this one must not be re-queued, or the message is
+   *   delivered twice once the box is finally flushed.
+   * - `not-delivered` — the paste never verified. Nothing was submitted and
+   *   whatever is on screen is left as-is rather than risking a mangled
+   *   fragment.
    *
    * `options.skipIfAlreadyOnPane` is what tells those two callers apart, since
    * nothing else about the call does: only a re-send of text the pane was
@@ -373,7 +381,7 @@ export interface SessionBackend {
     prompt: string,
     agentCli?: string,
     options?: RedeliverPromptOptions,
-  ): Promise<boolean>;
+  ): Promise<PromptDeliveryOutcome>;
   /**
    * A one-shot snapshot of a live pane's rendered content, for detecting a
    * state the session's own status fields don't carry — e.g. the trust
@@ -395,6 +403,16 @@ export interface SessionBackend {
    */
   resolvePaneId?(backendSessionId: string): Promise<string | null>;
 }
+
+/**
+ * What a paste-into-a-live-pane delivery achieved.
+ *
+ * `unsubmitted` exists because issue #46 showed the two failures are not the
+ * same event: a message still sitting in the input box has arrived and needs
+ * an Enter, while one that never landed needs re-sending. Reporting both as
+ * "not delivered" sent the queue after text that was already on the pane.
+ */
+export type PromptDeliveryOutcome = 'delivered' | 'unsubmitted' | 'not-delivered';
 
 export interface CreateSessionOpts {
   taskId: string;

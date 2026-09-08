@@ -467,6 +467,7 @@ describe('session-bootstrap.sh queued messages', () => {
         args: readFileSync(argsFile, 'utf8').split('\0').slice(0, -1),
         briefLeft: existsSync(briefFile),
         noticeLeft: existsSync(noticeFile),
+        receipt: existsSync(`${noticeFile}.read`),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -485,16 +486,34 @@ describe('session-bootstrap.sh queued messages', () => {
     expect(args.some((arg) => arg.includes('THE ORIGINAL BRIEF'))).toBe(false);
   });
 
-  it('delivers the brief when the card starts fresh, and never the resume notice', async () => {
-    // Arrange + Act — a card opened for the first time. Anything queued for it
-    // is already folded into the brief by the daemon, so using the notice file
-    // here would deliver it twice.
+  // The queued message used to be dropped here. The branch that read it was
+  // gated on resuming, the `rm -f` that deleted it was not, and both this
+  // script and session-manager.ts claimed the daemon folded queued messages
+  // into the brief for a fresh start. Nothing did. Issue #46 §2.
+  it('delivers the brief and the queued messages together when the card starts fresh', async () => {
+    // Arrange + Act — a card opened for the first time, with a message that
+    // arrived before it ever had a session. Both are news to this agent.
     const { args } = await run({ existingConversation: false });
 
-    // Assert
+    // Assert — one positional argument, because the agent CLI takes one.
     expect(args).toContain('--session-id');
-    expect(args[args.length - 1]).toBe('THE ORIGINAL BRIEF');
-    expect(args.some((arg) => arg.includes('THE QUEUED MESSAGE'))).toBe(false);
+    const prompt = args[args.length - 1] ?? '';
+    expect(prompt).toContain('THE ORIGINAL BRIEF');
+    expect(prompt).toContain('THE QUEUED MESSAGE');
+    expect(prompt.indexOf('THE ORIGINAL BRIEF')).toBeLessThan(prompt.indexOf('THE QUEUED MESSAGE'));
+  });
+
+  // Issue #46 §2. The daemon holds the messages in its own queue until it sees
+  // this receipt, and re-delivers them if it never appears — so a pane that
+  // dies before this point no longer takes them with it. Absence of the notice
+  // file cannot carry that signal: it is deleted on every path the script
+  // takes, and a backend that found the session already running writes none.
+  it('leaves a receipt naming the queued messages it actually delivered', async () => {
+    const resumed = await run({ existingConversation: true });
+    const fresh = await run({ existingConversation: false });
+
+    expect(resumed.receipt).toBe(true);
+    expect(fresh.receipt).toBe(true);
   });
 
   it('removes both files either way, so nothing is delivered twice', async () => {

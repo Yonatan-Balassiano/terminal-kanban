@@ -258,6 +258,11 @@ function applyAdditiveMigrations(db: Db): void {
   ensureTableFromSchema(db, 'task_branches');
   ensureTableFromSchema(db, 'pr_release_status');
   ensureTableFromSchema(db, 'pending_messages');
+  // A queued message is claimed by the session launched to carry it, not
+  // deleted — the pane can die before the agent reads it. See issue #46 §2.
+  ensureColumn(db, 'pending_messages', 'claimed_session_id', 'TEXT');
+  ensureColumn(db, 'pending_messages', 'claimed_at', 'INTEGER');
+  ensureColumn(db, 'pending_messages', 'claim_notice_path', 'TEXT');
   backfillTaskBranches(db);
 }
 

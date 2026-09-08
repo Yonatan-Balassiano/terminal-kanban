@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { openDb, type Db } from '../src/db/index.js';
+import { localResumeNoticePath } from '../src/services/session-brief.js';
 import { BoardService } from '../src/services/board.js';
 import { SessionManager } from '../src/services/session-manager.js';
 import type { ProcessRow } from '../src/services/session-activity.js';
@@ -13,6 +14,7 @@ import type {
   BackendSessionInfo,
   CreateSessionOpts,
   GetBufferResult,
+  PromptDeliveryOutcome,
   RedeliverPromptOptions,
   SessionBackend,
   SessionBackendType,
@@ -2035,8 +2037,8 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => true);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'delivered');
     const task = board.createTask({
       title: 'Needs a nudge',
       repoId: 'repo-1',
@@ -2069,8 +2071,8 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     // honestly, not paper over it with a hardcoded true.
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => false);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'not-delivered');
     const task = board.createTask({
       title: 'Needs a nudge',
       repoId: 'repo-1',
@@ -2091,8 +2093,8 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => true);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'delivered');
     const task = board.createTask({
       title: 'Never opened',
       repoId: 'repo-1',
@@ -2112,8 +2114,8 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => true);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'delivered');
     const task = board.createTask({ title: 'No brief', repoId: 'repo-1' });
     const { manager } = makeManager({ redeliverPrompt });
     await manager.openSession(task.id);
@@ -2218,8 +2220,8 @@ describe('SessionManager.notifyTaskSession', () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => true);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'delivered');
     const sendInput = vi.fn<[string, string], Promise<void>>(async () => {});
     const task = board.createTask({ title: 'Notify me', repoId: 'repo-1' });
     const { manager } = makeManager({ redeliverPrompt, sendInput });
@@ -2228,7 +2230,7 @@ describe('SessionManager.notifyTaskSession', () => {
     // Act
     const delivered = await manager.notifyTaskSession(task.id, 'A subtask PR just opened.');
 
-    // Assert — went through redeliverPrompt, and the boolean it resolved
+    // Assert — went through redeliverPrompt, and the outcome it resolved
     // flows straight through as this method's own return value.
     expect(delivered).toEqual({ delivered: true, queued: false });
     expect(redeliverPrompt).toHaveBeenCalledWith(
@@ -2241,6 +2243,28 @@ describe('SessionManager.notifyTaskSession', () => {
     expect(sendInput).not.toHaveBeenCalled();
   });
 
+  // Issue #46 §3. A message the pane took but never submitted used to print as
+  // "queued", which is both wrong (nothing is waiting anywhere — the text is
+  // on the pane) and harmful: the queue would deliver a second copy the moment
+  // that input box was flushed.
+  it('reports a message that reached the pane but was never submitted, and does not queue it', async () => {
+    // Arrange
+    const redeliverPrompt = vi.fn<
+      [string, 'primary' | 'secondary', string, string, string?],
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'unsubmitted');
+    const task = board.createTask({ title: 'Holds the paste', repoId: 'repo-1' });
+    const { manager } = makeManager({ redeliverPrompt });
+    await manager.openSession(task.id);
+
+    // Act
+    const outcome = await manager.notifyTaskSession(task.id, 'A subtask PR just opened.');
+
+    // Assert — its own state, and nothing queued behind it.
+    expect(outcome).toEqual({ delivered: false, queued: false, landedUnsubmitted: true });
+    expect(manager.pendingMessageCounts().get(task.id)).toBeUndefined();
+  });
+
   it('never asks the backend to skip its paste — a repeated notice must not be dropped', async () => {
     // Arrange — the same message sent twice, minutes apart, which is the
     // ordinary shape of a nudge ("still on SEC-1?"). The first copy can still
@@ -2249,8 +2273,8 @@ describe('SessionManager.notifyTaskSession', () => {
     // this method would report `true` anyway.
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?, RedeliverPromptOptions?],
-      Promise<boolean>
-    >(async () => true);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'delivered');
     const task = board.createTask({ title: 'Notify me', repoId: 'repo-1' });
     const { manager } = makeManager({ redeliverPrompt });
     await manager.openSession(task.id);
@@ -2272,8 +2296,8 @@ describe('SessionManager.notifyTaskSession', () => {
     // never rendered on the pane, so nothing was submitted.
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => false);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'not-delivered');
     const task = board.createTask({ title: 'Notify me', repoId: 'repo-1' });
     const { manager } = makeManager({ redeliverPrompt });
     await manager.openSession(task.id);
@@ -2291,8 +2315,8 @@ describe('SessionManager.notifyTaskSession', () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => true);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'delivered');
     const task = board.createTask({ title: 'Never opened', repoId: 'repo-1' });
     const { manager } = makeManager({ redeliverPrompt });
 
@@ -2337,7 +2361,13 @@ describe('SessionManager queued cross-task messages', () => {
     db.close();
   });
 
-  function makeManager(options: { createThrows?: boolean } = {}) {
+  /**
+   * @param consumesNotice Whether the launched session's bootstrap script gets
+   *   as far as reading the queued-message file. `false` is the pane that dies
+   *   first — issue #46 §2, where the message was deleted from the database at
+   *   launch and so existed nowhere afterwards.
+   */
+  function makeManager(options: { createThrows?: boolean; consumesNotice?: boolean } = {}) {
     const created: CreateSessionOpts[] = [];
     const backend: SessionBackend = {
       create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => {
@@ -2345,8 +2375,15 @@ describe('SessionManager queued cross-task messages', () => {
         if (options.createThrows) {
           throw new Error('tmux is not available');
         }
+        // Stand in for session-bootstrap.sh reading the queued messages into
+        // the agent's argv: that receipt is the whole signal the daemon uses,
+        // so a fake that never leaves one tests nothing.
+        if (opts.resumeNotice && options.consumesNotice !== false) {
+          writeFileSync(`${localResumeNoticePath(opts.taskId, opts.slot)}.read`, '');
+        }
         return {
-          id: 'session-1',
+          // Unique per call: a card can legitimately open more than once.
+          id: `session-${String(created.length)}`,
           taskId: opts.taskId,
           slot: opts.slot,
           backendType: 'tmux',
@@ -2368,8 +2405,8 @@ describe('SessionManager queued cross-task messages', () => {
       healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
       redeliverPrompt: vi.fn<
         [string, SessionSlot, string, string, string | undefined, RedeliverPromptOptions],
-        Promise<boolean>
-      >(async () => true),
+        Promise<PromptDeliveryOutcome>
+      >(async () => 'delivered'),
     };
 
     const manager = new TestSessionManager(
@@ -2419,13 +2456,53 @@ describe('SessionManager queued cross-task messages', () => {
     expect(outcome).toEqual({ delivered: false, queued: true });
     expect(created[0]?.resumeNotice).toContain('Address the PR comments on #42.');
     expect(created[0]?.resumeNotice).toContain('Add rate limiting');
-    // Consumed, so the session after this one does not hear it again.
+    // Dropped only once the session actually read it, so the session after
+    // this one does not hear it again.
+    expect(manager.pendingMessageCounts().get(target.id)).toBeUndefined();
+  });
+
+  // Issue #46 §2. The row used to be deleted the moment `create()` resolved —
+  // which is when the bootstrap command has been *typed into the pane*, before
+  // the script has run or read anything. A pane that died in the gap took the
+  // message with it, silently: no error, no re-queue, and the board's own
+  // "don't re-send a queued message" guidance kept the operator from noticing.
+  it('keeps a queued message when the session it was handed to never read it', async () => {
+    // Arrange
+    const target = board.createTask({ title: 'Pane dies early', repoId: 'repo-1' });
+    const { manager } = makeManager({ consumesNotice: false });
+    await manager.notifyTaskSession(target.id, 'Address the PR comments on #42.');
+
+    // Act — a session opens and carries the notice, but never gets to it.
+    await manager.openSession(target.id);
+
+    // Assert — still queued, so the next open delivers it.
+    expect(manager.pendingMessageCounts().get(target.id)).toBe(1);
+  });
+
+  it('re-delivers a message the previous session never read', async () => {
+    // Arrange — the same card, opened twice: the first pane died before
+    // reading its notice, the second one reads it.
+    const target = board.createTask({ title: 'Second chance', repoId: 'repo-1' });
+    const { manager, created } = makeManager({ consumesNotice: false });
+    await manager.notifyTaskSession(target.id, 'Address the PR comments on #42.');
+    await manager.openSession(target.id);
+    const session = manager.getSession(target.id);
+    await manager.terminateSession(session!.id);
+
+    // Act
+    await manager.openSession(target.id);
+
+    // Assert — the second session was handed the same message, and once it is
+    // read the queue is finally empty.
+    expect(created[1]?.resumeNotice).toContain('Address the PR comments on #42.');
+    writeFileSync(`${localResumeNoticePath(target.id, 'primary')}.read`, '');
     expect(manager.pendingMessageCounts().get(target.id)).toBeUndefined();
   });
 
   it('keeps the queue when the session fails to start', async () => {
-    // Arrange — dropping the messages when the prompt file is written would
-    // reintroduce the loss this exists to prevent, just in a narrower window.
+    // Arrange — the messages are claimed before `create()` is called, so this
+    // also covers the claim being left behind by a create that threw: with no
+    // receipt, the next reconcile reads it as never delivered.
     const target = board.createTask({ title: 'Cannot start', repoId: 'repo-1' });
     const { manager } = makeManager({ createThrows: true });
     await manager.notifyTaskSession(target.id, 'Still needs saying.');
@@ -2890,8 +2967,8 @@ describe('SessionManager.getFleetStatus', () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => false);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'not-delivered');
     const task = board.createTask({
       title: 'Needs a nudge',
       repoId: 'repo-1',
@@ -3035,8 +3112,8 @@ describe('SessionManager.getAttentionItems', () => {
     // delivery unsubmitted is the more actionable, so it wins.
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
-      Promise<boolean>
-    >(async () => false);
+      Promise<PromptDeliveryOutcome>
+    >(async () => 'not-delivered');
     const task = board.createTask({
       title: 'Stuck and idle',
       repoId: 'repo-1',

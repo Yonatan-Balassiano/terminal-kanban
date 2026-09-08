@@ -571,6 +571,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     cfg.agentArgs,
     remoteProvider,
   );
+  session.logLifecycle = (message) => appendLog(opts.logFile, `[session] ${message}`);
   const { TeleportService } = await import('../services/teleport.js');
   const teleport = new TeleportService(db, board, session, worktrees, git, transports, cfg.remote);
   // A remote host can take minutes to wake, long after the reconnect RPC has

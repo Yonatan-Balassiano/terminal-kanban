@@ -74,6 +74,11 @@ function explainRedeliverFailure(
         `Task ${id}'s brief was delivered to the pane but never confirmed on screen, so nothing was submitted. ` +
         'The pane is most likely still starting up — check it with `agentboard fleet` and run this again once it settles.'
       );
+    case 'not-submitted':
+      return (
+        `Task ${id}'s brief is sitting in the pane's input box — it arrived intact, but no Enter would submit it. ` +
+        `Replace the pane with \`agentboard task restart ${id}\`; the input box cannot be cleared or submitted from outside it.`
+      );
     default:
       // An older daemon that predates the reason field.
       return `Task ${id}: nothing was delivered.`;
@@ -1007,7 +1012,11 @@ export function buildCli(): Command {
           }
 
           announceDeliveryWait();
-          const outcome = await rpc.call<{ delivered: boolean; queued: boolean }>(
+          const outcome = await rpc.call<{
+            delivered: boolean;
+            queued: boolean;
+            landedUnsubmitted?: boolean;
+          }>(
             'notifyTaskSession',
             {
               taskId: id,
@@ -1028,6 +1037,16 @@ export function buildCli(): Command {
             console.log(
               `Queued for ${id} — it will be delivered when that card's session next opens.`,
             );
+          } else if (outcome.landedUnsubmitted) {
+            // Distinct from queued on purpose: the text is on the pane, so it
+            // is not waiting anywhere and must not be re-sent — that would
+            // stack a second copy under the first. See issue #46.
+            console.log(
+              `Task ${id}: the message reached the pane's input box but was never submitted. ` +
+                `Do not re-send it — that stacks a second copy. Replace the pane with \`agentboard task restart ${id}\`, ` +
+                'which keeps the card, its branch, its worktree and its conversation.',
+            );
+            process.exitCode = 1;
           } else {
             console.log(`Task ${id}: nothing was delivered.`);
             process.exitCode = 1;
