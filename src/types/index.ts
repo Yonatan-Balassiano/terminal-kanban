@@ -383,6 +383,17 @@ export interface SessionBackend {
    * session's content already flows through `getBuffer`.
    */
   peekPane?(backendSessionId: string): Promise<string>;
+  /**
+   * The stable, backend-native id of the pane a session is running in.
+   *
+   * tmux window *indices* are renumbered as windows come and go, so an index
+   * cached even a few minutes earlier can silently address a different card —
+   * which is exactly how one agent's state was misread. A pane id is fixed for
+   * the pane's whole life, so it is what external tooling should be given.
+   *
+   * Only backends whose sessions are external panes implement this.
+   */
+  resolvePaneId?(backendSessionId: string): Promise<string | null>;
 }
 
 export interface CreateSessionOpts {
@@ -480,6 +491,15 @@ export interface FleetSessionStatus {
    * Only ever set for tmux/ssh sessions — PTY has no separate pane to check.
    */
   trustPromptShowing: boolean;
+  /** The backend's own session name, e.g. the `ab_*` tmux session. */
+  backendSessionId?: string;
+  /**
+   * The pane this session runs in, addressable directly (`tmux send-keys -t
+   * %42`). Stable for the pane's whole life, unlike a window index — see
+   * `SessionBackend.resolvePaneId`. Absent for PTY sessions, and for a pane
+   * that could not be resolved.
+   */
+  paneId?: string;
   /**
    * Whether the initial brief's paste was ever verified on screen — `null`
    * means no delivery attempt has run yet (or this backend doesn't track

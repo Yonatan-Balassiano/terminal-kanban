@@ -432,6 +432,15 @@ export class TmuxBackend implements SessionBackend {
     );
   }
 
+  /**
+   * The pane id this session is running in — stable for the pane's whole life,
+   * unlike a window index, which tmux renumbers as windows come and go.
+   */
+  async resolvePaneId(backendSessionId: string): Promise<string | null> {
+    const tagged = await this.findTaggedPane(backendSessionId);
+    return tagged ?? (await this.resolveSessionPaneId(backendSessionId));
+  }
+
   async peekPane(backendSessionId: string): Promise<string> {
     const target = await this.resolveInputTarget(backendSessionId);
     return (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;

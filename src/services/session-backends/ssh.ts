@@ -565,6 +565,16 @@ export class SshTmuxBackend implements SessionBackend {
     );
   }
 
+  /** The remote pane id — see {@link TmuxBackend.resolvePaneId} for why. */
+  async resolvePaneId(backendSessionId: string): Promise<string | null> {
+    try {
+      const result = await this.remoteRunner(buildTmuxPaneIdArgs(backendSessionId));
+      return result.stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
   async peekPane(backendSessionId: string): Promise<string> {
     return (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout;
   }
