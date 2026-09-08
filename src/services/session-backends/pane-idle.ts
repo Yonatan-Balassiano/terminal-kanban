@@ -2,6 +2,28 @@
 // AgentBoard — wait for a freshly spawned pane to settle
 // ============================================================
 
+/**
+ * There is no reliable way to clear a pane's input box from outside it.
+ *
+ * Worth writing down, because it looks like it should be easy and the obvious
+ * fix does not work. `notify` appends to whatever is already sitting in the
+ * box, so a message sent into a pane still holding an unsubmitted fragment
+ * arrives concatenated onto it — an obvious candidate for a `--replace` that
+ * clears first. Tested live against claude 2.1.263, with a two-line pasted
+ * fragment in the box: `C-u`, `Escape`, `C-c` and `C-c C-c` all leave it
+ * exactly as it was, and the following paste still lands concatenated.
+ *
+ * `C-u` *does* clear a paste that the CLI collapsed into a `[Pasted text #N]`
+ * block, which is what makes this so easy to get wrong — whether a paste
+ * collapses depends on its size, so the same keystroke appears to work and
+ * then silently does not.
+ *
+ * The supported answer is `agentboard task restart <id>`: a pane whose input
+ * state is wrong is a pane to replace, not to edit. That is lossless now —
+ * the conversation lives in the agent's transcript under an id AgentBoard
+ * pins, so a restart keeps the card, its branch, its worktree and its history.
+ */
+
 export interface PaneIdleWaitOptions {
   /** Give up and proceed anyway after this long. */
   timeoutMs?: number;

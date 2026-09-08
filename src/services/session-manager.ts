@@ -1527,6 +1527,7 @@ export class SessionManager {
       const { activity } = await this.inspectSessionState(session.taskId, session.slot);
 
       let trustPromptShowing = false;
+      let paneId: string | undefined;
       if (session.backendType === 'tmux' || session.backendType === 'ssh') {
         const backend = this.getBackend(session.backendType);
         if (backend.peekPane) {
@@ -1534,6 +1535,16 @@ export class SessionManager {
             trustPromptShowing = looksLikeTrustPrompt(await backend.peekPane(session.backendSessionId));
           } catch {
             // Best-effort: an unreachable pane just means "unknown", not a crash.
+          }
+        }
+        if (backend.resolvePaneId) {
+          try {
+            // Handed out so external tooling can address the pane directly
+            // instead of caching a window index, which tmux renumbers as
+            // windows come and go — silently re-pointing it at another card.
+            paneId = (await backend.resolvePaneId(session.backendSessionId)) ?? undefined;
+          } catch {
+            // Same: unknown, not fatal.
           }
         }
       }
@@ -1547,6 +1558,8 @@ export class SessionManager {
         isBusy: activity?.isBusy ?? false,
         attentionNeeded: task?.sessionAttentionNeeded ?? false,
         trustPromptShowing,
+        backendSessionId: session.backendSessionId,
+        paneId,
         delivered: this.resolveDelivered(session),
         createdAt: session.createdAt,
       });

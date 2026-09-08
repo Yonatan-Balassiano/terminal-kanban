@@ -938,6 +938,41 @@ describe('TmuxBackend auto-trust', () => {
   });
 });
 
+describe('TmuxBackend.resolvePaneId', () => {
+  it('reports the tagged pane id, which outlives window renumbering', async () => {
+    // Arrange — tmux renumbers window *indices* as windows come and go, so an
+    // index cached even minutes earlier can address a different card. A pane
+    // id is fixed for the pane's life, so that is what external tooling gets.
+    const runner: TmuxCommandRunner = async (args) => {
+      if (args[0] === 'list-panes') {
+        return { stdout: '%42\tab_task_1234_p\n%7\tab_other_9999_p\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({ runner });
+
+    // Act + Assert
+    expect(await backend.resolvePaneId('ab_task_1234_p')).toBe('%42');
+  });
+
+  it('falls back to the session name when no pane carries the tag', async () => {
+    // Arrange — a session whose pane has not been tagged yet still has a pane.
+    const runner: TmuxCommandRunner = async (args) => {
+      if (args[0] === 'list-panes') {
+        return { stdout: '', stderr: '' };
+      }
+      if (args[0] === 'display-message') {
+        return { stdout: '%9\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({ runner });
+
+    // Act + Assert
+    expect(await backend.resolvePaneId('ab_task_1234_p')).toBe('%9');
+  });
+});
+
 describe('TmuxBackend.peekPane', () => {
   it('captures the current pane content by its resolved target', async () => {
     // Arrange

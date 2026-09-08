@@ -258,6 +258,7 @@ function printFleetTable(sessions: import('../types/index.js').FleetSessionStatu
     'ATTENTION',
     'TRUST-PROMPT',
     'DELIVERY',
+    'PANE',
     'AGE',
   ];
   const rows = sessions.map((s) => [
@@ -270,6 +271,9 @@ function printFleetTable(sessions: import('../types/index.js').FleetSessionStatu
     s.attentionNeeded ? 'yes' : 'no',
     s.trustPromptShowing ? 'STUCK' : '-',
     s.delivered === null ? '-' : s.delivered ? 'verified' : 'UNSUBMITTED',
+    // Stable for the pane's life, unlike a window index — `tmux ... -t %42`
+    // addresses this card and only this card.
+    s.paneId ?? '-',
     formatFleetAge(Date.now() - s.createdAt),
   ]);
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
