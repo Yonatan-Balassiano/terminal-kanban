@@ -10,7 +10,7 @@ import type {
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
-import { writeLocalBrief } from '../session-brief.js';
+import { writeLocalBrief, writeLocalResumeNotice } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 
 const require = createRequire(import.meta.url);
@@ -82,6 +82,9 @@ export class PtyBackend implements SessionBackend {
       agentSessionId: opts.agentSessionId,
       initialPromptFile: opts.initialPrompt
         ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
+        : undefined,
+      resumeNoticeFile: opts.resumeNotice
+        ? writeLocalResumeNotice(opts.taskId, opts.slot, opts.resumeNotice)
         : undefined,
     })}\n`;
 

@@ -658,12 +658,13 @@ export async function dispatch(
 
       case 'notifyTaskSession': {
         const params = p as unknown as NotifyTaskSessionParams;
-        const delivered = await services.session.notifyTaskSession(
+        const outcome = await services.session.notifyTaskSession(
           params.taskId,
           params.message,
           params.slot,
+          { fromTaskId: (p as Record<string, unknown>)['fromTaskId'] as string | undefined },
         );
-        return { id: req.id, result: { delivered } };
+        return { id: req.id, result: { ...outcome } };
       }
 
       case 'redeliverInitialPrompt': {

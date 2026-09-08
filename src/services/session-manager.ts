@@ -36,6 +36,7 @@ import { extractLastOsc7Cwd } from './session-cwd.js';
 import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
 import type { SessionWorkspaceEntry } from './session-bootstrap.js';
 import { readTranscriptActivity, transcriptHasUserMessage } from './session-transcript.js';
+import { composeResumeNotice, PendingMessageService } from './pending-messages.js';
 import {
   deriveFallbackSessionActivity,
   deriveSessionActivity,
@@ -134,6 +135,14 @@ export interface InspectSessionStateResult {
  */
 export type RedeliverFailureReason = 'no-session' | 'no-brief' | 'not-verified';
 
+/** What `notifyTaskSession` did with a message. */
+export interface NotifyOutcome {
+  /** Typed into a live pane and confirmed on screen. */
+  delivered: boolean;
+  /** Stored for delivery when the card's session next opens. */
+  queued: boolean;
+}
+
 export type RedeliverOutcome =
   | { delivered: true }
   | { delivered: false; reason: RedeliverFailureReason };
@@ -177,6 +186,8 @@ export class SessionManager {
   private processTableCache = new Map<string, { rows: ProcessRow[]; loadedAt: number }>();
   private processTableLoadInFlight = new Map<string, Promise<ProcessRow[] | null>>();
   private remoteStartInFlight = false;
+  /** Cross-task messages waiting for a card's session to open. */
+  private readonly pendingMessages: PendingMessageService;
 
   /**
    * Set by the daemon so work that finishes after its RPC returned — a remote
@@ -206,9 +217,15 @@ export class SessionManager {
     /** Powers the remote host back on. Null when nothing can start it. */
     private remoteProvider: RemoteHostProvider | null = null
   ) {
+    this.pendingMessages = new PendingMessageService(db);
     this.buffers.subscribeAll((taskId, slot, buffer) => {
       this.onBufferUpdate?.(taskId, slot, buffer);
     });
+  }
+
+  /** Queued cross-task messages, for the board summary and tests. */
+  pendingMessageCounts(): Map<string, number> {
+    return this.pendingMessages.countByTask();
   }
 
   protected createBackend(backendType: SessionBackendType): SessionBackend {
@@ -596,6 +613,7 @@ export class SessionManager {
     // `workspaces` rides alongside the shared CreateSessionOpts rather than in
     // it: the backends forward the map to the bootstrap builder, and the shared
     // contract gains the field in the same change that teaches them to.
+    const pending = this.resolvePendingMessages(taskId, slot);
     const createOpts: CreateSessionOpts & { workspaces?: SessionWorkspaceEntry[] } = {
       taskId,
       taskTitle: taskRow.title,
@@ -614,10 +632,19 @@ export class SessionManager {
       workspaces: sessionWorkspaceEntries(workspace),
       agentSessionId,
       initialPrompt: taskRow.initial_prompt ?? undefined,
+      // Messages that arrived while this card had no session. The backend
+      // writes them to their own file; session-bootstrap.sh decides whether
+      // this open is a fresh start or a resume and uses exactly one of the
+      // two, so neither the brief nor a message can be delivered twice.
+      resumeNotice: pending.notice,
       sessionName: taskRow.session_name ?? undefined,
       onDeliveryResult: (delivered) => this.persistDeliveryOutcome(taskId, slot, delivered),
     };
     const createdSession = await backend.create(createOpts);
+    // Only once the session exists. A create that throws must leave its
+    // messages queued, or this would reintroduce the loss it exists to
+    // prevent — just in a narrower window.
+    this.pendingMessages.remove(pending.ids);
     const sessionRecord: SessionRecord = {
       ...createdSession,
       taskId,
@@ -887,11 +914,19 @@ export class SessionManager {
   async notifyTaskSession(
     taskId: string,
     message: string,
-    slot: SessionSlot = 'primary'
-  ): Promise<boolean> {
+    slot: SessionSlot = 'primary',
+    options: { fromTaskId?: string } = {},
+  ): Promise<NotifyOutcome> {
     const session = this.getSession(taskId, slot);
     if (!session?.backendSessionId) {
-      return false;
+      // No pane to type into. Queue it rather than dropping it: the message
+      // is handed to the agent on its own argv the next time this card's
+      // session opens, so it lands in the conversation either way. Reporting
+      // `delivered: false` and forgetting the text is what forced the board
+      // to grow a badge that could say an event happened but not what was
+      // said.
+      this.pendingMessages.enqueue({ taskId, slot, body: message, fromTaskId: options.fromTaskId });
+      return { delivered: false, queued: true };
     }
 
     const backend = this.getBackend(session.backendType);
@@ -905,13 +940,21 @@ export class SessionManager {
     // on screen — or merely a message that starts the same way — and skipping
     // would drop this one while reporting `true`. Always paste. Stacking is
     // `DeliveryGuard`'s job, and it still applies.
-    return backend.redeliverPrompt(
+    const delivered = await backend.redeliverPrompt(
       taskId,
       slot,
       session.backendSessionId,
       message,
       taskRow?.agent_cli ?? undefined,
     );
+    if (delivered) {
+      return { delivered: true, queued: false };
+    }
+    // The session is live but the paste never verified, so nothing was
+    // submitted. Same outcome as having no pane at all, so queue it for the
+    // card's next open rather than losing it.
+    this.pendingMessages.enqueue({ taskId, slot, body: message, fromTaskId: options.fromTaskId });
+    return { delivered: false, queued: true };
   }
 
   /**
@@ -1491,6 +1534,25 @@ export class SessionManager {
    * tmux panes by hand with a single table naming exactly what state each
    * one is in.
    */
+  /**
+   * The messages waiting for this card, rendered as the prompt a reopened
+   * session starts on.
+   *
+   * Returns the ids alongside so the caller can drop them only once the
+   * session that will carry them actually exists.
+   */
+  private resolvePendingMessages(
+    taskId: string,
+    slot: SessionSlot,
+  ): { notice?: string; ids: string[] } {
+    const queued = this.pendingMessages.list(taskId, slot);
+    if (queued.length === 0) {
+      return { ids: [] };
+    }
+    const notice = composeResumeNotice(queued, (id) => this.board.getTask(id)?.title);
+    return { notice, ids: queued.map((message) => message.id) };
+  }
+
   /**
    * Whether this session's agent actually received its opening brief.
    *

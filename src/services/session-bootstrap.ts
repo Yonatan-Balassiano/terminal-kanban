@@ -53,6 +53,13 @@ export interface SessionBootstrapCommandOptions {
    * the conversation starts fresh.
    */
   initialPromptFile?: string;
+  /**
+   * Path to the file holding messages that arrived while this card had no
+   * session. Read by the script and handed to the agent only when this open
+   * turns out to be a resume — see session-bootstrap.sh for why it is a
+   * second file rather than a flag on the first.
+   */
+  resumeNoticeFile?: string;
 }
 
 /**
@@ -127,6 +134,7 @@ export function buildNewSessionBootstrapCommand({
   workspaces = [],
   agentSessionId,
   initialPromptFile,
+  resumeNoticeFile,
 }: SessionBootstrapCommandOptions): string {
   const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs, sessionName);
   const envVars: Array<[string, string]> = [
@@ -146,6 +154,7 @@ export function buildNewSessionBootstrapCommand({
     // session's pane, and a long brief would push it past the ~4 KB the pane
     // accepts, truncating the command mid-quote.
     ['AGENTBOARD_INITIAL_PROMPT_FILE', initialPromptFile ?? ''],
+    ['AGENTBOARD_RESUME_PROMPT_FILE', resumeNoticeFile ?? ''],
   ];
 
   return [

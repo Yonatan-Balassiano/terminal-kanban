@@ -102,7 +102,7 @@ function stubRpc(handlers: Record<string, unknown> = {}, boardOverride?: BoardSn
       return handlers[method];
     }
     if (method === 'getBoard') return board;
-    if (method === 'notifyTaskSession') return { delivered: true };
+    if (method === 'notifyTaskSession') return { delivered: true, queued: false };
     throw new Error(`unexpected RPC: ${method}`);
   });
   const disconnect = vi.fn();
@@ -118,9 +118,15 @@ describe('agentboard task notify', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.ensureRunning.mockResolvedValue(undefined);
+    // Pinned, not inherited: the CLI resolves the sending card from the
+    // environment or a `.agentboard/task-id` file above the cwd, and this
+    // repo's own checkout has one — so without this the assertions below
+    // would depend on whether the developer is running inside a card.
+    process.env['AGENTBOARD_TASK_ID'] = 'sender-1';
   });
 
   afterEach(() => {
+    delete process.env['AGENTBOARD_TASK_ID'];
     logSpy.mockClear();
     errorSpy.mockClear();
     exitSpy.mockClear();
@@ -137,22 +143,26 @@ describe('agentboard task notify', () => {
     expect(call).toHaveBeenCalledWith('notifyTaskSession', {
       taskId: 'parent-1',
       message: 'Address the PR comments on #42.',
+      // Names the card that sent it, so a queued message can say who it is from.
+      fromTaskId: 'sender-1',
     });
     expect(logSpy).toHaveBeenCalledWith("Delivered to parent-1's live session.");
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it('reports when the target task has no live session, without treating it as an error', async () => {
+  it('reports a queued message as queued, not as a failure', async () => {
     // Arrange
-    stubRpc({ notifyTaskSession: { delivered: false } });
+    stubRpc({ notifyTaskSession: { delivered: false, queued: true } });
 
     // Act
     await run('parent-1', 'Address the PR comments on #42.');
 
     // Assert
-    expect(logSpy).toHaveBeenCalledWith('Task parent-1 has no live session — nothing to deliver to.');
-    expect(process.exitCode).toBe(1);
-    process.exitCode = 0;
+    // A card with no live session is no longer a dead end: the message is
+    // stored and handed to its agent when the session next opens, so this is
+    // an outcome to report, not an error to fail on.
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Queued for parent-1'));
+    expect(process.exitCode).not.toBe(1);
   });
 
   it('refuses an unknown task id rather than silently no-op-ing', async () => {

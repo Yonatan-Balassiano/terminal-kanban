@@ -21,9 +21,26 @@ export function briefRelativePath(taskId: string, slot: SessionSlot): string {
   return `${BRIEF_DIRECTORY}/${taskId}-${slot}.txt`;
 }
 
+/**
+ * The resume-time counterpart: messages that arrived while the card had no
+ * session, delivered when it next opens.
+ *
+ * A separate file from the brief because only session-bootstrap.sh knows which
+ * of the two applies — it is the thing that decides fresh vs. resume — and the
+ * two must never both be used.
+ */
+export function resumeNoticeRelativePath(taskId: string, slot: SessionSlot): string {
+  return `${BRIEF_DIRECTORY}/${taskId}-${slot}-resume.txt`;
+}
+
 /** Where a local session — pty or tmux — reads its brief from. */
 export function localBriefPath(taskId: string, slot: SessionSlot): string {
   return join(tmpdir(), 'agentboard', briefRelativePath(taskId, slot));
+}
+
+/** Where a local session reads its queued messages from. */
+export function localResumeNoticePath(taskId: string, slot: SessionSlot): string {
+  return join(tmpdir(), 'agentboard', resumeNoticeRelativePath(taskId, slot));
 }
 
 /**
@@ -39,9 +56,21 @@ export function localBriefPath(taskId: string, slot: SessionSlot): string {
  * the same file, and the board already holds the same text.
  */
 export function writeLocalBrief(taskId: string, slot: SessionSlot, prompt: string): string {
-  const path = localBriefPath(taskId, slot);
+  return writeBriefFile(localBriefPath(taskId, slot), prompt);
+}
+
+/** {@link writeLocalBrief}, for the queued-message file. */
+export function writeLocalResumeNotice(
+  taskId: string,
+  slot: SessionSlot,
+  notice: string,
+): string {
+  return writeBriefFile(localResumeNoticePath(taskId, slot), notice);
+}
+
+function writeBriefFile(path: string, contents: string): string {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, prompt, 'utf8');
+  writeFileSync(path, contents, 'utf8');
   chmodSync(path, BRIEF_FILE_MODE);
   return path;
 }

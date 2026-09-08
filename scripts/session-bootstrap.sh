@@ -15,6 +15,7 @@ agent_args="${AGENTBOARD_AGENT_ARGS:-}"
 workspaces="${AGENTBOARD_WORKSPACES:-}"
 agent_session_id="${AGENTBOARD_AGENT_SESSION_ID:-}"
 initial_prompt_file="${AGENTBOARD_INITIAL_PROMPT_FILE:-}"
+resume_prompt_file="${AGENTBOARD_RESUME_PROMPT_FILE:-}"
 
 # The card's checkouts, one "label<TAB>branch<TAB>path" row per line.
 #
@@ -161,6 +162,22 @@ if [[ -n "$initial_prompt_file" ]]; then
     set -- "$@" "$(cat "$initial_prompt_file")"
   fi
   rm -f "$initial_prompt_file"
+fi
+
+# Messages that arrived while this card had no session — the resume-time
+# counterpart of the brief above.
+#
+# Two files rather than one, because only this script knows which of the two
+# cases it is in: the brief must never be replayed into a resumed
+# conversation, and a queued message must never be lost just because the card
+# happens to be starting fresh. The daemon writes both (a fresh start gets its
+# queued messages appended to the brief itself), and exactly one is used.
+# Both are removed either way, so nothing is delivered twice.
+if [[ -n "$resume_prompt_file" ]]; then
+  if [[ "$resuming" == "1" && -f "$resume_prompt_file" ]]; then
+    set -- "$@" "$(cat "$resume_prompt_file")"
+  fi
+  rm -f "$resume_prompt_file"
 fi
 
 # exec, not a plain call: this is the last line of the script, nothing runs
