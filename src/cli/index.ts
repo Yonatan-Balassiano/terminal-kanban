@@ -1007,15 +1007,29 @@ export function buildCli(): Command {
           }
 
           announceDeliveryWait();
-          const { delivered } = await rpc.call<{ delivered: boolean }>('notifyTaskSession', {
-            taskId: id,
-            message,
-          });
+          const outcome = await rpc.call<{ delivered: boolean; queued: boolean }>(
+            'notifyTaskSession',
+            {
+              taskId: id,
+              message,
+              // Same two-path detection `task create` uses for subtask
+              // linking, so a queued message can name the card that sent it.
+              fromTaskId:
+                (process.env['AGENTBOARD_TASK_ID'] || undefined) ??
+                findParentTaskIdFromWorktree(process.cwd()),
+            },
+          );
 
-          if (delivered) {
+          if (outcome.delivered) {
             console.log(`Delivered to ${id}'s live session.`);
+          } else if (outcome.queued) {
+            // Not a failure: the message is stored and handed to the agent on
+            // its own argv the next time the card's session opens.
+            console.log(
+              `Queued for ${id} — it will be delivered when that card's session next opens.`,
+            );
           } else {
-            console.log(`Task ${id} has no live session — nothing to deliver to.`);
+            console.log(`Task ${id}: nothing was delivered.`);
             process.exitCode = 1;
           }
         } finally {

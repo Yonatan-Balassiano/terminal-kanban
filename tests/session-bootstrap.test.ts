@@ -43,6 +43,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_WORKSPACES="" ' +
         'AGENTBOARD_AGENT_SESSION_ID="" ' +
         'AGENTBOARD_INITIAL_PROMPT_FILE="" ' +
+        'AGENTBOARD_RESUME_PROMPT_FILE="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -73,6 +74,7 @@ describe('buildNewSessionBootstrapCommand', () => {
         'AGENTBOARD_WORKSPACES="" ' +
         'AGENTBOARD_AGENT_SESSION_ID="" ' +
         'AGENTBOARD_INITIAL_PROMPT_FILE="" ' +
+        'AGENTBOARD_RESUME_PROMPT_FILE="" ' +
         '"/scripts/session-bootstrap.sh"'
     );
   });
@@ -404,6 +406,107 @@ describe('session-bootstrap.sh initial brief', () => {
     expect(existsSync(briefFile)).toBe(false);
   });
 
+});
+
+describe('session-bootstrap.sh queued messages', () => {
+  const SESSION_ID = '5f3a1c2e-9b47-4d80-a1f6-2c8e7d4b0913';
+
+  /**
+   * Runs the real bootstrap with both prompt files present and reports what
+   * the agent was actually handed, plus which files survived.
+   *
+   * Both are always written by the daemon; only session-bootstrap.sh knows
+   * whether this open is a fresh start or a resume, so it is what picks.
+   */
+  async function run({ existingConversation }: { existingConversation: boolean }): Promise<{
+    args: string[];
+    briefLeft: boolean;
+    noticeLeft: boolean;
+  }> {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-queued-'));
+    try {
+      const argsFile = join(dir, 'received-args');
+      const fake = join(dir, 'claude');
+      writeFileSync(fake, `#!/bin/bash\nprintf '%s\\0' "$@" > ${JSON.stringify(argsFile)}\n`);
+      chmodSync(fake, 0o755);
+
+      const claudeConfig = join(dir, 'claude-config');
+      if (existingConversation) {
+        const project = join(claudeConfig, 'projects', '-some-checkout');
+        mkdirSync(project, { recursive: true });
+        writeFileSync(join(project, `${SESSION_ID}.jsonl`), '{}\n');
+      }
+
+      const briefFile = join(dir, 'brief.txt');
+      writeFileSync(briefFile, 'THE ORIGINAL BRIEF');
+      const noticeFile = join(dir, 'notice.txt');
+      writeFileSync(noticeFile, 'THE QUEUED MESSAGE');
+
+      const command = buildNewSessionBootstrapCommand({
+        repoPath: dir,
+        branch: 'ab/api-0001',
+        agentCli: 'claude',
+        usesWorktree: true,
+        cwd: dir,
+        sessionBootstrapScript: BOOTSTRAP,
+        agentSessionId: SESSION_ID,
+        initialPromptFile: briefFile,
+        resumeNoticeFile: noticeFile,
+      });
+
+      await execFileAsync('bash', ['-c', command], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env['PATH'] ?? ''}`,
+          CLAUDE_CONFIG_DIR: claudeConfig,
+        },
+      });
+
+      return {
+        args: readFileSync(argsFile, 'utf8').split('\0').slice(0, -1),
+        briefLeft: existsSync(briefFile),
+        noticeLeft: existsSync(noticeFile),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('delivers queued messages when the card resumes, and never the brief', async () => {
+    // Arrange + Act — the card has spoken to its agent before, so replaying
+    // the brief would hand it work it has already done; the message that
+    // arrived while it was closed is the only thing it has not seen.
+    const { args } = await run({ existingConversation: true });
+
+    // Assert
+    expect(args).toContain('--resume');
+    expect(args[args.length - 1]).toBe('THE QUEUED MESSAGE');
+    expect(args.some((arg) => arg.includes('THE ORIGINAL BRIEF'))).toBe(false);
+  });
+
+  it('delivers the brief when the card starts fresh, and never the resume notice', async () => {
+    // Arrange + Act — a card opened for the first time. Anything queued for it
+    // is already folded into the brief by the daemon, so using the notice file
+    // here would deliver it twice.
+    const { args } = await run({ existingConversation: false });
+
+    // Assert
+    expect(args).toContain('--session-id');
+    expect(args[args.length - 1]).toBe('THE ORIGINAL BRIEF');
+    expect(args.some((arg) => arg.includes('THE QUEUED MESSAGE'))).toBe(false);
+  });
+
+  it('removes both files either way, so nothing is delivered twice', async () => {
+    // Act
+    const resumed = await run({ existingConversation: true });
+    const fresh = await run({ existingConversation: false });
+
+    // Assert — the unused file is consumed too; leaving it would make the
+    // next open replay it.
+    expect(resumed).toMatchObject({ briefLeft: false, noticeLeft: false });
+    expect(fresh).toMatchObject({ briefLeft: false, noticeLeft: false });
+  });
 });
 
 describe('session-bootstrap.sh worktree marker file', () => {

@@ -2230,7 +2230,7 @@ describe('SessionManager.notifyTaskSession', () => {
 
     // Assert — went through redeliverPrompt, and the boolean it resolved
     // flows straight through as this method's own return value.
-    expect(delivered).toBe(true);
+    expect(delivered).toEqual({ delivered: true, queued: false });
     expect(redeliverPrompt).toHaveBeenCalledWith(
       task.id,
       'primary',
@@ -2267,7 +2267,7 @@ describe('SessionManager.notifyTaskSession', () => {
     }
   });
 
-  it('returns false honestly when the paste never verified, instead of a hardcoded true', async () => {
+  it('queues the message when the paste never verified, instead of losing it', async () => {
     // Arrange — the backend actually attempted delivery but the message text
     // never rendered on the pane, so nothing was submitted.
     const redeliverPrompt = vi.fn<
@@ -2282,11 +2282,12 @@ describe('SessionManager.notifyTaskSession', () => {
     const delivered = await manager.notifyTaskSession(task.id, 'A subtask PR just opened.');
 
     // Assert
-    expect(delivered).toBe(false);
+    expect(delivered).toEqual({ delivered: false, queued: true });
+    expect(manager.pendingMessageCounts().get(task.id)).toBe(1);
     expect(redeliverPrompt).toHaveBeenCalled();
   });
 
-  it('returns false without calling the backend when the task has no live session', async () => {
+  it('queues the message without calling the backend when the task has no live session', async () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
@@ -2299,7 +2300,8 @@ describe('SessionManager.notifyTaskSession', () => {
     const delivered = await manager.notifyTaskSession(task.id, 'A subtask PR just opened.');
 
     // Assert
-    expect(delivered).toBe(false);
+    expect(delivered).toEqual({ delivered: false, queued: true });
+    expect(manager.pendingMessageCounts().get(task.id)).toBe(1);
     expect(redeliverPrompt).not.toHaveBeenCalled();
   });
 
@@ -2313,6 +2315,138 @@ describe('SessionManager.notifyTaskSession', () => {
     await expect(
       manager.notifyTaskSession(task.id, 'A subtask PR just opened.')
     ).rejects.toThrow(/do not support notifying/);
+  });
+});
+
+describe('SessionManager queued cross-task messages', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function makeManager(options: { createThrows?: boolean } = {}) {
+    const created: CreateSessionOpts[] = [];
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => {
+        created.push(opts);
+        if (options.createThrows) {
+          throw new Error('tmux is not available');
+        }
+        return {
+          id: 'session-1',
+          taskId: opts.taskId,
+          slot: opts.slot,
+          backendType: 'tmux',
+          backendSessionId: `ab_${opts.taskId}_p`,
+          agentSessionId: opts.agentSessionId,
+          status: 'active',
+          cwd: opts.cwd ?? opts.repoPath,
+          branch: opts.branch,
+          createdAt: 1,
+          updatedAt: 1,
+        };
+      }),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({ command: '' })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+      redeliverPrompt: vi.fn<
+        [string, SessionSlot, string, string, string | undefined, RedeliverPromptOptions],
+        Promise<boolean>
+      >(async () => true),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    return { manager, backend, created };
+  }
+
+  it('hands a message sent to a closed card to its next session', async () => {
+    // Arrange — the whole point. `notify` types into a live pane; with no pane
+    // the message used to be dropped and reported undelivered, which is why
+    // the board needed a badge that could say an event happened but not what
+    // was said.
+    const sender = board.createTask({ title: 'Add rate limiting', repoId: 'repo-1' });
+    const target = board.createTask({ title: 'Closed card', repoId: 'repo-1' });
+    const { manager, created } = makeManager();
+
+    // Act
+    const outcome = await manager.notifyTaskSession(target.id, 'Address the PR comments on #42.', 'primary', {
+      fromTaskId: sender.id,
+    });
+    await manager.openSession(target.id);
+
+    // Assert — reported as queued rather than failed, and carried on the
+    // session's own argv when it opened.
+    expect(outcome).toEqual({ delivered: false, queued: true });
+    expect(created[0]?.resumeNotice).toContain('Address the PR comments on #42.');
+    expect(created[0]?.resumeNotice).toContain('Add rate limiting');
+    // Consumed, so the session after this one does not hear it again.
+    expect(manager.pendingMessageCounts().get(target.id)).toBeUndefined();
+  });
+
+  it('keeps the queue when the session fails to start', async () => {
+    // Arrange — dropping the messages when the prompt file is written would
+    // reintroduce the loss this exists to prevent, just in a narrower window.
+    const target = board.createTask({ title: 'Cannot start', repoId: 'repo-1' });
+    const { manager } = makeManager({ createThrows: true });
+    await manager.notifyTaskSession(target.id, 'Still needs saying.');
+
+    // Act
+    await expect(manager.openSession(target.id)).rejects.toThrow('tmux is not available');
+
+    // Assert
+    expect(manager.pendingMessageCounts().get(target.id)).toBe(1);
+  });
+
+  it('sends nothing extra when the card has no queued messages', async () => {
+    // Arrange
+    const target = board.createTask({ title: 'Nothing waiting', repoId: 'repo-1' });
+    const { manager, created } = makeManager();
+
+    // Act
+    await manager.openSession(target.id);
+
+    // Assert
+    expect(created[0]?.resumeNotice).toBeUndefined();
   });
 });
 

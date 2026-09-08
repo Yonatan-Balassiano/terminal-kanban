@@ -257,6 +257,7 @@ function applyAdditiveMigrations(db: Db): void {
   // which the rebuild above may have just replaced.
   ensureTableFromSchema(db, 'task_branches');
   ensureTableFromSchema(db, 'pr_release_status');
+  ensureTableFromSchema(db, 'pending_messages');
   backfillTaskBranches(db);
 }
 

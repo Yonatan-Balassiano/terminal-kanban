@@ -225,6 +225,26 @@ CREATE TABLE IF NOT EXISTS pr_release_status (
   PRIMARY KEY (task_id, repo_slug, pr_number, artifact_name)
 );
 
+-- Messages sent to a card whose session was not running at the time.
+--
+-- `agentboard task notify` types into a live pane; with no pane the message
+-- used to be dropped and reported as undelivered, which is why the board
+-- needed a badge to stand in for it. Queued here instead, it is handed to the
+-- agent on the card's own argv the next time its session opens — so a
+-- cross-task message reaches the conversation whether or not anyone was
+-- listening when it was sent.
+CREATE TABLE IF NOT EXISTS pending_messages (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  slot TEXT NOT NULL DEFAULT 'primary',
+  body TEXT NOT NULL,
+  -- The card that sent it, when a card sent it. NULL for a person.
+  from_task_id TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_messages_task ON pending_messages(task_id, slot);
+
 CREATE INDEX IF NOT EXISTS idx_pr_release_next_check ON pr_release_status(next_check_at);
 CREATE INDEX IF NOT EXISTS idx_pr_release_task ON pr_release_status(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_repo ON tasks(repo_id);

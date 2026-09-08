@@ -434,6 +434,13 @@ export interface CreateSessionOpts {
    */
   initialPrompt?: string;
   /**
+   * Messages that arrived while this card had no session, delivered on the
+   * agent's argv only if this open turns out to be a resume. `initialPrompt`
+   * covers the fresh-start case; session-bootstrap.sh picks between them, so
+   * neither can be delivered twice.
+   */
+  resumeNotice?: string;
+  /**
    * Reports whether the automatic initial-prompt delivery (paste + retry
    * inside `create()`) was ever verified on screen — the one delivery path
    * `SessionManager` cannot observe directly, since it's fire-and-forget on

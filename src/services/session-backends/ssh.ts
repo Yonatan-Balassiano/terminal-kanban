@@ -13,7 +13,7 @@ import type {
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
-import { BRIEF_FILE_MODE, briefRelativePath } from '../session-brief.js';
+import { BRIEF_FILE_MODE, briefRelativePath, resumeNoticeRelativePath } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import { shellJoin } from '../shell-quote.js';
 import { buildControlPath, TransportUnreachableError, type SshTransport } from '../transport/index.js';
@@ -177,9 +177,22 @@ export class SshTmuxBackend implements SessionBackend {
     slot: SessionSlot,
     prompt: string
   ): Promise<string> {
+    return this.ensureRemoteFile(briefRelativePath(taskId, slot), prompt);
+  }
+
+  /** {@link ensureRemoteBrief}, for messages queued while the card was closed. */
+  private async ensureRemoteResumeNotice(
+    taskId: string,
+    slot: SessionSlot,
+    notice: string,
+  ): Promise<string> {
+    return this.ensureRemoteFile(resumeNoticeRelativePath(taskId, slot), notice);
+  }
+
+  private async ensureRemoteFile(relativePath: string, contents: string): Promise<string> {
     const home = await this.resolveRemoteHome();
-    const remotePath = `${home}/.agentboard/${briefRelativePath(taskId, slot)}`;
-    await this.transport.writeFileIfChanged(remotePath, prompt, BRIEF_FILE_MODE);
+    const remotePath = `${home}/.agentboard/${relativePath}`;
+    await this.transport.writeFileIfChanged(remotePath, contents, BRIEF_FILE_MODE);
     return remotePath;
   }
 
@@ -330,6 +343,9 @@ export class SshTmuxBackend implements SessionBackend {
       const remoteBriefFile = opts.initialPrompt
         ? await this.ensureRemoteBrief(opts.taskId, opts.slot, opts.initialPrompt)
         : undefined;
+      const remoteResumeNoticeFile = opts.resumeNotice
+        ? await this.ensureRemoteResumeNotice(opts.taskId, opts.slot, opts.resumeNotice)
+        : undefined;
       const bootstrapCommand = buildNewSessionBootstrapCommand({
         taskId: opts.taskId,
         sessionName: opts.sessionName,
@@ -349,6 +365,7 @@ export class SshTmuxBackend implements SessionBackend {
         // contents to the agent CLI as argv — see TmuxBackend for why the
         // pane is no longer involved in getting a brief to an agent.
         initialPromptFile: remoteBriefFile,
+        resumeNoticeFile: remoteResumeNoticeFile,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       this.rememberInspect(backendSessionId, { backendSessionId, status: 'active' });

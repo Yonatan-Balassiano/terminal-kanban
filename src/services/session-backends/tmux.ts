@@ -13,7 +13,7 @@ import type {
 import { existsSync } from 'fs';
 import { generateId } from '../../db/index.js';
 import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
-import { writeLocalBrief } from '../session-brief.js';
+import { writeLocalBrief, writeLocalResumeNotice } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import { DeliveryGuard } from './delivery-guard.js';
 import {
@@ -211,6 +211,9 @@ export class TmuxBackend implements SessionBackend {
       const initialPromptFile = opts.initialPrompt
         ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
         : undefined;
+      const resumeNoticeFile = opts.resumeNotice
+        ? writeLocalResumeNotice(opts.taskId, opts.slot, opts.resumeNotice)
+        : undefined;
       const bootstrapCommand = buildNewSessionBootstrapCommand({
         taskId: opts.taskId,
         sessionName: opts.sessionName,
@@ -230,6 +233,7 @@ export class TmuxBackend implements SessionBackend {
         // deletes it itself when this turns out to be a resume (see
         // session-bootstrap.sh). The daemon, not argv, delivers the contents.
         initialPromptFile,
+        resumeNoticeFile,
       });
       await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
       // The brief rides the bootstrap command's own argv from here — see
