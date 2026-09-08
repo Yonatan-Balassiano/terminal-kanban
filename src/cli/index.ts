@@ -50,6 +50,36 @@ function announceDeliveryWait(): void {
   );
 }
 
+/**
+ * Says which of `redeliverInitialPrompt`'s three failures actually happened.
+ *
+ * The single message this replaces — "has no live session, or no stored
+ * brief" — named two causes and left out the third, so the common case (a
+ * delivery ran and its paste never verified) was reported as one of the two
+ * things it definitively was not. Someone looking at `agentboard fleet`
+ * listing that same session as live reasonably concluded the two views
+ * disagreed about whether a session existed.
+ */
+function explainRedeliverFailure(
+  id: string,
+  reason: import('../services/session-manager.js').RedeliverFailureReason | undefined,
+): string {
+  switch (reason) {
+    case 'no-session':
+      return `Task ${id} has no live session — open one first with \`agentboard attach ${id}\`.`;
+    case 'no-brief':
+      return `Task ${id} has no stored opening brief, so there is nothing to re-deliver. Use \`agentboard task notify ${id} "..."\` to send it a message instead.`;
+    case 'not-verified':
+      return (
+        `Task ${id}'s brief was delivered to the pane but never confirmed on screen, so nothing was submitted. ` +
+        'The pane is most likely still starting up — check it with `agentboard fleet` and run this again once it settles.'
+      );
+    default:
+      // An older daemon that predates the reason field.
+      return `Task ${id}: nothing was delivered.`;
+  }
+}
+
 /** Map ConfigPaths (dbFile) to the shape expected by DaemonOpts / ensureRunning. */
 function daemonOpts(paths: ConfigPaths) {
   return {
@@ -918,6 +948,10 @@ export function buildCli(): Command {
             }
 
             console.log(`Created task ${created.id}: ${created.title}`);
+            // Labelled `task`, matching the `repo` line below it: both are bare
+            // ids in the same shape, printed a few lines apart, and the repo id
+            // was being picked up and passed to commands that wanted this one.
+            console.log(`  task    ${created.id}`);
             if (created.branchName) {
               console.log(`  branch  ${created.branchName}`);
             }
@@ -1007,14 +1041,15 @@ export function buildCli(): Command {
           }
 
           announceDeliveryWait();
-          const { delivered } = await rpc.call<{ delivered: boolean }>('redeliverInitialPrompt', {
-            taskId: id,
-          });
+          const outcome = await rpc.call<{
+            delivered: boolean;
+            reason?: import('../services/session-manager.js').RedeliverFailureReason;
+          }>('redeliverInitialPrompt', { taskId: id });
 
-          if (delivered) {
+          if (outcome.delivered) {
             console.log(`Re-delivered ${id}'s brief to its live session.`);
           } else {
-            console.log(`Task ${id} has no live session, or no stored brief — nothing to deliver.`);
+            console.log(explainRedeliverFailure(id, outcome.reason));
             process.exitCode = 1;
           }
         } finally {

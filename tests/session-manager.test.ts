@@ -2043,13 +2043,13 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     await manager.openSession(task.id);
 
     // Act
-    const delivered = await manager.redeliverInitialPrompt(task.id);
+    const outcome = await manager.redeliverInitialPrompt(task.id);
 
     // Assert — and it is the one caller that opts into skipping the paste
     // when this same brief is already sitting on the pane: its text is the
     // card's stored brief, so a copy on screen is a re-send, not a new
     // message. Notify must not pass this; see its own suite.
-    expect(delivered).toBe(true);
+    expect(outcome).toEqual({ delivered: true });
     expect(redeliverPrompt).toHaveBeenCalledWith(
       task.id,
       'primary',
@@ -2060,7 +2060,7 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     );
   });
 
-  it('propagates false from the backend when the paste never verified', async () => {
+  it('reports not-verified when the backend delivered but never confirmed the paste', async () => {
     // Arrange — the backend actually tried, but the paste never rendered, so
     // nothing was submitted. The method's own return value must say so
     // honestly, not paper over it with a hardcoded true.
@@ -2077,14 +2077,14 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     await manager.openSession(task.id);
 
     // Act
-    const delivered = await manager.redeliverInitialPrompt(task.id);
+    const outcome = await manager.redeliverInitialPrompt(task.id);
 
     // Assert
-    expect(delivered).toBe(false);
+    expect(outcome).toEqual({ delivered: false, reason: 'not-verified' });
     expect(redeliverPrompt).toHaveBeenCalled();
   });
 
-  it('returns false without calling the backend when the task has no session', async () => {
+  it('reports no-session without calling the backend when the task has no session', async () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
@@ -2098,14 +2098,14 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     const { manager } = makeManager({ redeliverPrompt });
 
     // Act
-    const delivered = await manager.redeliverInitialPrompt(task.id);
+    const outcome = await manager.redeliverInitialPrompt(task.id);
 
     // Assert
-    expect(delivered).toBe(false);
+    expect(outcome).toEqual({ delivered: false, reason: 'no-session' });
     expect(redeliverPrompt).not.toHaveBeenCalled();
   });
 
-  it('returns false without calling the backend when the task never had a brief', async () => {
+  it('reports no-brief without calling the backend when the task never had a brief', async () => {
     // Arrange
     const redeliverPrompt = vi.fn<
       [string, 'primary' | 'secondary', string, string, string?],
@@ -2116,10 +2116,10 @@ describe('SessionManager.redeliverInitialPrompt', () => {
     await manager.openSession(task.id);
 
     // Act
-    const delivered = await manager.redeliverInitialPrompt(task.id);
+    const outcome = await manager.redeliverInitialPrompt(task.id);
 
     // Assert
-    expect(delivered).toBe(false);
+    expect(outcome).toEqual({ delivered: false, reason: 'no-brief' });
     expect(redeliverPrompt).not.toHaveBeenCalled();
   });
 

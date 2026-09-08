@@ -110,9 +110,33 @@ export function buildTmuxLoadBufferArgs(bufferName: string, filePath: string): s
   return ['load-buffer', '-b', bufferName, filePath];
 }
 
-/** Pastes a loaded buffer into the target pane and frees it (`-d`). */
+/**
+ * Pastes a loaded buffer into the target pane and frees it (`-d`).
+ *
+ * `-r` and `-p` are both load-bearing, and their absence silently corrupted
+ * every brief this ever delivered.
+ *
+ * Without `-r`, tmux replaces each linefeed in the buffer with a carriage
+ * return — its documented default. The agent then receives a brief whose blank
+ * lines are `\r`, which flattens every markdown heading, list and fence in it.
+ * Confirmed live against a real `claude` pane by reading the delivered text
+ * back out of the session transcript:
+ *
+ *     'Reply with ... nothing else.\r\rThis is paragraph two.'
+ *
+ * That is the mangling `DEFAULT_PASTE_VERIFY_TIMEOUT_MS` describes as coming
+ * from "something between tmux's paste-buffer and the CLI's own input
+ * handling" — it is simply this flag.
+ *
+ * Without `-p`, tmux omits the bracketed-paste markers, so the CLI cannot tell
+ * a paste from fast typing and has to fall back to guessing from arrival
+ * timing — which is what splits one brief into several `[Pasted text #N]`
+ * chunks. With `-p` the same paste arrives as one atomic block the CLI
+ * recognises, and the trailing Enter submits it. Verified live: the identical
+ * brief round-trips byte-for-byte, newlines intact.
+ */
 export function buildTmuxPasteBufferArgs(bufferName: string, target: string): string[] {
-  return ['paste-buffer', '-b', bufferName, '-d', '-t', target];
+  return ['paste-buffer', '-b', bufferName, '-d', '-p', '-r', '-t', target];
 }
 
 export interface TmuxNewSessionSpec {

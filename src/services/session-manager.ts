@@ -123,6 +123,20 @@ export interface InspectSessionStateResult {
   attentionChanged: boolean;
 }
 
+/**
+ * Why a re-delivery did nothing, so the CLI can say which case it hit.
+ *
+ * - `no-session`: the card has no live session to deliver into.
+ * - `no-brief`: the card never had a stored opening brief.
+ * - `not-verified`: a delivery ran, but the paste was never confirmed on the
+ *   pane, so nothing was submitted. The only retryable one.
+ */
+export type RedeliverFailureReason = 'no-session' | 'no-brief' | 'not-verified';
+
+export type RedeliverOutcome =
+  | { delivered: true }
+  | { delivered: false; reason: RedeliverFailureReason };
+
 const processTableCacheWindowMs = 2000;
 
 // --------------- Helpers -------------------------------------
@@ -882,6 +896,15 @@ export class SessionManager {
    * redelivery (PTY), since that is a real "can't do this" the caller should
    * surface.
    *
+   * Reports *which* of its three outcomes happened, rather than a bare
+   * `false` the caller has to guess at. All three used to print as "no live
+   * session, or no stored brief", which named two causes and omitted the
+   * third — so a report of this command failing against a session that
+   * `agentboard fleet` listed as live read as the two views disagreeing about
+   * the session, when the delivery had in fact been attempted and simply not
+   * verified. `not-verified` is also the only one of the three that is worth
+   * retrying.
+   *
    * Safe to run twice: the backends refuse to start a second delivery into a
    * pane that already has one in flight (`DeliveryGuard`), and this call —
    * alone among the two, since its text is identical by construction — asks
@@ -890,15 +913,18 @@ export class SessionManager {
    * Like notify, it can take minutes — see `pane-idle.ts`'s `deliveryBudgetMs`
    * and the timeout `src/cli/rpc.ts` derives from it.
    */
-  async redeliverInitialPrompt(taskId: string, slot: SessionSlot = 'primary'): Promise<boolean> {
+  async redeliverInitialPrompt(
+    taskId: string,
+    slot: SessionSlot = 'primary',
+  ): Promise<RedeliverOutcome> {
     const session = this.getSession(taskId, slot);
     if (!session?.backendSessionId) {
-      return false;
+      return { delivered: false, reason: 'no-session' };
     }
 
     const taskRow = this.loadTaskRow(taskId);
     if (!taskRow?.initial_prompt) {
-      return false;
+      return { delivered: false, reason: 'no-brief' };
     }
 
     const backend = this.getBackend(session.backendType);
@@ -919,7 +945,7 @@ export class SessionManager {
       { skipIfAlreadyOnPane: true },
     );
     this.persistDeliveryOutcome(taskId, slot, delivered);
-    return delivered;
+    return delivered ? { delivered: true } : { delivered: false, reason: 'not-verified' };
   }
 
   /**

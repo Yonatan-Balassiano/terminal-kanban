@@ -664,8 +664,10 @@ export async function dispatch(
 
       case 'redeliverInitialPrompt': {
         const params = p as unknown as RedeliverInitialPromptParams;
-        const delivered = await services.session.redeliverInitialPrompt(params.taskId, params.slot);
-        return { id: req.id, result: { delivered } };
+        const outcome = await services.session.redeliverInitialPrompt(params.taskId, params.slot);
+        // Spread, so `delivered` keeps its existing shape for older clients and
+        // `reason` is simply absent on success.
+        return { id: req.id, result: { ...outcome } };
       }
 
       case 'getFleetStatus': {
