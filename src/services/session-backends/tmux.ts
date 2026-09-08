@@ -486,6 +486,32 @@ export class TmuxBackend implements SessionBackend {
     }));
   }
 
+  /**
+   * Reads the pane's own process info, the way `SshTmuxBackend.inspect` always
+   * has.
+   *
+   * Its absence here was not cosmetic: `inspectSessionState` routes on
+   * `info.shellPid`, so a local tmux session with no pid never reached
+   * `deriveSessionActivity` at all — it fell through to
+   * `deriveFallbackSessionActivity` with no command, which reports
+   * `isBusy: false` unconditionally. Every local tmux session therefore read as
+   * idle no matter what it was doing, which is what `agentboard fleet`'s BUSY
+   * column was reporting.
+   *
+   * Best-effort: a pane that has gone away between `has-session` and this call
+   * still counts as active, just without process detail.
+   */
+  private async readPaneProcess(
+    target: string,
+  ): Promise<{ shellPid?: number; currentCommand?: string }> {
+    try {
+      const result = await this.runner(buildTmuxListPanesArgs(TMUX_PANE_PROCESS_FORMAT, target));
+      return parseTmuxPaneProcess(result.stdout);
+    } catch {
+      return {};
+    }
+  }
+
   async inspect(backendSessionId: string): Promise<BackendSessionInfo | null> {
     try {
       await this.runner(buildTmuxHasSessionArgs(backendSessionId));
@@ -494,15 +520,24 @@ export class TmuxBackend implements SessionBackend {
       return {
         backendSessionId,
         status: 'active',
+        // Targeted by session name, which `has-session` just proved resolves —
+        // no need to re-scan every pane on the server for the tag.
+        ...(await this.readPaneProcess(backendSessionId)),
       };
     } catch {
       const taggedPane = await this.findTaggedPane(backendSessionId);
       if (!taggedPane) {
         return null;
       }
+      // The busier of the two branches, not the rarer one: once the Go layout
+      // engine joins a pane into the board session, its original session name
+      // is gone and `has-session` above always fails, so every attached card
+      // is inspected through here. It needs the pane's process info just as
+      // much as the branch above.
       return {
         backendSessionId,
         status: 'active',
+        ...(await this.readPaneProcess(taggedPane)),
       };
     }
   }

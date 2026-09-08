@@ -104,6 +104,33 @@ describe('deriveSessionActivity', () => {
     expect(activity.pid).toBe(200);
   });
 
+  it('labels the agent by name when its binary is a version number', () => {
+    // Arrange — the shipped `claude` re-execs a versioned binary, so the
+    // process (and tmux's pane_current_command) is called `2.1.263`. Matching
+    // on the basename alone put a version number in the fleet view's label.
+    const activity = deriveSessionActivity(
+      'task-1',
+      'session-1',
+      'active',
+      [
+        { pid: 100, ppid: 1, stat: 'Ss', command: 'zsh', args: '-zsh' },
+        {
+          pid: 200,
+          ppid: 100,
+          stat: 'S+',
+          command: '/Users/dev/.local/share/claude/versions/2.1.263',
+          args: '/Users/dev/.local/share/claude/versions/2.1.263 --session-id abc',
+        },
+      ],
+      100,
+      Date.now(),
+      '2.1.263',
+    );
+
+    expect(activity.kind).toBe('agent');
+    expect(activity.label).toBe('Claude');
+  });
+
   it('falls back to the current pane command when the process table misses descendants', () => {
     const activity = deriveSessionActivity(
       'task-1',

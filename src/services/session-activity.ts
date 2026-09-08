@@ -60,15 +60,26 @@ function baseCommandName(command: string): string {
   return slashIndex >= 0 ? trimmed.slice(slashIndex + 1) : trimmed;
 }
 
+/**
+ * Names the process a session is busy with, preferring the agent's own name.
+ *
+ * Matched against the whole command string before it is reduced to a
+ * basename, because an agent CLI's basename is not reliably its own name.
+ * Confirmed live: `claude` re-execs a versioned binary, so the process is
+ * called `2.1.263` and tmux reports that as `pane_current_command` — never
+ * equal to, or even containing, "claude". The full path
+ * (`~/.local/share/claude/versions/2.1.263`) still does, which is what this
+ * matches on, so the fleet view says "Claude" rather than a version number.
+ */
 function formatProcessLabel(command: string): string {
+  const agent = AGENT_LABELS.find(({ pattern }) => pattern.test(command));
+  if (agent) {
+    return agent.label;
+  }
+
   const normalized = baseCommandName(command).replace(/^[-]+/, '');
   if (normalized.length === 0) {
     return 'working';
-  }
-
-  const agent = AGENT_LABELS.find(({ pattern }) => pattern.test(normalized));
-  if (agent) {
-    return agent.label;
   }
 
   return normalized;

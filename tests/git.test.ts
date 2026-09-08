@@ -76,6 +76,12 @@ describe('GitService.stageAndCommitWip', () => {
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'agentboard-wip-'));
     execFileSync('git', ['init', '-b', 'main', repo]);
+    // This suite asserts on which files show up as untracked, so the developer's
+    // own global excludes file has to be out of the picture. Without this the
+    // `.env` case below fails for anyone whose ~/.gitignore lists `.env` —
+    // git hides it, `git status --porcelain` comes back empty, and the test
+    // reports a bug in code that behaved correctly.
+    git(repo, 'config', 'core.excludesFile', '/dev/null');
     writeFileSync(join(repo, 'README.md'), 'hello\n');
     git(repo, 'add', '-A');
     commit(repo, 'init');

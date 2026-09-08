@@ -125,6 +125,8 @@ describe('TmuxBackend', () => {
       ],
       // Resolves which pane was just tagged so any stale duplicate can be cleared.
       ['display-message', '-p', '-t', 'ab_friday_thing_2e30_s', '#{pane_id}'],
+      // Pane process info, so activity derivation has a pid to walk from.
+      ['list-panes', '-t', 'ab_friday_thing_2e30_s', '-F', '#{pane_pid} #{pane_current_command}'],
     ]);
   });
 
@@ -156,7 +158,29 @@ describe('TmuxBackend', () => {
       ],
       // Resolves which pane was just tagged so any stale duplicate can be cleared.
       ['display-message', '-p', '-t', 'ab_friday_thing_2e30_p', '#{pane_id}'],
+      // Pane process info, so activity derivation has a pid to walk from.
+      ['list-panes', '-t', 'ab_friday_thing_2e30_p', '-F', '#{pane_pid} #{pane_current_command}'],
     ]);
+  });
+
+  it('reports the pane process, so a live session can read as busy', async () => {
+    // Arrange — a pane running a real agent.
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes' && args.includes('#{pane_pid} #{pane_current_command}')) {
+        return { stdout: '4242 2.1.263\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const backend = new TmuxBackend({ runner });
+
+    // Act
+    const info = await backend.inspect('ab_friday_thing_2e30_p');
+
+    // Assert — without shellPid, inspectSessionState never reaches
+    // deriveSessionActivity and every local tmux session reads as idle.
+    expect(info).toMatchObject({ shellPid: 4242, currentCommand: '2.1.263' });
   });
 
   it('finds inspected sessions after their panes move into the board layout', async () => {
@@ -185,6 +209,9 @@ describe('TmuxBackend', () => {
     expect(calls).toEqual([
       ['has-session', '-t', 'ab_friday_thing_2e30_p'],
       ['list-panes', '-a', '-F', '#{pane_id}\t#{@agentboard_backend_session_id}'],
+      // Addressed by the pane id just found, not by the session name — the
+      // session name is exactly what stopped resolving when the pane moved.
+      ['list-panes', '-t', '%42', '-F', '#{pane_pid} #{pane_current_command}'],
     ]);
   });
 
@@ -365,6 +392,26 @@ describe('TmuxBackend brief handling', () => {
     expect(typed).toContain('AGENTBOARD_INITIAL_PROMPT_FILE=""');
     // Nothing to deliver, so no pane-idle poll or paste ever runs.
     expect(calls.some((args) => args[0] === 'capture-pane')).toBe(false);
+  });
+
+  it('pastes with bracketed-paste markers and without LF-to-CR replacement', async () => {
+    // Arrange — a brief whose blank line is the thing at risk.
+    const brief = 'First paragraph.\n\nSecond paragraph.';
+
+    // Act
+    const { calls } = await createWithBrief(brief);
+
+    // Assert — both flags, or the agent receives a corrupted brief.
+    //   -r  keeps the linefeeds. tmux's documented default rewrites every LF
+    //       to CR, which reaches the model as `\r\r` where the blank line was
+    //       and flattens every heading, list and fence in a markdown brief.
+    //   -p  emits the bracketed-paste markers, so the CLI sees one atomic
+    //       paste instead of having to infer one from arrival timing (which is
+    //       what splits a brief into several `[Pasted text #N]` chunks).
+    const paste = calls.find((args) => args[0] === 'paste-buffer');
+    expect(paste).toBeDefined();
+    expect(paste).toContain('-r');
+    expect(paste).toContain('-p');
   });
 
   it('delivers the brief by pasting it in once the pane settles, not by typing it', async () => {

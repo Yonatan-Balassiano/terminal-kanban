@@ -139,17 +139,44 @@ describe('agentboard task redeliver-prompt', () => {
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it('reports when there is nothing to deliver, without treating it as an error', async () => {
+  it('names the missing session, rather than guessing between causes', async () => {
     // Arrange
-    stubRpc({ redeliverInitialPrompt: { delivered: false } });
+    stubRpc({ redeliverInitialPrompt: { delivered: false, reason: 'no-session' } });
 
     // Act
     await run('task-1');
 
     // Assert
-    expect(logSpy).toHaveBeenCalledWith(
-      'Task task-1 has no live session, or no stored brief — nothing to deliver.',
-    );
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('has no live session'));
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+  });
+
+  it('names a missing brief, and points at notify instead', async () => {
+    // Arrange
+    stubRpc({ redeliverInitialPrompt: { delivered: false, reason: 'no-brief' } });
+
+    // Act
+    await run('task-1');
+
+    // Assert
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('no stored opening brief'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('task notify'));
+    process.exitCode = 0;
+  });
+
+  it('says the paste was never confirmed, instead of claiming there is no session', async () => {
+    // Arrange — the case the old single message reported as its own opposite:
+    // the session is live and was delivered to, the paste just never verified.
+    stubRpc({ redeliverInitialPrompt: { delivered: false, reason: 'not-verified' } });
+
+    // Act
+    await run('task-1');
+
+    // Assert
+    const printed = logSpy.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(printed).toContain('never confirmed on screen');
+    expect(printed).not.toContain('no live session');
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
   });
