@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func TestBoardRenderWidthMatchesRenderedTrackColumns(t *testing.T) {
@@ -1302,6 +1303,30 @@ func TestRenderTaskCardKeepsBranchChipForRepoTasks(t *testing.T) {
 }
 
 // Two different parents' subtasks must read as distinct at a glance — a bare
+// An attention card's border used to alternate amber/red on m.spinnerIndex. That
+// clock only advances while *something else* is busy, so one state rendered three
+// different ways: a fast flicker, a frozen amber, or a frozen red.
+func TestRenderTaskCardAttentionBorderDoesNotAnimate(t *testing.T) {
+	task := TaskRecord{ID: "task-1", Title: "Needs you", SessionAttentionNeeded: true, UpdatedAt: 1}
+
+	// Tests run without a tty, where lipgloss drops every colour it is handed —
+	// so ask for a profile that actually emits them, or this asserts nothing.
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(previous)
+
+	first := renderTaskCard(&Model{spinnerIndex: 0}, task, false, false, nil, "web5-poc")
+	second := renderTaskCard(&Model{spinnerIndex: 1}, task, false, false, nil, "web5-poc")
+
+	if first != second {
+		t.Fatalf("attention card changed with the spinner:\n%q\n%q", first, second)
+	}
+	want := termenv.TrueColor.Color(taskCardBorderColor(task, false)).Sequence(false)
+	if !strings.Contains(first, want) {
+		t.Fatalf("attention card = %q, want the static attention border colour %q", first, want)
+	}
+}
+
 // "Subtask" badge cannot tell you which is which once there is more than one.
 func TestRenderTaskCardNamesTheSubtasksParent(t *testing.T) {
 	model := &Model{

@@ -872,14 +872,11 @@ func renderTaskCard(m *Model, task TaskRecord, isSelected, isActiveSession bool,
 }
 
 func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSession bool, activity *SessionActivitySnapshot, repoLabel string, cardStyleWidth int, contentWidth int, compact bool) string {
+	// Attention gets its colour from taskCardBorderColor (blue) and the "⚠ " title
+	// prefix below — deliberately static. It used to alternate amber/red on every
+	// spinner frame, but spinnerIndex only advances while *something else* is busy,
+	// so the same state rendered as a fast flicker, a frozen amber, or a frozen red.
 	borderColor := taskCardBorderColor(task, isSelected)
-	if task.SessionAttentionNeeded {
-		if m.spinnerIndex%2 == 0 {
-			borderColor = uiChrome.Warning
-		} else {
-			borderColor = uiChrome.Danger
-		}
-	}
 	headerStatus := headerStatusModel(m, task, activity, isActiveSession)
 	activeSessionIcon := headerStatus.Icon
 	descriptionLines := descriptionLinesForWidth(task.Description, contentWidth)
