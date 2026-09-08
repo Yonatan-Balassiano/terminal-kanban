@@ -1118,6 +1118,52 @@ export function buildCli(): Command {
     });
 
   task
+    .command('restart <task>')
+    .description(
+      "Restart a card's session in place — keeps the card id, its branch, its worktree and its conversation",
+    )
+    .option('--slot <slot>', "Which session to restart ('primary' or 'secondary')", 'primary')
+    .action(async (taskId: string, opts: { slot?: string }) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          const task = board.tasks.find((t) => t.id === taskId);
+          if (!task) {
+            throw new Error(`Unknown task "${taskId}". No card with that id exists.`);
+          }
+
+          const slot = opts.slot === 'secondary' ? 'secondary' : 'primary';
+          const session = await rpc.call<import('../types/index.js').SessionRecord>(
+            'recreateSession',
+            { taskId, slot },
+          );
+
+          console.log(`Restarted ${taskId}: ${task.title}`);
+          console.log(`  task    ${taskId}`);
+          if (task.branchName) {
+            console.log(`  branch  ${task.branchName}`);
+          }
+          // The point of the command: nothing about the card is thrown away,
+          // which is what made delete-and-recreate such an expensive way to
+          // get a working pane back.
+          console.log(`  agent   resumes the conversation it already had`);
+          if (session.attachCommand) {
+            console.log(`Attach with: ${session.attachCommand}`);
+          }
+        } finally {
+          rpc.disconnect();
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  task
     .command('delete <task>')
     .description('Delete a card — terminates its session(s) and removes its worktree(s)')
     .option('--force', 'Skip the confirmation and delete immediately')
