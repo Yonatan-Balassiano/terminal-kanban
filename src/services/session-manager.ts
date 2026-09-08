@@ -35,6 +35,7 @@ import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
 import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
 import type { SessionWorkspaceEntry } from './session-bootstrap.js';
+import { readTranscriptActivity, transcriptHasUserMessage } from './session-transcript.js';
 import {
   deriveFallbackSessionActivity,
   deriveSessionActivity,
@@ -301,6 +302,35 @@ export class SessionManager {
 
   private noteSessionOutput(taskId: string, slot: SessionSlot): void {
     this.lastOutputAtBySessionKey.set(this.sessionKey(taskId, slot), Date.now());
+  }
+
+  /**
+   * When the agent on this session last did something.
+   *
+   * Only a PTY session streams its output through the daemon, so
+   * `lastOutputAtBySessionKey` is populated for exactly one backend. Every
+   * tmux and ssh session left this undefined — and since
+   * `selectBusyProcess` treats an agent process as busy only when it has
+   * produced output recently, that made `isBusy` structurally false for them
+   * no matter what the agent was doing. That is what `agentboard fleet`'s BUSY
+   * column was reporting: not "idle", but "no idea".
+   *
+   * The conversation file is the missing heartbeat. An agent that is working
+   * writes to its own transcript continuously, so the file's mtime answers the
+   * same question the pty's byte stream answers, for the backends that have no
+   * byte stream — and it needs no parsing, so it cannot break on a transcript
+   * format change.
+   *
+   * Local sessions only: a remote session's transcript lives on the far host,
+   * where reading it would cost an SSH round trip per session on every board
+   * poll. Those keep the pre-existing behaviour rather than paying that.
+   */
+  private resolveLastOutputAt(sessionKey: string, session: SessionRecord): number | undefined {
+    const streamed = this.lastOutputAtBySessionKey.get(sessionKey);
+    if (streamed !== undefined || session.backendType === 'ssh') {
+      return streamed;
+    }
+    return readTranscriptActivity(session.agentSessionId)?.lastActivityAt;
   }
 
   private clearTaskAttention(taskId: string): boolean {
@@ -1043,7 +1073,7 @@ export class SessionManager {
           updatedAt: Date.now(),
         };
       } else {
-        const lastOutputAt = this.lastOutputAtBySessionKey.get(sessionKey);
+        const lastOutputAt = this.resolveLastOutputAt(sessionKey, session);
         if (info.status !== 'active' || info.shellPid === undefined || info.shellPid <= 0) {
           activity = deriveFallbackSessionActivity(
             taskId,
@@ -1461,6 +1491,28 @@ export class SessionManager {
    * tmux panes by hand with a single table naming exactly what state each
    * one is in.
    */
+  /**
+   * Whether this session's agent actually received its opening brief.
+   *
+   * Read from the conversation itself: a real user turn exists, so the agent
+   * has the brief, full stop. That replaces the old signal — whether a pasted
+   * brief appeared to render on a terminal before an Enter was sent — which
+   * could be wrong in both directions, and is no longer produced at all now
+   * that the brief travels in the agent CLI's argv.
+   *
+   * Falls back to the stored flag when the transcript cannot be read (a remote
+   * session, an unwritten conversation, a Claude Code layout change), and to
+   * `null` — rendered as "unknown", never as a warning — when neither can
+   * answer. A card whose session simply has not written its first turn yet is
+   * unknown, not failed.
+   */
+  private resolveDelivered(session: SessionRecord): boolean | null {
+    if (session.backendType !== 'ssh' && transcriptHasUserMessage(session.agentSessionId)) {
+      return true;
+    }
+    return session.initialPromptDelivered ?? null;
+  }
+
   async getFleetStatus(): Promise<FleetSessionStatus[]> {
     const rows = this.db
       .prepare<[], SessionRow>(`SELECT * FROM sessions WHERE status IN ('active','idle')`)
@@ -1495,7 +1547,7 @@ export class SessionManager {
         isBusy: activity?.isBusy ?? false,
         attentionNeeded: task?.sessionAttentionNeeded ?? false,
         trustPromptShowing,
-        delivered: session.initialPromptDelivered ?? null,
+        delivered: this.resolveDelivered(session),
         createdAt: session.createdAt,
       });
     }

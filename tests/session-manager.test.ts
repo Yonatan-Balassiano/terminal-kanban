@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { openDb, type Db } from '../src/db/index.js';
 import { BoardService } from '../src/services/board.js';
 import { SessionManager } from '../src/services/session-manager.js';
@@ -2310,6 +2313,178 @@ describe('SessionManager.notifyTaskSession', () => {
     await expect(
       manager.notifyTaskSession(task.id, 'A subtask PR just opened.')
     ).rejects.toThrow(/do not support notifying/);
+  });
+});
+
+describe('SessionManager busy detection via the session transcript', () => {
+  let db: Db;
+  let board: BoardService;
+  let configDir: string;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+    configDir = mkdtempSync(join(tmpdir(), 'agentboard-fleet-transcript-'));
+    process.env['CLAUDE_CONFIG_DIR'] = configDir;
+  });
+
+  afterEach(() => {
+    delete process.env['CLAUDE_CONFIG_DIR'];
+    rmSync(configDir, { recursive: true, force: true });
+    db.close();
+  });
+
+  /** Writes a conversation for `sessionId`, with `mtime` as its last write. */
+  function writeTranscript(sessionId: string, mtime: Date, records: unknown[]): void {
+    const dir = join(configDir, 'projects', '-tmp-repo-1');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${sessionId}.jsonl`);
+    writeFileSync(path, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    utimesSync(path, mtime, mtime);
+  }
+
+  function makeManager(processRows: ProcessRow[]) {
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => ({
+        id: 'session-1',
+        taskId: opts.taskId,
+        backendType: 'tmux',
+        backendSessionId: `ab_${opts.taskId}_p`,
+        agentSessionId: opts.agentSessionId,
+        status: 'active',
+        cwd: opts.cwd ?? opts.repoPath,
+        branch: opts.branch,
+        createdAt: 1,
+        updatedAt: 1,
+      })),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({ command: '' })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      // What TmuxBackend.inspect reports for a live pane: the shipped `claude`
+      // re-execs a versioned binary, so this is a version number, not a name.
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async (id) => ({
+        backendSessionId: id,
+        status: 'active',
+        shellPid: 100,
+        currentCommand: '2.1.263',
+      })),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    return new ProcessTableSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+      processRows,
+    );
+  }
+
+  /** A pane whose shell has the agent running under it. */
+  const AGENT_PROCESSES: ProcessRow[] = [
+    { pid: 100, ppid: 1, stat: 'Ss', command: 'bash', args: '-bash' },
+    {
+      pid: 200,
+      ppid: 100,
+      stat: 'S+',
+      command: '/Users/dev/.local/share/claude/versions/2.1.263',
+      args: '/Users/dev/.local/share/claude/versions/2.1.263 --session-id x',
+    },
+  ];
+
+  it('reports a working tmux session as busy', async () => {
+    // Arrange — a tmux session streams no output through the daemon, so it has
+    // no lastOutputAt of its own, and `selectBusyProcess` only calls an agent
+    // busy when it produced output recently. Every tmux and ssh card therefore
+    // read as idle no matter what it was doing. The agent's own transcript,
+    // still being written, is the missing heartbeat.
+    const task = board.createTask({ title: 'Working card', repoId: 'repo-1' });
+    const manager = makeManager(AGENT_PROCESSES);
+    const session = await manager.openSession(task.id);
+    writeTranscript(session.agentSessionId!, new Date(), [
+      { type: 'user', message: { content: 'Fix the flaky test.' } },
+    ]);
+
+    // Act
+    const { activity } = await manager.inspectSessionState(task.id);
+
+    // Assert
+    expect(activity?.isBusy).toBe(true);
+    expect(activity?.label).toBe('Claude');
+  });
+
+  it('reports a card whose agent stopped writing as idle', async () => {
+    // Arrange — same live pane and process, but the conversation has not moved
+    // in a long time: the agent is sitting at its prompt.
+    const task = board.createTask({ title: 'Idle card', repoId: 'repo-1' });
+    const manager = makeManager(AGENT_PROCESSES);
+    const session = await manager.openSession(task.id);
+    writeTranscript(session.agentSessionId!, new Date(Date.now() - 600_000), [
+      { type: 'user', message: { content: 'Fix the flaky test.' } },
+    ]);
+
+    // Act
+    const { activity } = await manager.inspectSessionState(task.id);
+
+    // Assert
+    expect(activity?.isBusy).toBe(false);
+  });
+
+  it('reports the brief as delivered once a real user turn exists', async () => {
+    // Arrange — the brief now rides the agent CLI's argv, so nothing on the
+    // daemon side ever observes it landing. The conversation is the receipt.
+    const task = board.createTask({ title: 'Briefed card', repoId: 'repo-1' });
+    const manager = makeManager(AGENT_PROCESSES);
+    const session = await manager.openSession(task.id);
+    writeTranscript(session.agentSessionId!, new Date(), [
+      { type: 'user', message: { content: 'Fix the flaky test.' } },
+    ]);
+
+    // Act
+    const fleet = await manager.getFleetStatus();
+
+    // Assert
+    expect(fleet[0]?.delivered).toBe(true);
+  });
+
+  it('leaves delivery unknown, not failed, before the first turn is written', async () => {
+    // Arrange — a session that has only just started has no conversation file
+    // yet. Reporting that as UNSUBMITTED would send people chasing a problem
+    // that does not exist.
+    const task = board.createTask({ title: 'Just started', repoId: 'repo-1' });
+    const manager = makeManager(AGENT_PROCESSES);
+    await manager.openSession(task.id);
+
+    // Act
+    const fleet = await manager.getFleetStatus();
+
+    // Assert
+    expect(fleet[0]?.delivered).toBeNull();
   });
 });
 
