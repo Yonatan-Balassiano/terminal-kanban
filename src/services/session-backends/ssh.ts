@@ -6,6 +6,7 @@ import type {
   BackendHealth,
   BackendSessionInfo,
   CreateSessionOpts,
+  PromptDeliveryOutcome,
   RedeliverPromptOptions,
   SessionBackend,
   SessionRecord,
@@ -478,8 +479,9 @@ export class SshTmuxBackend implements SessionBackend {
    * no longer comes through here, and why what remains still has to verify its
    * paste on screen.
    *
-   * Resolves `true` once the paste has been verified and Enter sent to
-   * submit it, `false` when the paste never verified (nothing was
+   * Resolves `delivered` once the paste has been verified and its Enter
+   * confirmed, `unsubmitted` when the text is on the pane but no Enter ever
+   * moved it, and `not-delivered` when the paste never verified (nothing was
    * submitted) or the brief file was gone.
    */
   private deliverInitialPrompt(
@@ -487,7 +489,7 @@ export class SshTmuxBackend implements SessionBackend {
     remoteBriefFile: string,
     promptText?: string,
     skipIfAlreadyOnPane = false,
-  ): Promise<boolean> {
+  ): Promise<PromptDeliveryOutcome> {
     // Never two at once into the same pane — see {@link DeliveryGuard}.
     return this.deliveries.run(backendSessionId, promptText ?? '', () =>
       this.deliverToPane(backendSessionId, remoteBriefFile, promptText, skipIfAlreadyOnPane),
@@ -500,7 +502,7 @@ export class SshTmuxBackend implements SessionBackend {
     remoteBriefFile: string,
     promptText?: string,
     skipIfAlreadyOnPane = false,
-  ): Promise<boolean> {
+  ): Promise<PromptDeliveryOutcome> {
     const capture = async () =>
       (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout;
     await waitForStablePane(capture, this.paneIdleOptions);
@@ -523,7 +525,7 @@ export class SshTmuxBackend implements SessionBackend {
     }
 
     if (!(await this.transport.exists(remoteBriefFile))) {
-      return false;
+      return 'not-delivered';
     }
 
     const bufferName = `agentboard_brief_${backendSessionId}`;
@@ -548,16 +550,16 @@ export class SshTmuxBackend implements SessionBackend {
       // Whatever is on screen is unverified — do not submit it. Leaving it
       // sitting there is a state `redeliverInitialPrompt` already knows how
       // to fix; submitting a mangled fragment is not.
-      return false;
+      return 'not-delivered';
     }
-    await submitAndVerify(
+    const submitted = await submitAndVerify(
       async () => (await this.remoteRunner(buildTmuxCapturePaneArgs(backendSessionId))).stdout,
       async () => {
         await this.remoteRunner(['send-keys', '-t', backendSessionId, 'Enter']);
       },
       this.paneIdleOptions,
     );
-    return true;
+    return submitted ? 'delivered' : 'unsubmitted';
   }
 
   /**
@@ -572,7 +574,7 @@ export class SshTmuxBackend implements SessionBackend {
     prompt: string,
     agentCli?: string,
     options: RedeliverPromptOptions = {},
-  ): Promise<boolean> {
+  ): Promise<PromptDeliveryOutcome> {
     const remoteBriefFile = await this.ensureRemoteBrief(taskId, slot, prompt);
     return this.deliverInitialPrompt(
       backendSessionId,

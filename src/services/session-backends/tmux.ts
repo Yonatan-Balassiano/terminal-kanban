@@ -5,6 +5,7 @@ import type {
   BackendHealth,
   BackendSessionInfo,
   CreateSessionOpts,
+  PromptDeliveryOutcome,
   RedeliverPromptOptions,
   SessionBackend,
   SessionRecord,
@@ -330,8 +331,9 @@ export class TmuxBackend implements SessionBackend {
    * is already up — where there is no channel other than the pane, so the
    * paste still has to be verified on screen before its Enter is trusted.
    *
-   * Resolves `true` once the paste has been verified and Enter sent to
-   * submit it, `false` when the paste never verified (nothing was
+   * Resolves `delivered` once the paste has been verified and its Enter
+   * confirmed, `unsubmitted` when the text is on the pane but no Enter ever
+   * moved it, and `not-delivered` when the paste never verified (nothing was
    * submitted) or the brief file was gone.
    */
   private deliverInitialPrompt(
@@ -339,7 +341,7 @@ export class TmuxBackend implements SessionBackend {
     briefFile: string,
     promptText?: string,
     skipIfAlreadyOnPane = false,
-  ): Promise<boolean> {
+  ): Promise<PromptDeliveryOutcome> {
     // Never two at once into the same pane — see {@link DeliveryGuard}.
     return this.deliveries.run(backendSessionId, promptText ?? '', () =>
       this.deliverToPane(backendSessionId, briefFile, promptText, skipIfAlreadyOnPane),
@@ -352,7 +354,7 @@ export class TmuxBackend implements SessionBackend {
     briefFile: string,
     promptText?: string,
     skipIfAlreadyOnPane = false,
-  ): Promise<boolean> {
+  ): Promise<PromptDeliveryOutcome> {
     const target = await this.resolveInputTarget(backendSessionId);
     const capture = async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout;
     await waitForStablePane(capture, this.paneIdleOptions);
@@ -375,7 +377,7 @@ export class TmuxBackend implements SessionBackend {
     }
 
     if (!existsSync(briefFile)) {
-      return false;
+      return 'not-delivered';
     }
 
     const bufferName = `agentboard_brief_${backendSessionId}`;
@@ -400,16 +402,16 @@ export class TmuxBackend implements SessionBackend {
       // Whatever is on screen is unverified — do not submit it. Leaving it
       // sitting there is a state `redeliverInitialPrompt` already knows how
       // to fix; submitting a mangled fragment is not.
-      return false;
+      return 'not-delivered';
     }
-    await submitAndVerify(
+    const submitted = await submitAndVerify(
       async () => (await this.runner(buildTmuxCapturePaneArgs(target))).stdout,
       async () => {
         await this.runner(['send-keys', '-t', target, 'Enter']);
       },
       this.paneIdleOptions,
     );
-    return true;
+    return submitted ? 'delivered' : 'unsubmitted';
   }
 
   /**
@@ -426,7 +428,7 @@ export class TmuxBackend implements SessionBackend {
     prompt: string,
     agentCli?: string,
     options: RedeliverPromptOptions = {},
-  ): Promise<boolean> {
+  ): Promise<PromptDeliveryOutcome> {
     const briefFile = writeLocalBrief(taskId, slot, prompt);
     return this.deliverInitialPrompt(
       backendSessionId,

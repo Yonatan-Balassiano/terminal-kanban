@@ -457,7 +457,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
     );
 
     // Assert
-    expect(delivered).toBe(true);
+    expect(delivered).toBe('delivered');
     const loadIndex = remoteCalls.findIndex((args) => args[0] === 'load-buffer');
     const pasteIndex = remoteCalls.findIndex((args) => args[0] === 'paste-buffer');
     const enterIndex = remoteCalls.findIndex((args) => args[0] === 'send-keys' && args.includes('Enter'));
@@ -524,7 +524,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
     );
 
     // Assert — nothing re-pasted, but the missing Enter is still sent.
-    expect(delivered).toBe(true);
+    expect(delivered).toBe('delivered');
     expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
     expect(
       remoteCalls.filter((args) => args[0] === 'send-keys' && args.includes('Enter')),
@@ -579,7 +579,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
     const delivered = await backend.redeliverPrompt(SESSION_NAME, 'primary', SESSION_NAME, PROMPT);
 
     // Assert — pasted and submitted, not silently skipped.
-    expect(delivered).toBe(true);
+    expect(delivered).toBe('delivered');
     expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
     expect(
       remoteCalls.filter((args) => args[0] === 'send-keys' && args.includes('Enter')),
@@ -636,7 +636,7 @@ describe('SshTmuxBackend.redeliverPrompt', () => {
 
     // Assert — never submitted: pasted up to the retry limit, but no Enter
     // sent for the brief itself.
-    expect(delivered).toBe(false);
+    expect(delivered).toBe('not-delivered');
     expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(3);
     expect(remoteCalls.filter((args) => args[0] === 'send-keys' && args.includes('Enter'))).toHaveLength(0);
   });

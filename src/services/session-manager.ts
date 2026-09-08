@@ -37,6 +37,7 @@ import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
 import type { SessionWorkspaceEntry } from './session-bootstrap.js';
 import { readTranscriptActivity, transcriptHasUserMessage } from './session-transcript.js';
 import { composeResumeNotice, PendingMessageService } from './pending-messages.js';
+import { localResumeNoticePath } from './session-brief.js';
 import {
   deriveFallbackSessionActivity,
   deriveSessionActivity,
@@ -132,15 +133,31 @@ export interface InspectSessionStateResult {
  * - `no-brief`: the card never had a stored opening brief.
  * - `not-verified`: a delivery ran, but the paste was never confirmed on the
  *   pane, so nothing was submitted. The only retryable one.
+ * - `not-submitted`: the brief is verifiably sitting in the pane's input box
+ *   and no Enter ever moved it. Retrying re-sends the Enter, not the text.
  */
-export type RedeliverFailureReason = 'no-session' | 'no-brief' | 'not-verified';
+export type RedeliverFailureReason =
+  | 'no-session'
+  | 'no-brief'
+  | 'not-verified'
+  | 'not-submitted';
 
 /** What `notifyTaskSession` did with a message. */
 export interface NotifyOutcome {
-  /** Typed into a live pane and confirmed on screen. */
+  /** Typed into a live pane, confirmed on screen, and submitted. */
   delivered: boolean;
   /** Stored for delivery when the card's session next opens. */
   queued: boolean;
+  /**
+   * The message is verifiably in the pane's input box but was never submitted.
+   *
+   * Neither delivered nor queued, and deliberately not queued: the text is
+   * already on the pane, so queuing it would deliver it a second time as soon
+   * as someone flushes the box. Reported on its own so the caller can say what
+   * to do about it — issue #46 spent an hour on a card whose message had
+   * arrived, because this state printed as "queued".
+   */
+  landedUnsubmitted?: boolean;
 }
 
 export type RedeliverOutcome =
@@ -194,6 +211,17 @@ export class SessionManager {
    * host waking up, minutes later — can still push the board to the TUI.
    */
   onSessionsChanged?: () => void;
+  /**
+   * One line per pane lifecycle event, for the daemon log.
+   *
+   * A pane that dies on its own left no record anywhere — issue #46 §3 spent
+   * an hour on a card whose session had exited, with `agentboard.log`'s last
+   * entry hours older than the failure. Spawn and exit are exactly the two
+   * facts that make that a two-minute diagnosis, and neither is derivable
+   * after the fact: a dead pane is indistinguishable from one that never
+   * existed.
+   */
+  logLifecycle?: (message: string) => void;
 
   constructor(
     private db: Db,
@@ -640,11 +668,34 @@ export class SessionManager {
       sessionName: taskRow.session_name ?? undefined,
       onDeliveryResult: (delivered) => this.persistDeliveryOutcome(taskId, slot, delivered),
     };
+    // Claimed, not deleted, and claimed *before* the session exists.
+    //
+    // Deleting after `create()` was issue #46 §2: it resolves once the
+    // bootstrap command has been typed into the pane — the script has not run
+    // and nothing has been read — so a pane that died in between took the
+    // message with it. The row goes only when session-bootstrap.sh leaves the
+    // receipt saying it folded the contents into the agent's argv; see
+    // PendingMessageService.reconcileClaims.
+    //
+    // Before rather than after because claiming clears any stale receipt, and
+    // the script is free to write its own the moment that command starts
+    // running. A claim that landed afterwards could delete the very proof it
+    // was about to look for. A `create()` that throws leaves the rows claimed
+    // with no receipt, which the next reconcile reads — correctly — as never
+    // delivered.
+    //
+    // Remote sessions keep their receipt on the far host, where this cannot
+    // stat it; they drop the rows at launch and so behave exactly as before.
+    const claimsReceipt = backendType !== 'ssh';
+    if (claimsReceipt) {
+      this.pendingMessages.claim(pending.ids, {
+        receiptPath: `${localResumeNoticePath(taskId, slot)}.read`,
+      });
+    }
     const createdSession = await backend.create(createOpts);
-    // Only once the session exists. A create that throws must leave its
-    // messages queued, or this would reintroduce the loss it exists to
-    // prevent — just in a narrower window.
-    this.pendingMessages.remove(pending.ids);
+    if (!claimsReceipt) {
+      this.pendingMessages.remove(pending.ids);
+    }
     const sessionRecord: SessionRecord = {
       ...createdSession,
       taskId,
@@ -652,6 +703,11 @@ export class SessionManager {
       agentSessionId,
       branch: isGeneral ? undefined : createdSession.branch,
     };
+    this.logLifecycle?.(
+      `session opened task=${taskId} slot=${slot} backend=${backendType} ` +
+        `backend_session=${createdSession.backendSessionId ?? '-'} ` +
+        `queued_messages=${String(pending.ids.length)}`,
+    );
 
     // 7. Persist to DB
     if (!isGeneral) {
@@ -940,15 +996,21 @@ export class SessionManager {
     // on screen — or merely a message that starts the same way — and skipping
     // would drop this one while reporting `true`. Always paste. Stacking is
     // `DeliveryGuard`'s job, and it still applies.
-    const delivered = await backend.redeliverPrompt(
+    const outcome = await backend.redeliverPrompt(
       taskId,
       slot,
       session.backendSessionId,
       message,
       taskRow?.agent_cli ?? undefined,
     );
-    if (delivered) {
+    if (outcome === 'delivered') {
       return { delivered: true, queued: false };
+    }
+    if (outcome === 'unsubmitted') {
+      // The message is on the pane, in the input box, unsubmitted. Queuing it
+      // would hand the agent a second copy the moment that box is flushed, so
+      // say what happened instead and let the caller decide.
+      return { delivered: false, queued: false, landedUnsubmitted: true };
     }
     // The session is live but the paste never verified, so nothing was
     // submitted. Same outcome as having no pane at all, so queue it for the
@@ -1005,7 +1067,7 @@ export class SessionManager {
       throw new Error(`${session.backendType} sessions do not support re-delivering the initial prompt.`);
     }
 
-    const delivered = await backend.redeliverPrompt(
+    const outcome = await backend.redeliverPrompt(
       taskId,
       slot,
       session.backendSessionId,
@@ -1017,8 +1079,14 @@ export class SessionManager {
       // it; the Enter below is the half that was missing.
       { skipIfAlreadyOnPane: true },
     );
-    this.persistDeliveryOutcome(taskId, slot, delivered);
-    return delivered ? { delivered: true } : { delivered: false, reason: 'not-verified' };
+    this.persistDeliveryOutcome(taskId, slot, outcome === 'delivered');
+    if (outcome === 'delivered') {
+      return { delivered: true };
+    }
+    return {
+      delivered: false,
+      reason: outcome === 'unsubmitted' ? 'not-submitted' : 'not-verified',
+    };
   }
 
   /**
@@ -1204,6 +1272,10 @@ export class SessionManager {
         void
       >('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
       .run('terminated', Date.now(), sessionId);
+    this.logLifecycle?.(
+      `session terminated task=${session.taskId} slot=${session.slot} ` +
+        `backend=${session.backendType} backend_session=${session.backendSessionId ?? '-'}`,
+    );
     await this.board.clearTaskSession?.(session.taskId, session.slot);
   }
 
@@ -1513,6 +1585,12 @@ export class SessionManager {
         const backend = this.getBackend(session.backendType);
         const info = await backend.inspect(session.backendSessionId);
         if (!info) {
+          // The pane is gone and AgentBoard did not kill it: it exited on its
+          // own. This is the line that was missing.
+          this.logLifecycle?.(
+            `session pane vanished task=${session.taskId} slot=${session.slot} ` +
+              `backend=${session.backendType} backend_session=${session.backendSessionId}`,
+          );
           this.markSessionOrphaned(session.id);
         }
       } catch (error) {
@@ -1545,6 +1623,10 @@ export class SessionManager {
     taskId: string,
     slot: SessionSlot,
   ): { notice?: string; ids: string[] } {
+    // Settle the last open's claims first: anything its session actually read
+    // is dropped, and anything it never got to is un-claimed so this open
+    // carries it instead.
+    this.pendingMessages.reconcileClaims(taskId, slot);
     const queued = this.pendingMessages.list(taskId, slot);
     if (queued.length === 0) {
       return { ids: [] };

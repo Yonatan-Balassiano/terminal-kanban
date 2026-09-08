@@ -79,14 +79,17 @@ Every time, with no separate confirmation step. A card without `--start` sits id
 
 These are different identifiers — don't conflate them.
 
-**A message is never lost, even if the card is closed.** `notify` reports two things:
+**A message is never lost, even if the card is closed.** `notify` reports one of three things:
 
-| Outcome | Means |
-|---|---|
-| `delivered: true` | Typed into the live pane and confirmed on screen |
-| `queued: true` | No live session (or the paste never confirmed) — stored, and handed to that agent on its own argv the next time its session opens |
+| Outcome | Means | What to do |
+|---|---|---|
+| `delivered: true` | Typed into the live pane, confirmed on screen, and submitted | Nothing |
+| `queued: true` | No live session, or the paste never landed — stored, and handed to that agent on its own argv the next time its session opens | Nothing. Don't re-send: it is waiting, and a second copy would be delivered too |
+| `landedUnsubmitted: true` | The message is sitting in the pane's input box and no Enter would submit it | **Don't re-send** — that stacks a second copy under the first. `agentboard task restart <id>` replaces the pane, keeping the card, its branch, its worktree and its conversation |
 
-So notifying a card that isn't running is a normal thing to do, not a failure. The message arrives in that agent's conversation whenever it next opens, attributed to the card that sent it. Don't re-send on a queued result — you will just deliver it twice.
+So notifying a card that isn't running is a normal thing to do, not a failure. The message arrives in that agent's conversation whenever it next opens, attributed to the card that sent it.
+
+A queued message stays queued until the session that opens actually reads it. If that pane dies first, the message is still there and the next open carries it — so "queued" really does mean waiting, not handed off and hoped for.
 
 **`notify` appends to whatever is already in the input box.** There is no way to clear that box from outside — `C-u`, `Escape` and `C-c` all leave a pasted fragment untouched. If a pane's input is in a bad state, `agentboard task restart` it rather than trying to fix it in place.
 
@@ -107,7 +110,7 @@ agentboard task restart <id>
 
 Kills the pane and relaunches it, **keeping the card id, its branch, its worktree and its conversation**. This is the recovery path. Do not delete-and-recreate: that mints a new card id and rots every reference to it.
 
-`agentboard task redeliver-prompt <id>` re-sends the stored brief into a live session. It is now rare — the brief rides argv, so there is no delivery to fail. It reports which of three things happened (`no-session`, `no-brief`, `not-verified`), and only `not-verified` is worth retrying.
+`agentboard task redeliver-prompt <id>` re-sends the stored brief into a live session. It is now rare — the brief rides argv, so there is no delivery to fail. It reports which of four things happened (`no-session`, `no-brief`, `not-verified`, `not-submitted`). `not-verified` is worth retrying; `not-submitted` means the brief is in the input box and only `agentboard task restart <id>` will clear it.
 
 ## Cleaning up
 

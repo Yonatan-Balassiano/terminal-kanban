@@ -157,27 +157,52 @@ eval "set -- $session_args $agent_args"
 # Only a fresh conversation gets it: replaying the brief into a --resume would
 # hand the agent work it has already done. The file is removed either way, so a
 # reopened card never re-reads a stale brief.
+# Two files rather than one, because only this script knows which case it is
+# in: the brief must never be replayed into a resumed conversation, while a
+# queued message must be delivered in *both* cases — it is news either way.
+#
+# So the brief is conditional on a fresh start and the queued messages are
+# unconditional, and the two are joined into a single positional argument
+# because the agent CLI takes one. Both files are removed either way, so
+# nothing is delivered twice.
+#
+# The messages used to be dropped outright on a fresh start: the branch below
+# was gated on "$resuming" == 1 and the `rm -f` was not, so a card that opened
+# fresh had its queue deleted from the database (by the daemon, at launch) and
+# its file deleted from disk without either one being read. Comments here and
+# in session-manager.ts both claimed a fresh start appended them to the brief.
+# No code did. That was issue #46 §2.
+prompt=""
 if [[ -n "$initial_prompt_file" ]]; then
   if [[ "$resuming" != "1" && -f "$initial_prompt_file" ]]; then
-    set -- "$@" "$(cat "$initial_prompt_file")"
+    prompt="$(cat "$initial_prompt_file")"
   fi
   rm -f "$initial_prompt_file"
 fi
 
-# Messages that arrived while this card had no session — the resume-time
-# counterpart of the brief above.
-#
-# Two files rather than one, because only this script knows which of the two
-# cases it is in: the brief must never be replayed into a resumed
-# conversation, and a queued message must never be lost just because the card
-# happens to be starting fresh. The daemon writes both (a fresh start gets its
-# queued messages appended to the brief itself), and exactly one is used.
-# Both are removed either way, so nothing is delivered twice.
-if [[ -n "$resume_prompt_file" ]]; then
-  if [[ "$resuming" == "1" && -f "$resume_prompt_file" ]]; then
-    set -- "$@" "$(cat "$resume_prompt_file")"
+if [[ -n "$resume_prompt_file" && -f "$resume_prompt_file" ]]; then
+  if [[ -n "$prompt" ]]; then
+    prompt="$prompt
+
+$(cat "$resume_prompt_file")"
+  else
+    prompt="$(cat "$resume_prompt_file")"
   fi
+  # A receipt, dropped only on the path where the contents actually made it
+  # into "$prompt" and therefore into the argv this script is about to exec
+  # with. The daemon holds the messages in its queue until it sees this file
+  # and re-delivers them if it never appears, so nothing is lost to a pane
+  # that dies before getting here.
+  #
+  # A receipt rather than "the notice file is gone": the notice is deleted on
+  # every path, and its absence cannot tell "read it" apart from "never wrote
+  # one" or "the daemon has not looked yet".
+  : > "${resume_prompt_file}.read" 2>/dev/null || true
   rm -f "$resume_prompt_file"
+fi
+
+if [[ -n "$prompt" ]]; then
+  set -- "$@" "$prompt"
 fi
 
 # exec, not a plain call: this is the last line of the script, nothing runs

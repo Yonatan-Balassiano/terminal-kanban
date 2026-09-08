@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   pasteAndVerify,
+  pasteChips,
   pasteMarker,
   submitAndVerify,
   waitForTrustPromptAndDismiss,
@@ -273,6 +274,84 @@ describe('pasteAndVerify', () => {
 });
 
 
+// Issue #46 §1. A ~20-line `notify` arrived in the pane's input box and was
+// never submitted, because claude renders a big paste as a placeholder chip
+// instead of echoing it: the text verification looks for is not on the screen
+// and never will be, so the paste read as mangled and its Enter was withheld.
+describe('pasteAndVerify with a collapsed paste', () => {
+  const FAST = { pasteVerifyTimeoutMs: 150, pasteVerifyIntervalMs: 5, maxPasteAttempts: 3 };
+  const COLLAPSED = '\u276f [Pasted text #1 +11 lines]\n─────\n  [Opus 5] wix-vmr-repo';
+
+  it('accepts a paste the CLI collapsed into a placeholder chip', async () => {
+    // Arrange — the pane never shows the message, only the chip.
+    let pane = '\u276f \n─────\n  [Opus 5] wix-vmr-repo';
+    let pastes = 0;
+
+    // Act
+    const outcome = await pasteAndVerify(
+      async () => {
+        pastes += 1;
+        pane = COLLAPSED;
+      },
+      async () => pane,
+      pasteMarker('Review findings: the border flicker fix looks right, but'),
+      FAST,
+    );
+
+    // Assert — verified off the chip, once, so the caller goes on to submit it.
+    expect(outcome).toBe('pasted');
+    expect(pastes).toBe(1);
+  });
+
+  it('does not count a chip that was already on the pane', async () => {
+    // Arrange — the pane opens holding an earlier paste's chip and the paste
+    // itself changes nothing. Counting that chip would report a delivery for a
+    // message that never arrived, which is worse than the bug being fixed.
+    const pane = COLLAPSED;
+
+    // Act
+    const outcome = await pasteAndVerify(
+      async () => {},
+      async () => pane,
+      pasteMarker('A different message entirely'),
+      FAST,
+    );
+
+    // Assert
+    expect(outcome).toBe('unverified');
+  });
+
+  it('counts a second chip stacking under the first', async () => {
+    // Arrange — a pane that already held one collapsed paste when this one
+    // landed, which is the ordinary state of a pane being notified twice.
+    let pane = COLLAPSED;
+
+    // Act
+    const outcome = await pasteAndVerify(
+      async () => {
+        pane = `${COLLAPSED}\n\u276f [Pasted text #2 +6 lines]`;
+      },
+      async () => pane,
+      pasteMarker('The second message'),
+      FAST,
+    );
+
+    // Assert
+    expect(outcome).toBe('pasted');
+  });
+});
+
+describe('pasteChips', () => {
+  it('finds the placeholders and ignores everything else', () => {
+    expect(pasteChips('\u276f [Pasted text #1 +11 lines] and [Pasted text #2]')).toEqual([
+      '[Pasted text #1 +11 lines]',
+      '[Pasted text #2]',
+    ]);
+    expect(pasteChips('nothing pasted here')).toEqual([]);
+  });
+});
+
+
 describe('submitAndVerify', () => {
   it('only ever re-sends Enter — the submit-retry loop has no way to paste again', async () => {
     // Arrange — the pane never acknowledges anything, so every retry is spent.
@@ -295,6 +374,32 @@ describe('submitAndVerify', () => {
     expect(new Set(sends)).toEqual(new Set(['Enter']));
   });
 
+  // Issue #46 §3. Exhausting every retry against a pane that never moved used
+  // to resolve exactly like a clean submit, so "the text is in the input box,
+  // unsubmitted" could not be reported to anyone.
+  it('reports that nothing was submitted when the pane never moves', async () => {
+    const submitted = await submitAndVerify(
+      async () => 'a pane that never changes',
+      async () => {},
+      { maxSubmitRetries: 3, submitRetryIntervalMs: 0 },
+    );
+
+    expect(submitted).toBe(false);
+  });
+
+  it('does not claim a failed submit when it was configured not to look', async () => {
+    // Arrange — zero retries means zero verification passes. That is "no
+    // evidence", not evidence of failure; reporting the latter would send
+    // callers after a pane nobody checked.
+    const submitted = await submitAndVerify(
+      async () => 'a pane that never changes',
+      async () => {},
+      { maxSubmitRetries: 0, submitRetryIntervalMs: 0 },
+    );
+
+    expect(submitted).toBe(true);
+  });
+
   it('stops re-sending as soon as the pane reacts', async () => {
     // Arrange
     let sends = 0;
@@ -312,6 +417,15 @@ describe('submitAndVerify', () => {
 
     // Assert
     expect(sends).toBe(1);
+    expect(
+      await submitAndVerify(
+        async () => pane,
+        async () => {
+          pane = `${pane}!`;
+        },
+        { maxSubmitRetries: 20, submitRetryIntervalMs: 0 },
+      ),
+    ).toBe(true);
   });
 });
 

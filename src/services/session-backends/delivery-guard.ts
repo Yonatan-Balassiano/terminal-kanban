@@ -25,7 +25,7 @@
  * tmux server, and tests get a fresh guard with a fresh backend.
  */
 export class DeliveryGuard {
-  private readonly inFlight = new Map<string, { text: string; promise: Promise<boolean> }>();
+  private readonly inFlight = new Map<string, { text: string; promise: Promise<unknown> }>();
 
   /**
    * Runs `deliver` for `key` (a pane), unless one is already running there.
@@ -40,11 +40,11 @@ export class DeliveryGuard {
    * mangled input this guard exists to prevent, and silently dropping it would
    * be worse than saying so — the caller can wait and send it afterwards.
    */
-  run(key: string, text: string, deliver: () => Promise<boolean>): Promise<boolean> {
+  run<T>(key: string, text: string, deliver: () => Promise<T>): Promise<T> {
     const existing = this.inFlight.get(key);
     if (existing) {
       if (existing.text === text) {
-        return existing.promise;
+        return existing.promise as Promise<T>;
       }
       return Promise.reject(
         new Error(

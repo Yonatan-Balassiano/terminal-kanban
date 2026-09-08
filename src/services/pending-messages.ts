@@ -2,6 +2,7 @@
 // AgentBoard — messages waiting for a card's session to open
 // ============================================================
 
+import { existsSync, rmSync } from 'fs';
 import { generateId, type Db } from '../db/index.js';
 import type { SessionSlot } from '../types/index.js';
 
@@ -22,6 +23,9 @@ interface PendingMessageRow {
   body: string;
   from_task_id: string | null;
   created_at: number;
+  claimed_session_id: string | null;
+  claimed_at: number | null;
+  claim_notice_path: string | null;
 }
 
 function rowToMessage(row: PendingMessageRow): PendingMessage {
@@ -98,13 +102,106 @@ export class PendingMessageService {
   }
 
   /**
-   * Drops the given messages.
+   * Hands the given messages to a session that is about to carry them,
+   * without dropping them yet.
    *
-   * Called only once the session that will carry them has actually been
-   * created — not when the prompt file is written. A session that fails to
-   * spawn must leave its messages queued, or this would reintroduce the very
-   * loss it exists to prevent, just in a narrower window.
+   * Deleting at this point is what issue #46 §2 was: `create()` resolves once
+   * the bootstrap command has been *typed into the pane*, before the script
+   * has run, let alone read the file. A pane that dies in between took the
+   * message with it and nothing anywhere recorded that it had existed.
+   *
+   * `receiptPath` is the file session-bootstrap.sh creates once it has folded
+   * the messages into the agent's own argv, and it is the only proof that the
+   * hand-off happened — see {@link reconcileClaims}.
+   *
+   * A receipt rather than "the notice file is gone": the script deletes the
+   * notice on every path it takes, and a backend that found the session
+   * already running writes no notice at all, so absence proves nothing. The
+   * receipt is written on exactly one path.
+   *
+   * A `create()` that never wrote a notice therefore leaves no receipt, and
+   * the messages are simply re-delivered on the next open — the safe
+   * direction, and the one the old code got wrong.
    */
+  claim(ids: readonly string[], claim: { sessionId?: string; receiptPath: string }): void {
+    if (ids.length === 0) {
+      return;
+    }
+    // The receipt path is derived from the card, so it is the same file every
+    // time this card opens. Clear it first: a leftover from an earlier open —
+    // one whose rows were removed some other way, a card deleted mid-flight —
+    // would otherwise read as instant proof that *this* hand-off happened, and
+    // these messages would be dropped without ever being delivered.
+    rmSync(claim.receiptPath, { force: true });
+    const statement = this.db.prepare<[string | null, number, string, string], void>(
+      `UPDATE pending_messages
+          SET claimed_session_id = ?, claimed_at = ?, claim_notice_path = ?
+        WHERE id = ?`,
+    );
+    const now = Date.now();
+    this.db.transaction(() => {
+      for (const id of ids) {
+        statement.run(claim.sessionId ?? null, now, claim.receiptPath, id);
+      }
+    })();
+  }
+
+  /**
+   * Settles every outstanding claim for a card, and returns what is left to
+   * deliver.
+   *
+   * A claimed row whose receipt exists was folded into the agent's own argv by
+   * session-bootstrap.sh, so the message reached the conversation and the row
+   * can go. The receipt is consumed along with it.
+   *
+   * A claimed row with no receipt was never handed over. Its claim is cleared
+   * so the next open delivers it, which is the whole point: a pane that died
+   * before reading its messages no longer takes them with it.
+   *
+   * With no `taskId`, settles every card's claims — what the board's own
+   * counter needs, since it reports on cards nobody is opening.
+   */
+  reconcileClaims(taskId?: string, slot: SessionSlot = 'primary'): void {
+    const claimed =
+      taskId === undefined
+        ? this.db
+            .prepare<[], PendingMessageRow>(
+              'SELECT * FROM pending_messages WHERE claimed_at IS NOT NULL',
+            )
+            .all()
+        : this.db
+            .prepare<[string, SessionSlot], PendingMessageRow>(
+              `SELECT * FROM pending_messages
+                WHERE task_id = ? AND slot = ? AND claimed_at IS NOT NULL`,
+            )
+            .all(taskId, slot);
+
+    const wasRead = (row: PendingMessageRow): boolean =>
+      row.claim_notice_path !== null && existsSync(row.claim_notice_path);
+    const consumed = claimed.filter(wasRead);
+    const stranded = claimed.filter((row) => !wasRead(row)).map((row) => row.id);
+
+    for (const receipt of new Set(consumed.map((row) => row.claim_notice_path))) {
+      if (receipt) {
+        rmSync(receipt, { force: true });
+      }
+    }
+    this.remove(consumed.map((row) => row.id));
+    if (stranded.length > 0) {
+      const statement = this.db.prepare<[string], void>(
+        `UPDATE pending_messages
+            SET claimed_session_id = NULL, claimed_at = NULL, claim_notice_path = NULL
+          WHERE id = ?`,
+      );
+      this.db.transaction(() => {
+        for (const id of stranded) {
+          statement.run(id);
+        }
+      })();
+    }
+  }
+
+  /** Drops the given messages outright. */
   remove(ids: readonly string[]): void {
     if (ids.length === 0) {
       return;
@@ -117,8 +214,15 @@ export class PendingMessageService {
     })();
   }
 
-  /** How many cards have something waiting, for the board's own summary. */
+  /**
+   * How many cards have something waiting, for the board's own summary.
+   *
+   * Reconciles first, across every card: a claimed row that was in fact
+   * consumed is not waiting for anything, and left alone it would inflate the
+   * badge of a card that never reopens.
+   */
   countByTask(): Map<string, number> {
+    this.reconcileClaims();
     const rows = this.db
       .prepare<[], { task_id: string; count: number }>(
         'SELECT task_id, COUNT(*) AS count FROM pending_messages GROUP BY task_id',

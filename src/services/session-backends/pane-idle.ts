@@ -286,11 +286,37 @@ export function pasteMarker(prompt: string): string {
 }
 
 /**
- * Waits for a pasted brief's own opening to actually show up on the pane.
+ * Every collapsed-paste chip on a pane, in the order they appear.
+ *
+ * A CLI that collapses a paste renders a placeholder instead of the text —
+ * claude shows `[Pasted text #1 +11 lines]` — so for anything big enough to
+ * collapse, the pasted text is *never* on screen to be found. Whether a given
+ * paste collapses depends on its size, which is what makes this so easy to
+ * miss: the same code verifies a short message and cannot possibly verify a
+ * long one.
+ *
+ * Tolerant on purpose. The chip's exact wording (the `#N`, the `+M lines`) is
+ * the CLI's, not ours, and matching its shape rather than its text keeps this
+ * working when that wording changes.
+ */
+export function pasteChips(paneText: string): string[] {
+  return normalizeForMatch(paneText).match(/\[Pasted text[^\]]*\]/g) ?? [];
+}
+
+/**
+ * Waits for a pasted brief to actually show up on the pane — as its own
+ * opening text, or as the {@link pasteChips} placeholder a CLI renders when it
+ * collapses the paste instead of echoing it.
  *
  * A paste that "should have" landed is not proof it did — see
  * {@link DEFAULT_PASTE_VERIFY_TIMEOUT_MS}. An empty `marker` (nothing to
  * verify against) always succeeds immediately.
+ *
+ * `baseline` is the pane as it looked immediately before the paste. It is what
+ * makes the chip usable as evidence: a chip that was already sitting there is
+ * some earlier paste, and counting it would verify a paste that never landed.
+ * Only a chip that is new, or a chip list that changed, belongs to this paste.
+ * Without a baseline the chip check is skipped entirely rather than guessed at.
  */
 export async function waitForPasteToLand(
   capture: () => Promise<string>,
@@ -299,14 +325,19 @@ export async function waitForPasteToLand(
     pasteVerifyTimeoutMs = DEFAULT_PASTE_VERIFY_TIMEOUT_MS,
     pasteVerifyIntervalMs = DEFAULT_PASTE_VERIFY_INTERVAL_MS,
   }: PaneIdleWaitOptions = {},
+  baseline?: string,
 ): Promise<boolean> {
   if (!marker) {
     return true;
   }
+  const baselineChips = baseline === undefined ? undefined : pasteChips(baseline).join('\n');
   const deadline = Date.now() + pasteVerifyTimeoutMs;
   while (Date.now() < deadline) {
-    const current = normalizeForMatch(await capture());
-    if (current.includes(marker)) {
+    const captured = await capture();
+    if (normalizeForMatch(captured).includes(marker)) {
+      return true;
+    }
+    if (baselineChips !== undefined && pasteChips(captured).join('\n') !== baselineChips) {
       return true;
     }
     await sleep(pasteVerifyIntervalMs);
@@ -366,6 +397,13 @@ export interface PasteVerifyOptions extends PaneIdleWaitOptions {
  * mangled fragment this function exists to catch instead of a clean,
  * recoverable "still sitting there unsubmitted" state for
  * `redeliverInitialPrompt` to fix.
+ *
+ * A paste the CLI collapsed into a `[Pasted text #N]` chip counts as landed.
+ * It has to: the text is not on screen in that case and never will be, so
+ * holding out for it reports `unverified` for a paste that arrived perfectly,
+ * and the caller then withholds the Enter that was the only thing missing.
+ * That was issue #46 — a ~20-line `notify` sat unsubmitted in the box while
+ * the CLI reported it queued.
  */
 export async function pasteAndVerify(
   paste: () => Promise<void>,
@@ -395,7 +433,10 @@ export async function pasteAndVerify(
     const paneMovesOnItsOwn = before !== settling;
 
     await paste();
-    if (await waitForPasteToLand(capture, marker, options)) {
+    // `before` doubles as the chip baseline: a `[Pasted text #N]` placeholder
+    // already on the pane is some earlier paste, and only a change to that
+    // list is evidence of this one. See waitForPasteToLand.
+    if (await waitForPasteToLand(capture, marker, options, before)) {
       return 'pasted';
     }
     if (!paneMovesOnItsOwn && (await capture()) !== before) {
@@ -429,6 +470,12 @@ export async function pasteAndVerify(
  * tick, a hook finishing) reads the same as a real submit — but it is
  * strictly better than the fixed delay alone, which is what shipped first and
  * was seen live to sometimes not be enough.
+ *
+ * Returns whether the pane ever changed. Exhausting every retry against a
+ * pane that never moved used to resolve exactly like a clean submit, which
+ * made "the text is sitting in the box, unsubmitted" — the state issue #46
+ * was reported for — unreportable: the one caller that could have said so had
+ * already thrown the evidence away.
  */
 export async function submitAndVerify(
   capture: () => Promise<string>,
@@ -437,16 +484,24 @@ export async function submitAndVerify(
     maxSubmitRetries = DEFAULT_MAX_SUBMIT_RETRIES,
     submitRetryIntervalMs = DEFAULT_SUBMIT_RETRY_INTERVAL_MS,
   }: PaneIdleWaitOptions = {},
-): Promise<void> {
+): Promise<boolean> {
   const baseline = await capture();
   await sendEnter();
+
+  if (maxSubmitRetries <= 0) {
+    // Configured not to verify at all. That is "no evidence", not "it did not
+    // submit" — reporting the actionable `unsubmitted` state from a check that
+    // never ran would send callers after a pane nobody looked at.
+    return true;
+  }
 
   for (let attempt = 0; attempt < maxSubmitRetries; attempt += 1) {
     await sleep(submitRetryIntervalMs);
     const current = await capture();
     if (current !== baseline) {
-      return;
+      return true;
     }
     await sendEnter();
   }
+  return false;
 }
