@@ -79,7 +79,14 @@ Every time, with no separate confirmation step. A card without `--start` sits id
 
 These are different identifiers — don't conflate them.
 
-`notify` returns an honest `delivered` boolean. `false` means the message genuinely never landed (and nothing garbled was submitted). Wait for the pane to settle and retry rather than assuming it worked.
+**A message is never lost, even if the card is closed.** `notify` reports two things:
+
+| Outcome | Means |
+|---|---|
+| `delivered: true` | Typed into the live pane and confirmed on screen |
+| `queued: true` | No live session (or the paste never confirmed) — stored, and handed to that agent on its own argv the next time its session opens |
+
+So notifying a card that isn't running is a normal thing to do, not a failure. The message arrives in that agent's conversation whenever it next opens, attributed to the card that sent it. Don't re-send on a queued result — you will just deliver it twice.
 
 **`notify` appends to whatever is already in the input box.** There is no way to clear that box from outside — `C-u`, `Escape` and `C-c` all leave a pasted fragment untouched. If a pane's input is in a bad state, `agentboard task restart` it rather than trying to fix it in place.
 

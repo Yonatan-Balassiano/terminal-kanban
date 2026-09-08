@@ -197,7 +197,7 @@ agentboard task create <title> --general [--start]                           # c
 agentboard task create <title> --parent <id> --start                         # create it as an explicit subtask
 agentboard task create <title> --session-name <name> --start                 # name its session explicitly
 agentboard task create <title> --context-file <path> --start                 # take the brief from a file
-agentboard task notify <id> "<message>"                                      # send a message into a card's live session
+agentboard task notify <id> "<message>"                                      # message a card; queued if its session is closed
 agentboard task restart <id>                                                 # relaunch its pane, keeping id/branch/worktree/conversation
 agentboard task redeliver-prompt <id>                                        # re-send a card's opening brief (rarely needed)
 agentboard task attach-pr <id> <pr-number> [--repo <ref>] [--base <branch>]  # attach a PR auto-discovery missed
