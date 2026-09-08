@@ -2316,6 +2316,126 @@ describe('SessionManager.notifyTaskSession', () => {
   });
 });
 
+describe('SessionManager.recreateSession', () => {
+  let db: Db;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    board = new BoardService(db);
+    db.prepare(
+      `INSERT INTO repos
+         (id, label, path, github_owner, github_repo, default_base_branch,
+          default_pillar_id, health, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('repo-1', 'Repo', '/tmp/repo-1', null, null, 'main', null, 'ok', 1, 1);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function makeManager() {
+    const created: CreateSessionOpts[] = [];
+    let counter = 0;
+    const backend: SessionBackend = {
+      create: vi.fn<[CreateSessionOpts], Promise<SessionRecord>>(async (opts) => {
+        created.push(opts);
+        counter += 1;
+        return {
+          id: `session-${counter}`,
+          taskId: opts.taskId,
+          slot: opts.slot,
+          backendType: 'tmux',
+          backendSessionId: `ab_${opts.taskId}_p`,
+          agentSessionId: opts.agentSessionId,
+          status: 'active',
+          cwd: opts.cwd ?? opts.repoPath,
+          branch: opts.branch,
+          createdAt: 1,
+          updatedAt: 1,
+        };
+      }),
+      attachMetadata: vi.fn<[string], Promise<AttachMetadata>>(async () => ({ command: '' })),
+      sendInput: vi.fn<[string, string], Promise<void>>(async () => {}),
+      resize: vi.fn<[string, number, number], Promise<void>>(async () => {}),
+      list: vi.fn<[], Promise<BackendSessionInfo[]>>(async () => []),
+      inspect: vi.fn<[string], Promise<BackendSessionInfo | null>>(async () => null),
+      terminate: vi.fn<[string], Promise<void>>(async () => {}),
+      healthCheck: vi.fn<[], Promise<BackendHealth>>(async () => ({ available: true })),
+    };
+
+    const manager = new TestSessionManager(
+      db,
+      board,
+      {
+        write() {},
+        has() {
+          return false;
+        },
+        getBuffer() {
+          return { lines: [], ansiLines: [], cursorX: 0, cursorY: 0 };
+        },
+        subscribeAll() {
+          return () => {};
+        },
+        destroy() {},
+      },
+      {
+        prepareTaskWorkspace(taskId) {
+          return { taskId, path: '/tmp/repo-1', repoPath: '/tmp/repo-1', usedWorktree: false };
+        },
+      },
+      backend,
+    );
+
+    return { manager, backend, created };
+  }
+
+  it('keeps the card, its branch and its conversation across a restart', async () => {
+    // Arrange — the reported workaround for a stuck pane was delete plus
+    // recreate, which mints a new card id and rots every reference to the old
+    // one. Nothing about the card needs to be thrown away to get a fresh pane:
+    // the conversation lives in the agent's own transcript, under an id
+    // AgentBoard chose, so relaunching resumes it.
+    const task = board.createTask({ title: 'Stuck pane', repoId: 'repo-1' });
+    const { manager, backend, created } = makeManager();
+    const first = await manager.openSession(task.id);
+
+    // Act
+    const second = await manager.recreateSession(task.id);
+
+    // Assert — same card, same branch, same conversation; only the pane is new.
+    expect(second.taskId).toBe(task.id);
+    expect(second.id).not.toBe(first.id);
+    expect(second.agentSessionId).toBe(first.agentSessionId);
+    expect(second.branch).toBe(first.branch);
+    expect(backend.terminate).toHaveBeenCalledWith(first.backendSessionId);
+    expect(created).toHaveLength(2);
+    expect(created[1]?.agentSessionId).toBe(created[0]?.agentSessionId);
+  });
+
+  it('still hands over the brief, for a card that never got to use it', async () => {
+    // Arrange — a card opened and abandoned before its agent wrote a turn has
+    // nothing to resume. session-bootstrap.sh decides which of the two this is
+    // (see its resume check); the manager's job is to keep supplying the brief
+    // so the fresh-start case is not left silent.
+    const task = board.createTask({
+      title: 'Never started',
+      repoId: 'repo-1',
+      initialPrompt: 'Fix the flaky test.',
+    });
+    const { manager, created } = makeManager();
+    await manager.openSession(task.id);
+
+    // Act
+    await manager.recreateSession(task.id);
+
+    // Assert
+    expect(created[1]?.initialPrompt).toBe('Fix the flaky test.');
+  });
+});
+
 describe('SessionManager busy detection via the session transcript', () => {
   let db: Db;
   let board: BoardService;
