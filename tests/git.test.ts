@@ -70,6 +70,50 @@ describe('GitService.createWorktreeAsync', () => {
   });
 });
 
+describe('GitService.updateRef', () => {
+  let repo: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'agentboard-ref-'));
+    execFileSync('git', ['init', '-b', 'main', repo]);
+    git(repo, 'config', 'core.excludesFile', '/dev/null');
+    writeFileSync(join(repo, 'README.md'), 'hello\n');
+    git(repo, 'add', '-A');
+    commit(repo, 'init');
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('keeps archived work reachable after its branch is gone', async () => {
+    // Arrange — the whole point of archiving under a ref rather than leaving
+    // the commit on a branch: deleting a card often means the branch goes too,
+    // and the agent's work has to survive that. Simulates the real sequence:
+    // commit the worktree's uncommitted changes, pin them, then move the
+    // branch away as a deletion would.
+    writeFileSync(join(repo, 'investigation.md'), 'a 257-line report\n');
+    const service = new GitService();
+    const sha = await service.stageAndCommitWip(repo, '[agentboard archive] task-1');
+    expect(sha).not.toBeNull();
+
+    // Act
+    await service.updateRef(repo, 'refs/agentboard/archive/task-1', sha!);
+    git(repo, 'checkout', '-q', '--detach', 'HEAD~1');
+    git(repo, 'branch', '-D', 'main');
+
+    // Assert — the commit is still reachable by ref, and still holds the file.
+    expect(git(repo, 'rev-parse', 'refs/agentboard/archive/task-1')).toBe(sha);
+    expect(git(repo, 'show', '--stat', '--format=', 'refs/agentboard/archive/task-1')).toContain(
+      'investigation.md',
+    );
+    // And recoverable with ordinary git, no bespoke restore path.
+    expect(git(repo, 'show', 'refs/agentboard/archive/task-1:investigation.md')).toBe(
+      'a 257-line report',
+    );
+  });
+});
+
 describe('GitService.stageAndCommitWip', () => {
   let repo: string;
 

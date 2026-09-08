@@ -495,12 +495,16 @@ export async function dispatch(
       }
 
       case 'deleteTask': {
-        await services.taskLifecycle.deleteTask(p['id'] as string);
+        const outcome = await services.taskLifecycle.deleteTask(p['id'] as string, {
+          purge: p['purge'] === true,
+        });
         serverEvents.emit('event', {
           type: 'board_patch',
           payload: services.view.getBoardSnapshot(),
         });
-        return { id: req.id, result: null };
+        // Returns what was preserved, so the caller can say where the agent's
+        // work went rather than reporting a bare success.
+        return { id: req.id, result: outcome };
       }
 
       // ---- repo management ------------------------------------

@@ -1165,9 +1165,15 @@ export function buildCli(): Command {
 
   task
     .command('delete <task>')
-    .description('Delete a card — terminates its session(s) and removes its worktree(s)')
+    .description(
+      "Delete a card — terminates its session(s) and removes its worktree(s), archiving any uncommitted work first",
+    )
     .option('--force', 'Skip the confirmation and delete immediately')
-    .action(async (taskId: string, opts: { force?: boolean }) => {
+    .option(
+      '--purge',
+      'Also destroy uncommitted work instead of archiving it to a git ref (not reversible)',
+    )
+    .action(async (taskId: string, opts: { force?: boolean; purge?: boolean }) => {
       try {
         const paths = configPaths();
         await ensureRunning(daemonOpts(paths));
@@ -1193,16 +1199,34 @@ export function buildCli(): Command {
               console.log(`  worktree ${task.worktreePath}`);
             }
             if (dirty) {
-              console.log('  ⚠ this worktree currently has uncommitted changes — they will be lost.');
+              console.log(
+                opts.purge
+                  ? '  ⚠ this worktree has uncommitted changes, and --purge will destroy them.'
+                  : '  · this worktree has uncommitted changes — they will be committed and kept.',
+              );
             }
-            console.log('This terminates its session(s) and removes its worktree(s). Not reversible.');
+            console.log('This terminates its session(s) and removes its worktree(s).');
             console.log('Re-run with --force to actually delete it.');
             process.exitCode = 1;
             return;
           }
 
-          await rpc.call('deleteTask', { id: taskId });
+          const outcome = await rpc.call<{ archivedShas: string[]; archiveRef: string }>(
+            'deleteTask',
+            { id: taskId, purge: opts.purge === true },
+          );
           console.log(`Deleted task ${taskId}: ${task.title}`);
+          // Says where the work went. Agents write their findings into the
+          // worktree they are working in, so deleting a card used to mean
+          // deleting the agent's output with nothing said about it.
+          if (outcome.archivedShas.length > 0) {
+            console.log(
+              `  kept    uncommitted work as ${outcome.archivedShas.join(', ')} (${outcome.archiveRef})`,
+            );
+            console.log(`  recover git log -p ${outcome.archiveRef}`);
+          } else if (opts.purge && dirty) {
+            console.log('  purged  uncommitted work, as requested');
+          }
         } finally {
           rpc.disconnect();
         }

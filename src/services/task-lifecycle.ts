@@ -34,6 +34,24 @@ interface TaskCleanupContext {
   secondarySessionStatus: string | null;
 }
 
+export interface CleanupOptions {
+  /**
+   * Destroy uncommitted work instead of archiving it.
+   *
+   * Off by default, and separate from the CLI's `--force`: skipping the
+   * confirmation and discarding the agent's output are different decisions,
+   * and conflating them is what made deletion quietly lossy.
+   */
+  purge?: boolean;
+}
+
+export interface DeleteTaskResult {
+  /** Archive commits created, one per worktree that had uncommitted work. */
+  archivedShas: string[];
+  /** Where those commits are pinned, whether or not any were made. */
+  archiveRef: string;
+}
+
 function blocksArchiveCleanup(...statuses: Array<string | null>): boolean {
   return statuses.some((status) => status === 'active' || status === 'idle');
 }
@@ -141,8 +159,57 @@ export class TaskLifecycleService {
    * All of them are attempted before any unreachable host is reported, so one
    * dead remote cannot strand the local worktrees alongside it.
    */
-  private async removeAllTaskWorktrees(task: TaskCleanupContext): Promise<void> {
+  /**
+   * Commits whatever is uncommitted in a worktree, and pins it under a ref
+   * that outlives the worktree, the branch, and the card.
+   *
+   * Deleting a card used to also delete the agent's output. Agents write their
+   * findings where they work — a 257-line investigation report living in a
+   * worktree is normal, not a mistake — so "remove the worktree" and "throw
+   * away the work" were the same operation, with nothing said about it. One
+   * report was saved only because it had been copied out minutes earlier by
+   * luck, and the reporter ended up defensively copying 24 files into a
+   * separate repo purely to survive card deletion.
+   *
+   * The commit lands on the card's own branch, which is where the work
+   * belongs, and `refs/agentboard/archive/<taskId>` then keeps it reachable
+   * even if that branch is later deleted — so recovery is plain git
+   * (`git log FETCH_HEAD`-style browsing of a ref, `git checkout`, `git
+   * cherry-pick`) rather than a bespoke restore path.
+   *
+   * Returns the sha, or null when there was nothing uncommitted to save.
+   * Secret-looking files are excluded by `stageAndCommitWip` and left on disk.
+   */
+  private async archiveWorktree(
+    task: TaskCleanupContext,
+    worktreePath: string,
+  ): Promise<string | null> {
+    const git = this.gitFor(task.location);
+    try {
+      const sha = await git.stageAndCommitWip(
+        worktreePath,
+        `[agentboard archive] uncommitted work from deleted card ${task.id}`,
+      );
+      if (!sha) {
+        return null;
+      }
+      await git.updateRef(worktreePath, `refs/agentboard/archive/${task.id}`, sha);
+      return sha;
+    } catch {
+      // Best effort, and deliberately non-fatal: a card must stay deletable
+      // even when its worktree is too broken to commit from. The caller
+      // reports which worktrees were archived, so an absent entry is visible
+      // rather than silently assumed.
+      return null;
+    }
+  }
+
+  private async removeAllTaskWorktrees(
+    task: TaskCleanupContext,
+    options: CleanupOptions,
+  ): Promise<string[]> {
     const branches = this.board.getTaskBranches?.(task.id) ?? [];
+    const archived: string[] = [];
     let unreachable: unknown;
 
     for (const branch of branches) {
@@ -158,6 +225,12 @@ export class TaskLifecycleService {
       try {
         if (!(await this.transportFor(task.location).exists(branch.worktreePath))) {
           continue;
+        }
+        if (!options.purge) {
+          const sha = await this.archiveWorktree(task, branch.worktreePath);
+          if (sha) {
+            archived.push(sha);
+          }
         }
         await this.gitFor(task.location).removeWorktreeAsync(repoPath, branch.worktreePath);
         this.board.setTaskBranchWorktree?.(branch.id, null);
@@ -177,6 +250,7 @@ export class TaskLifecycleService {
     if (unreachable) {
       throw unreachable;
     }
+    return archived;
   }
 
   /**
@@ -238,10 +312,10 @@ export class TaskLifecycleService {
       return;
     }
 
-    await this.removeAllTaskWorktrees(task);
+    await this.removeAllTaskWorktrees(task, {});
   }
 
-  async cleanupTaskResources(taskId: string): Promise<void> {
+  async cleanupTaskResources(taskId: string, options: CleanupOptions = {}): Promise<string[]> {
     const task = this.loadTaskCleanupContext(taskId);
 
     if (this.session.terminateTaskSessions) {
@@ -255,11 +329,20 @@ export class TaskLifecycleService {
       }
     }
 
-    await this.removeAllTaskWorktrees(task);
+    return this.removeAllTaskWorktrees(task, options);
   }
 
-  async deleteTask(taskId: string): Promise<void> {
-    await this.cleanupTaskResources(taskId);
+  /**
+   * Deletes a card, preserving its agent's uncommitted work by default.
+   *
+   * Reports the archive commits it made, so the caller can tell the user where
+   * the work went instead of leaving them to hope. `purge` is the opt-in for
+   * genuine destruction — `--force` means "don't ask me", never "don't keep
+   * it", which is the distinction that was missing.
+   */
+  async deleteTask(taskId: string, options: CleanupOptions = {}): Promise<DeleteTaskResult> {
+    const archivedShas = await this.cleanupTaskResources(taskId, options);
     this.board.deleteTask(taskId);
+    return { archivedShas, archiveRef: `refs/agentboard/archive/${taskId}` };
   }
 }
