@@ -185,6 +185,8 @@ agentboard ls --archived   # list archived tasks
 agentboard ls --json       # list tasks as JSON
 agentboard sync            # trigger GitHub sync manually
 agentboard attach <task>   # open session and print attach command
+agentboard fleet           # every live session and its state, in one view
+agentboard attention       # every card that wants a human right now, and why
 ```
 
 ### Task commands
@@ -194,9 +196,12 @@ agentboard task create <title> --repo <id> [--description "..."] [--start]   # c
 agentboard task create <title> --general [--start]                           # create a repo-less task
 agentboard task create <title> --parent <id> --start                         # create it as an explicit subtask
 agentboard task create <title> --session-name <name> --start                 # name its session explicitly
-agentboard task notify <id> "<message>"                                      # type a message into a card's live session
+agentboard task create <title> --context-file <path> --start                 # take the brief from a file
+agentboard task notify <id> "<message>"                                      # send a message into a card's live session
+agentboard task restart <id>                                                 # relaunch its pane, keeping id/branch/worktree/conversation
+agentboard task redeliver-prompt <id>                                        # re-send a card's opening brief (rarely needed)
 agentboard task attach-pr <id> <pr-number> [--repo <ref>] [--base <branch>]  # attach a PR auto-discovery missed
-agentboard task delete <id> [--force]                                        # delete a card (terminates sessions, removes worktrees)
+agentboard task delete <id> [--force] [--purge]                              # delete a card; archives uncommitted work unless --purge
 ```
 
 ### Repository commands
@@ -388,10 +393,10 @@ agentboard task create "Extract the rate limiter" --repo <id> --description "...
 - **On the board.** A subtask's card shows a badge naming its parent (`↳ Add rate limiting`) rather than a generic "Subtask" tag, so two different parents' subtasks stay distinguishable at a glance.
 - **Session naming.** Every card's session launches with an explicit Claude Code `--name`, so it's addressable via Claude Code's own `SendMessage`/`ListAgents`. Defaults to the title; a subtask's default is prefixed with its parent's (`Add rate limiting/Extract the limiter`), so hierarchy is visible directly in `ListAgents` with no lookup needed. Pass `--session-name <name>` to choose it explicitly instead.
 - **PR rollup.** A card's PR list (`Shift+E`) shows its own branches followed by every direct subtask's, each such row named with its own owning task (`↳ Extracted helper`). Every action there (open, checks, merge, comment) resolves against the branch's actual owning task, so it works the same whether the row is the card's own or a subtask's.
-- **PR notification.** When a subtask's PR first opens, the parent card is flagged, and if the parent still has a live session, the notice is typed straight into its pane.
-- **Pinging a card's session.** `agentboard task notify <id> "<message>"` types a message into any card's live session directly — used for the PR notice above, and generally for one task's agent to prompt another's (e.g. telling a subtask to address review comments after its PR is checked).
+- **PR notification.** When a subtask's PR first opens, the parent card is flagged on the board — the durable record, correct whether or not either session was running. The subtask is also told to message its parent directly via Claude Code's own `SendMessage` the moment it opens the PR; that one is prompt but skippable, so the board flag is what to trust. The flag clears itself once the PR merges or closes, or the subtask reaches done.
+- **Pinging a card's session.** `agentboard task notify <id> "<message>"` delivers a message into any card's live session — generally for one task's agent to prompt another's (e.g. telling a subtask to address review comments after its PR is checked).
 
-All of this is written up as a Claude Code skill teammates can install — see [`skills/spawn-subtask`](skills/spawn-subtask).
+All of this is written up as a Claude Code skill teammates can install — see [`skills/agentboard`](skills/agentboard).
 
 ## Card Statuses
 

@@ -7,11 +7,11 @@ Claude Code skills for working with AgentBoard, shared here so the whole team ge
 Skills here are personal, not project-scoped — copy the one you want into your own global Claude Code skills directory:
 
 ```bash
-cp -r skills/spawn-subtask ~/.claude/skills/
+cp -r skills/agentboard ~/.claude/skills/
 ```
 
 Restart Claude Code (or start a new session) to pick it up. It then applies in any repo AgentBoard manages, not just this one.
 
 ## Available skills
 
-- **`spawn-subtask`** — spinning off follow-up work as its own AgentBoard card: linking it back to the task that spawned it, naming its session so it's addressable via Claude Code's own `SendMessage`/`ListAgents`, and the notify loop for PR review back-and-forth between a card and its subtasks.
+- **`agentboard`** — everything an agent needs to work with AgentBoard from inside a session: reading the board's state, spinning off follow-up work as a linked subtask card, messaging other cards' sessions, recovering a stuck one, and cleaning up without losing work.

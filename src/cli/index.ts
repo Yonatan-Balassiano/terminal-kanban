@@ -1030,7 +1030,7 @@ export function buildCli(): Command {
   task
     .command('redeliver-prompt <id>')
     .description(
-      'Re-send a card\'s opening brief into its live session — use when a session started but the brief is still sitting unsubmitted in the pane (the automatic delivery gave up waiting for a slow startup)',
+      "Re-send a card's opening brief into its live session — rarely needed, since the brief now reaches the agent on its own argv at launch",
     )
     .action(async (id: string) => {
       try {
