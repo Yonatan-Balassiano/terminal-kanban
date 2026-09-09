@@ -740,7 +740,13 @@ export class SyncService {
     }
 
     const released = this.isFullyReleased?.(taskId) ?? true;
-    const nextTrack = released ? 'done' : 'shipping';
+    // A parent's own branches can ship while a subtask it spun off is still
+    // being worked — done is terminal and tears down the session, so a
+    // parent with open subtasks stays in shipping (session alive) until
+    // every one of them has also reached done, the same gate `released`
+    // already applies to the parent's own branches.
+    const childrenDone = !this.board.hasIncompleteChildTasks(taskId);
+    const nextTrack = released && childrenDone ? 'done' : 'shipping';
     if (task.trackId === nextTrack) {
       return 0;
     }

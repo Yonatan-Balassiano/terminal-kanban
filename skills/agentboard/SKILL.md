@@ -69,6 +69,7 @@ Every time, with no separate confirmation step. A card without `--start` sits id
 - **Auto-linking.** A card created from inside a running session is linked as a subtask of your card automatically — no flag. Use `--parent <id>` to link elsewhere. If a card comes out unlinked, run `task create` from inside your worktree (the fallback marker file is found by walking up from the cwd).
 - **Session naming.** The subtask's session is named `<your session name>/<its title>`, so `ListAgents` shows the hierarchy with no lookup. Override with `--session-name`.
 - **PR notification, two ways.** When the subtask's PR opens, your card is flagged on the board (durable, always correct) *and* the subtask is told to `SendMessage` you directly (prompt, but skippable). Trust the board flag; treat the message as a courtesy.
+- **Your session stays alive until every subtask is done.** Even once your own branches have shipped, the board holds your card in `shipping` — not `done` — while any subtask you spun off is still open. `done` is what tears down a session and its worktree, so this is deliberate: it's often your session that's needed to check on or unblock a stuck subtask. Nothing to do here — it resolves itself the moment the last subtask reaches `done`.
 
 ## Talking to other sessions
 

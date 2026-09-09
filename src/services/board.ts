@@ -872,6 +872,27 @@ export class BoardService {
     return result.changes > 0;
   }
 
+  /**
+   * Whether `parentTaskId` still has a subtask that has not reached `done`.
+   *
+   * Used to hold a parent card in `shipping` — and its session alive — until
+   * every subtask it spun off is also done, not just its own branches. An
+   * archived subtask does not count: archiving removes it from consideration
+   * the same as it does everywhere else in the board.
+   */
+  hasIncompleteChildTasks(parentTaskId: string): boolean {
+    const row = this.db
+      .prepare<[string], { count: number }>(
+        `SELECT COUNT(*) AS count
+         FROM tasks
+         WHERE parent_task_id = ?
+           AND archived_at IS NULL
+           AND track_id <> 'done'`,
+      )
+      .get(parentTaskId);
+    return (row?.count ?? 0) > 0;
+  }
+
   // ---- Track methods -----------------------------------------
 
   upsertTrack(id: string, label: string, sortOrder: number): void {
