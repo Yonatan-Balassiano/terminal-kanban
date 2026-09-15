@@ -13,44 +13,54 @@ import {
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
-  buildNewSessionBootstrapCommand,
+  buildSessionBootstrapCommand,
+  buildSessionBootstrapEnv,
+  type SessionBootstrapEnvOptions,
   type SessionWorkspaceEntry,
 } from '../src/services/session-bootstrap.js';
 
 const execFileAsync = promisify(execFile);
 const BOOTSTRAP = join(process.cwd(), 'scripts', 'session-bootstrap.sh');
 
-describe('buildNewSessionBootstrapCommand', () => {
-  it('runs the configured bootstrap script with claude task context', () => {
+/**
+ * The command line a backend would type, with its settings file written into
+ * `dir` first — the same two steps every backend takes.
+ */
+function bootstrapCommand(dir: string, options: SessionBootstrapEnvOptions): string {
+  const envFile = join(dir, 'bootstrap-env.sh');
+  writeFileSync(envFile, buildSessionBootstrapEnv(options));
+  return buildSessionBootstrapCommand(envFile, BOOTSTRAP);
+}
+
+describe('buildSessionBootstrapEnv', () => {
+  it('exports every setting the bootstrap script reads', () => {
     expect(
-      buildNewSessionBootstrapCommand({
+      buildSessionBootstrapEnv({
         repoPath: '/repo',
         branch: 'ab/task-1234',
         agentCli: 'claude',
-        sessionBootstrapScript: '/scripts/session-bootstrap.sh',
       })
     ).toBe(
-      'AGENTBOARD_TASK_ID="" ' +
-        'AGENTBOARD_TASK_KIND="repo" ' +
-        'AGENTBOARD_REPO_PATH="/repo" ' +
-        'AGENTBOARD_TASK_BRANCH="ab/task-1234" ' +
-        'AGENTBOARD_BASE_BRANCH="main" ' +
-        'AGENTBOARD_SESSION_CWD="/repo" ' +
-        'AGENTBOARD_AGENT="claude" ' +
-        'AGENTBOARD_USES_WORKTREE="0" ' +
-        'AGENTBOARD_BOOTSTRAP_NOTICE="" ' +
-        'AGENTBOARD_AGENT_ARGS="" ' +
-        'AGENTBOARD_WORKSPACES="" ' +
-        'AGENTBOARD_AGENT_SESSION_ID="" ' +
-        'AGENTBOARD_INITIAL_PROMPT_FILE="" ' +
-        'AGENTBOARD_RESUME_PROMPT_FILE="" ' +
-        '"/scripts/session-bootstrap.sh"'
+      "export AGENTBOARD_TASK_ID=''\n" +
+        'export AGENTBOARD_TASK_KIND=repo\n' +
+        'export AGENTBOARD_REPO_PATH=/repo\n' +
+        'export AGENTBOARD_TASK_BRANCH=ab/task-1234\n' +
+        'export AGENTBOARD_BASE_BRANCH=main\n' +
+        'export AGENTBOARD_SESSION_CWD=/repo\n' +
+        'export AGENTBOARD_AGENT=claude\n' +
+        'export AGENTBOARD_USES_WORKTREE=0\n' +
+        "export AGENTBOARD_BOOTSTRAP_NOTICE=''\n" +
+        "export AGENTBOARD_AGENT_ARGS=''\n" +
+        "export AGENTBOARD_WORKSPACES=''\n" +
+        "export AGENTBOARD_AGENT_SESSION_ID=''\n" +
+        "export AGENTBOARD_INITIAL_PROMPT_FILE=''\n" +
+        "export AGENTBOARD_RESUME_PROMPT_FILE=''\n"
     );
   });
 
   it('passes codex agent selection and bootstrap notice through to the script', () => {
     expect(
-      buildNewSessionBootstrapCommand({
+      buildSessionBootstrapEnv({
         repoPath: '/repo',
         branch: 'ab/task-1234',
         baseBranch: 'master',
@@ -58,25 +68,193 @@ describe('buildNewSessionBootstrapCommand', () => {
         usesWorktree: true,
         cwd: '/repo/worktree',
         bootstrapNotice: 'Git command failed: git worktree add',
-        sessionBootstrapScript: '/scripts/session-bootstrap.sh',
       })
     ).toBe(
-      'AGENTBOARD_TASK_ID="" ' +
-        'AGENTBOARD_TASK_KIND="repo" ' +
-        'AGENTBOARD_REPO_PATH="/repo" ' +
-        'AGENTBOARD_TASK_BRANCH="ab/task-1234" ' +
-        'AGENTBOARD_BASE_BRANCH="master" ' +
-        'AGENTBOARD_SESSION_CWD="/repo/worktree" ' +
-        'AGENTBOARD_AGENT="codex" ' +
-        'AGENTBOARD_USES_WORKTREE="1" ' +
-        'AGENTBOARD_BOOTSTRAP_NOTICE="Git command failed: git worktree add" ' +
-        'AGENTBOARD_AGENT_ARGS="" ' +
-        'AGENTBOARD_WORKSPACES="" ' +
-        'AGENTBOARD_AGENT_SESSION_ID="" ' +
-        'AGENTBOARD_INITIAL_PROMPT_FILE="" ' +
-        'AGENTBOARD_RESUME_PROMPT_FILE="" ' +
-        '"/scripts/session-bootstrap.sh"'
+      "export AGENTBOARD_TASK_ID=''\n" +
+        'export AGENTBOARD_TASK_KIND=repo\n' +
+        'export AGENTBOARD_REPO_PATH=/repo\n' +
+        'export AGENTBOARD_TASK_BRANCH=ab/task-1234\n' +
+        'export AGENTBOARD_BASE_BRANCH=master\n' +
+        'export AGENTBOARD_SESSION_CWD=/repo/worktree\n' +
+        'export AGENTBOARD_AGENT=codex\n' +
+        'export AGENTBOARD_USES_WORKTREE=1\n' +
+        "export AGENTBOARD_BOOTSTRAP_NOTICE='Git command failed: git worktree add'\n" +
+        "export AGENTBOARD_AGENT_ARGS=''\n" +
+        "export AGENTBOARD_WORKSPACES=''\n" +
+        "export AGENTBOARD_AGENT_SESSION_ID=''\n" +
+        "export AGENTBOARD_INITIAL_PROMPT_FILE=''\n" +
+        "export AGENTBOARD_RESUME_PROMPT_FILE=''\n"
     );
+  });
+});
+
+describe('buildSessionBootstrapCommand', () => {
+  it('types the settings file path and the script, nothing else', () => {
+    expect(
+      buildSessionBootstrapCommand(
+        '/tmp/agentboard/briefs/task-1-primary-env.sh',
+        '/scripts/session-bootstrap.sh'
+      )
+    ).toBe(
+      'AGENTBOARD_BOOTSTRAP_ENV_FILE=/tmp/agentboard/briefs/task-1-primary-env.sh ' +
+        '/scripts/session-bootstrap.sh'
+    );
+  });
+
+  it('stays under the 1024 bytes a starting shell keeps of a typed line, whatever the card carries', () => {
+    // Arrange — the card that could not open: a git error as the notice. A long
+    // --name and a multi-branch map used to count against the same limit.
+    const settings = buildSessionBootstrapEnv({
+      repoPath: '/Users/someone/dev/github/web5.0-poc',
+      branch: 'ab/support-multipel-shopify-apps-2093',
+      agentCli: 'claude',
+      sessionName: 'parent card name › '.repeat(20),
+      bootstrapNotice: `Git command failed: git worktree add\n${'fatal: already used by worktree\n'.repeat(80)}`,
+      workspaces: Array.from({ length: 20 }, (_, index) => ({
+        label: `repo-${index}`,
+        branch: `ab/some-long-branch-name-${index}`,
+        path: `/Users/someone/dev/github/.repo-worktrees/ab--some-long-branch-name-${index}`,
+      })),
+    });
+    expect(settings.length).toBeGreaterThan(4096);
+
+    // Act
+    const command = buildSessionBootstrapCommand(
+      join(tmpdir(), 'agentboard', 'briefs', 'aca5e792-primary-env.sh'),
+      '/Users/someone/dev/github/terminal-kanban/scripts/session-bootstrap.sh'
+    );
+
+    // Assert
+    expect(Buffer.byteLength(command)).toBeLessThan(1024);
+    expect(command).not.toContain('Git command failed');
+  });
+});
+
+describe('session-bootstrap.sh settings file', () => {
+  /**
+   * Runs the real script through a real shell, the way a pane does: the daemon's
+   * short command line, pointing at a settings file on disk.
+   */
+  async function run(
+    options: Partial<SessionBootstrapEnvOptions>,
+    agentScript = '#!/bin/bash\nprintf "ARG<%s>\\n" "$@"\n'
+  ): Promise<{ stdout: string; dir: string; envFile: string }> {
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-settings-'));
+    const fake = join(dir, 'claude');
+    writeFileSync(fake, agentScript);
+    chmodSync(fake, 0o755);
+
+    const envFile = join(dir, 'bootstrap-env.sh');
+    const command = bootstrapCommand(dir, {
+      repoPath: dir,
+      branch: 'ab/api-0001',
+      agentCli: 'claude',
+      usesWorktree: true,
+      cwd: dir,
+      ...options,
+    });
+    const { stdout } = await execFileAsync('bash', ['-c', command], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}` },
+    });
+    return { stdout, dir, envFile };
+  }
+
+  it('prints a notice exactly as written, however unruly', async () => {
+    // Arrange — git errors quote paths; a `$`, a backtick or a backslash must
+    // neither expand nor be decoded on the way through.
+    const notice =
+      "fatal: 'tsachis/skill' is already used by worktree at '/repo'\n" +
+      'costs $HOME and `date` and "quotes"\n' +
+      'C:\\no\\escapes';
+
+    // Act
+    const { stdout, dir } = await run({ bootstrapNotice: notice });
+
+    // Assert
+    try {
+      expect(stdout).toContain(notice);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never runs anything written in a card title', async () => {
+    // Arrange — the title becomes --name, and the settings file is sourced.
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-title-'));
+    const marker = join(dir, 'executed');
+    rmSync(dir, { recursive: true, force: true });
+    const title = `Fix $(touch ${marker}) and \`touch ${marker}\``;
+
+    // Act
+    const result = await run({ sessionName: title });
+
+    // Assert
+    try {
+      expect(result.stdout).toContain(`ARG<${title}>`);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(result.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes the settings file and keeps its path out of the agent environment', async () => {
+    // Act
+    const { stdout, dir, envFile } = await run(
+      {},
+      '#!/bin/bash\necho "ENV_FILE<${AGENTBOARD_BOOTSTRAP_ENV_FILE:-}>"\necho "TASK<$AGENTBOARD_TASK_ID>"\n'
+    );
+
+    // Assert — gone, and a subtask the agent spawns cannot inherit a dead path.
+    // The settings themselves still reach the agent, as they always did.
+    try {
+      expect(existsSync(envFile)).toBe(false);
+      expect(stdout).toContain('ENV_FILE<>');
+      expect(stdout).toContain('TASK<>');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('hands the task id to the agent', async () => {
+    // Act
+    const { stdout, dir } = await run(
+      { taskId: 'aca5e792' },
+      '#!/bin/bash\necho "TASK<$AGENTBOARD_TASK_ID>"\n'
+    );
+
+    // Assert — subtask auto-linking reads this from the agent's environment.
+    try {
+      expect(stdout).toContain('TASK<aca5e792>');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops with a clear message instead of launching blind when the file is gone', async () => {
+    // Arrange — e.g. the command re-run from shell history after the first run
+    // consumed the file. Without its settings the script would check out and
+    // launch in the wrong place.
+    const dir = mkdtempSync(join(tmpdir(), 'agentboard-missing-'));
+    const fake = join(dir, 'claude');
+    writeFileSync(fake, '#!/bin/bash\necho AGENT_STARTED\n');
+    chmodSync(fake, 0o755);
+    const command = buildSessionBootstrapCommand(join(dir, 'gone-env.sh'), BOOTSTRAP);
+
+    try {
+      // Act + Assert
+      await expect(
+        execFileAsync('bash', ['-c', command], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}` },
+        })
+      ).rejects.toMatchObject({
+        stderr: expect.stringContaining('settings not found'),
+        stdout: expect.not.stringContaining('AGENT_STARTED'),
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -86,56 +264,39 @@ describe('workspace map encoding', () => {
     { label: 'sdk', branch: 'ab/sdk-0002', path: '/w/sdk' },
   ];
 
-  function commandWith(workspaces: readonly SessionWorkspaceEntry[]): string {
-    return buildNewSessionBootstrapCommand({
+  function settingsWith(workspaces?: readonly SessionWorkspaceEntry[]): string {
+    return buildSessionBootstrapEnv({
       repoPath: '/repo',
       branch: 'ab/api-0001',
       agentCli: 'claude',
-      sessionBootstrapScript: '/s.sh',
-      workspaces,
+      ...(workspaces ? { workspaces } : {}),
     });
   }
 
-  it('packs every workspace into one env var as tab columns and newline rows', () => {
+  it('packs every workspace into one value as tab columns and newline rows', () => {
     // Act
-    const command = commandWith(twoWorkspaces);
+    const settings = settingsWith(twoWorkspaces);
 
-    // Assert — JSON.stringify is the only escaping involved, so the separators
-    // arrive as \t and \n escape sequences rather than raw control characters.
-    expect(command).toContain(
-      'AGENTBOARD_WORKSPACES="monorepo\\tab/api-0001\\t/w/api\\nsdk\\tab/sdk-0002\\t/w/sdk"'
+    // Assert — single quotes carry the real separators; nothing is escaped.
+    expect(settings).toContain(
+      "export AGENTBOARD_WORKSPACES='monorepo\tab/api-0001\t/w/api\nsdk\tab/sdk-0002\t/w/sdk'\n"
     );
-  });
-
-  it('never emits a raw tab or newline that would break the command line', () => {
-    // Arrange — a raw separator would split the env assignment into a new word
-    // or a new command, so this is the bug the escaping exists to prevent.
-    const command = commandWith(twoWorkspaces);
-
-    // Assert
-    expect(command).not.toMatch(/[\t\n]/);
   });
 
   it('leaves the workspace var empty when the caller resolved no map', () => {
     // Arrange + Act — undefined means "not resolved", not "the card owns none".
-    const command = buildNewSessionBootstrapCommand({
-      repoPath: '/repo',
-      branch: 'ab/api-0001',
-      agentCli: 'claude',
-      sessionBootstrapScript: '/s.sh',
-    });
+    const settings = settingsWith();
 
     // Assert
-    expect(command).toContain('AGENTBOARD_WORKSPACES=""');
+    expect(settings).toContain("export AGENTBOARD_WORKSPACES=''\n");
   });
 });
 
 describe('session-bootstrap.sh workspace banner', () => {
   /**
    * Runs the real command line the daemon would emit, through a real shell, with
-   * a fake agent on PATH. This is what proves the round trip: nothing but
-   * JSON.stringify escapes the map on the way out, and nothing but `printf %b`
-   * decodes it on the way in.
+   * a fake agent on PATH. This is what proves the round trip: single quotes in
+   * the settings file on the way out, a plain split on the way in.
    */
   async function runBootstrap(workspaces?: readonly SessionWorkspaceEntry[]): Promise<string> {
     const dir = mkdtempSync(join(tmpdir(), 'agentboard-workspaces-'));
@@ -144,13 +305,12 @@ describe('session-bootstrap.sh workspace banner', () => {
       writeFileSync(fake, '#!/bin/bash\necho AGENT_STARTED\n');
       chmodSync(fake, 0o755);
 
-      const command = buildNewSessionBootstrapCommand({
+      const command = bootstrapCommand(dir, {
         repoPath: dir,
         branch: 'ab/api-0001',
         agentCli: 'claude',
         usesWorktree: true,
         cwd: dir,
-        sessionBootstrapScript: BOOTSTRAP,
         ...(workspaces ? { workspaces } : {}),
       });
 
@@ -239,13 +399,12 @@ describe('session-bootstrap.sh agent session resume', () => {
         writeFileSync(join(project, `${agentSessionId}.jsonl`), '{}\n');
       }
 
-      const command = buildNewSessionBootstrapCommand({
+      const command = bootstrapCommand(dir, {
         repoPath: dir,
         branch: 'ab/api-0001',
         agentCli,
         usesWorktree: true,
         cwd: dir,
-        sessionBootstrapScript: BOOTSTRAP,
         ...(agentSessionId ? { agentSessionId } : {}),
       });
 
@@ -335,13 +494,12 @@ describe('session-bootstrap.sh initial brief', () => {
         writeFileSync(briefFile, brief);
       }
 
-      const command = buildNewSessionBootstrapCommand({
+      const command = bootstrapCommand(dir, {
         repoPath: dir,
         branch: 'ab/api-0001',
         agentCli: 'claude',
         usesWorktree: true,
         cwd: dir,
-        sessionBootstrapScript: BOOTSTRAP,
         agentSessionId: SESSION_ID,
         ...(brief !== undefined ? { initialPromptFile: briefFile } : {}),
       });
@@ -377,7 +535,7 @@ describe('session-bootstrap.sh initial brief', () => {
   });
 
   it('carries a brief far larger than the pane input limit', async () => {
-    // Arrange — the ~4 KB pane-input truncation that originally forced the
+    // Arrange — the 1024-byte pane-input truncation that originally forced the
     // brief off the command line only ever applied to what is typed into the
     // pane. The contents travel in a file, so size stops mattering.
     const brief = `Start.\n${'x'.repeat(40_000)}\nEnd.`;
@@ -442,13 +600,12 @@ describe('session-bootstrap.sh queued messages', () => {
       const noticeFile = join(dir, 'notice.txt');
       writeFileSync(noticeFile, 'THE QUEUED MESSAGE');
 
-      const command = buildNewSessionBootstrapCommand({
+      const command = bootstrapCommand(dir, {
         repoPath: dir,
         branch: 'ab/api-0001',
         agentCli: 'claude',
         usesWorktree: true,
         cwd: dir,
-        sessionBootstrapScript: BOOTSTRAP,
         agentSessionId: SESSION_ID,
         initialPromptFile: briefFile,
         resumeNoticeFile: noticeFile,
@@ -552,7 +709,7 @@ describe('session-bootstrap.sh worktree marker file', () => {
       await execFileAsync('git', ['init', '-q', dir]);
     }
 
-    const command = buildNewSessionBootstrapCommand({
+    const command = bootstrapCommand(dir, {
       taskId,
       taskKind,
       repoPath: dir,
@@ -560,7 +717,6 @@ describe('session-bootstrap.sh worktree marker file', () => {
       agentCli: 'claude',
       usesWorktree: true,
       cwd: dir,
-      sessionBootstrapScript: BOOTSTRAP,
     });
 
     await execFileAsync('bash', ['-c', command], {
@@ -643,13 +799,12 @@ describe('session-bootstrap.sh opening prompt', () => {
         writeFileSync(join(project, `${agentSessionId}.jsonl`), '{}\n');
       }
 
-      const command = buildNewSessionBootstrapCommand({
+      const command = bootstrapCommand(dir, {
         repoPath: dir,
         branch: 'ab/api-0001',
         agentCli,
         usesWorktree: true,
         cwd: dir,
-        sessionBootstrapScript: BOOTSTRAP,
         ...(initialPromptFile ? { initialPromptFile } : {}),
         ...(agentSessionId ? { agentSessionId } : {}),
       });
@@ -673,35 +828,17 @@ describe('session-bootstrap.sh opening prompt', () => {
 
   it('passes the brief by path, never by value', () => {
     // Arrange
-    const command = buildNewSessionBootstrapCommand({
+    const settings = buildSessionBootstrapEnv({
       repoPath: '/repo',
       branch: 'ab/api-0001',
       agentCli: 'claude',
-      sessionBootstrapScript: '/s.sh',
       initialPromptFile: '/tmp/agentboard/briefs/task-1-primary.txt',
     });
 
     // Assert
-    expect(command).toContain(
-      'AGENTBOARD_INITIAL_PROMPT_FILE="/tmp/agentboard/briefs/task-1-primary.txt"'
+    expect(settings).toContain(
+      'export AGENTBOARD_INITIAL_PROMPT_FILE=/tmp/agentboard/briefs/task-1-primary.txt\n'
     );
-  });
-
-  it('keeps the command line short no matter how long the brief is', () => {
-    // Arrange — the whole command is typed into the session's pane, which drops
-    // everything past roughly 4 KB and leaves the shell hanging on an
-    // unterminated quote. A brief has no length ceiling, so it must not be able
-    // to push the command anywhere near that.
-    const command = buildNewSessionBootstrapCommand({
-      repoPath: '/repo',
-      branch: 'ab/api-0001',
-      agentCli: 'claude',
-      sessionBootstrapScript: '/s.sh',
-      initialPromptFile: '/tmp/agentboard/briefs/task-1-primary.txt',
-    });
-
-    // Assert — a generous ceiling; the real line is a few hundred bytes.
-    expect(command.length).toBeLessThan(1024);
   });
 
   it('hands the brief to the agent unexpanded, however unruly its contents', async () => {

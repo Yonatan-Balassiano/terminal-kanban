@@ -13,8 +13,12 @@ import type {
 } from '../../types/index.js';
 import { existsSync } from 'fs';
 import { generateId } from '../../db/index.js';
-import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
-import { writeLocalBrief, writeLocalResumeNotice } from '../session-brief.js';
+import { buildSessionBootstrapCommand, buildSessionBootstrapEnv } from '../session-bootstrap.js';
+import {
+  writeLocalBootstrapEnv,
+  writeLocalBrief,
+  writeLocalResumeNotice,
+} from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import { DeliveryGuard } from './delivery-guard.js';
 import {
@@ -215,28 +219,36 @@ export class TmuxBackend implements SessionBackend {
       const resumeNoticeFile = opts.resumeNotice
         ? writeLocalResumeNotice(opts.taskId, opts.slot, opts.resumeNotice)
         : undefined;
-      const bootstrapCommand = buildNewSessionBootstrapCommand({
-        taskId: opts.taskId,
-        sessionName: opts.sessionName,
-        taskKind: opts.taskKind,
-        repoPath: opts.repoPath,
-        branch: opts.branch,
-        baseBranch: opts.baseBranch,
-        agentCli: opts.agentCli,
-        usesWorktree: opts.usesWorktree,
-        cwd: opts.cwd,
-        bootstrapNotice: opts.bootstrapNotice,
-        sessionBootstrapScript: opts.sessionBootstrapScript,
-        agentPermissionMode: opts.agentPermissionMode,
-        agentArgs: opts.agentArgs,
-        agentSessionId: opts.agentSessionId,
-        // Only the file's path travels through the pane's argv; the script
-        // deletes it itself when this turns out to be a resume (see
-        // session-bootstrap.sh). The daemon, not argv, delivers the contents.
-        initialPromptFile,
-        resumeNoticeFile,
-      });
-      await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
+      // Every setting goes into a file and only its path is typed: a pane keeps
+      // just the first 1024 bytes of a line typed while its shell is starting.
+      const envFile = writeLocalBootstrapEnv(
+        opts.taskId,
+        opts.slot,
+        buildSessionBootstrapEnv({
+          taskId: opts.taskId,
+          sessionName: opts.sessionName,
+          taskKind: opts.taskKind,
+          repoPath: opts.repoPath,
+          branch: opts.branch,
+          baseBranch: opts.baseBranch,
+          agentCli: opts.agentCli,
+          usesWorktree: opts.usesWorktree,
+          cwd: opts.cwd,
+          bootstrapNotice: opts.bootstrapNotice,
+          agentPermissionMode: opts.agentPermissionMode,
+          agentArgs: opts.agentArgs,
+          agentSessionId: opts.agentSessionId,
+          // Only the file's path travels to the script; the script deletes it
+          // itself when this turns out to be a resume (see
+          // session-bootstrap.sh). The daemon, not argv, delivers the contents.
+          initialPromptFile,
+          resumeNoticeFile,
+        }),
+      );
+      await this.sendInput(
+        backendSessionId,
+        `${buildSessionBootstrapCommand(envFile, opts.sessionBootstrapScript)}\r`,
+      );
       // The brief rides the bootstrap command's own argv from here — see
       // session-bootstrap.sh. Nothing is pasted into this pane, so there is no
       // delivery to wait for, retry, or verify.

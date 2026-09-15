@@ -56,6 +56,16 @@ export interface BranchWorkspacePlan {
   worktreePath: string | null;
 }
 
+/** A branch's plan once its checkout has been ensured on disk. */
+interface BranchCheckout {
+  plan: BranchWorkspacePlan;
+  /**
+   * The branch was already checked out somewhere the card does not own, so the
+   * session works there and nothing records it as the card's worktree.
+   */
+  borrowed: boolean;
+}
+
 export interface TaskWorkspaceInfo {
   taskId: string;
   path: string;
@@ -365,10 +375,16 @@ export class WorktreeService {
     };
   }
 
-  private commit(plan: WorkspacePlan, worktreePath: string | null, cwd: string): TaskWorkspaceInfo {
+  private commit(
+    plan: WorkspacePlan,
+    active: BranchCheckout | undefined,
+    cwd: string,
+  ): TaskWorkspaceInfo {
+    const worktreePath = active?.plan.worktreePath ?? null;
     // tasks.worktree_path mirrors the ACTIVE branch so reveal-workspace and
-    // open-in-IDE still open something sensible on a multi-branch card.
-    this.board.setTaskWorktree?.(plan.taskId, worktreePath);
+    // open-in-IDE still open something sensible on a multi-branch card — but
+    // only a checkout the card owns, because cleanup removes what is recorded.
+    this.board.setTaskWorktree?.(plan.taskId, active?.borrowed ? null : worktreePath);
     this.board.setTaskLastSessionCwd?.(plan.taskId, cwd);
     return {
       taskId: plan.taskId,
@@ -434,29 +450,42 @@ export class WorktreeService {
 
     // Every branch gets its own checkout, not just the active one: an agent that
     // moves to another repo mid-card must find that worktree already there.
+    const checkouts: BranchCheckout[] = [];
     for (const branch of plan.branches) {
-      await this.ensureBranchWorkspace(transport, plan.location, branch);
+      checkouts.push(await this.ensureBranchWorkspace(transport, plan.location, branch));
     }
 
-    const roots = plan.branches.length > 0 ? plan.branches.map(branchRoot) : [plan.repoPath];
+    const branches = checkouts.map((checkout) => checkout.plan);
+    const roots = branches.length > 0 ? branches.map(branchRoot) : [plan.repoPath];
     const cwd = await this.reuseCwd(transport, roots, plan.lastSessionCwd);
-    return this.commit(plan, plan.worktreePath, cwd);
+    return this.commit({ ...plan, branches }, checkouts[0], cwd);
   }
 
   private async ensureBranchWorkspace(
     transport: ExecTransport,
     location: TaskLocation,
     branch: BranchWorkspacePlan,
-  ): Promise<void> {
+  ): Promise<BranchCheckout> {
     if (!branch.worktreePath) {
-      return;
+      return { plan: branch, borrowed: false };
     }
 
     // mkdirp only when the worktree is actually missing: on a remote host every
     // call is an SSH round trip, and an existing worktree implies its parent.
     if (!(await transport.exists(branch.worktreePath))) {
+      const git = this.gitFor(location);
+      // git allows one checkout per branch, so a branch the user already has
+      // checked out — in the main checkout, or a worktree of their own — can
+      // never get a worktree here. Failing on it used to drop the whole card
+      // into a plain shell; work in that checkout instead.
+      const existing = await git.findBranchCheckoutAsync(branch.repoPath, branch.branch);
+      if (existing) {
+        // Never written back: cleanup force-removes every recorded worktree,
+        // and this one is not the card's to remove.
+        return { plan: { ...branch, worktreePath: existing }, borrowed: true };
+      }
       await transport.mkdirp(dirname(branch.worktreePath));
-      await this.gitFor(location).createWorktreeAsync(
+      await git.createWorktreeAsync(
         branch.repoPath,
         branch.worktreePath,
         branch.branch,
@@ -469,6 +498,7 @@ export class WorktreeService {
     if (branch.branchId) {
       this.board.setTaskBranchWorktree(branch.branchId, branch.worktreePath);
     }
+    return { plan: branch, borrowed: false };
   }
 
   private async reuseCwd(

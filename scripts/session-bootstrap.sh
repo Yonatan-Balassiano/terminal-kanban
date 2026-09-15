@@ -2,6 +2,23 @@
 
 set -euo pipefail
 
+# The daemon parks this session's settings in a file and types only its path
+# into the pane: a line typed into a shell that is still starting is cut at
+# 1024 bytes on macOS, Enter included (see buildSessionBootstrapEnv). Removed
+# once read, and unset so the agent never inherits a path to a file that is gone.
+if [[ -n "${AGENTBOARD_BOOTSTRAP_ENV_FILE:-}" ]]; then
+  bootstrap_env_file="$AGENTBOARD_BOOTSTRAP_ENV_FILE"
+  unset AGENTBOARD_BOOTSTRAP_ENV_FILE
+  if [[ ! -f "$bootstrap_env_file" ]]; then
+    printf 'AgentBoard session settings not found: %s\n' "$bootstrap_env_file" >&2
+    printf 'Restart the card (agentboard task restart <id>) to write them again.\n' >&2
+    exit 1
+  fi
+  # shellcheck source=/dev/null
+  source "$bootstrap_env_file"
+  rm -f "$bootstrap_env_file"
+fi
+
 task_id="${AGENTBOARD_TASK_ID:-}"
 task_kind="${AGENTBOARD_TASK_KIND:-repo}"
 repo_path="${AGENTBOARD_REPO_PATH:-}"
@@ -19,8 +36,9 @@ resume_prompt_file="${AGENTBOARD_RESUME_PROMPT_FILE:-}"
 
 # The card's checkouts, one "label<TAB>branch<TAB>path" row per line.
 #
-# The daemon ships them JSON-escaped so the separators survive the shell's
-# double-quote parsing; printf %b turns "\t" and "\n" back into real ones.
+# The settings file single-quotes the value, so the tabs and newlines arrive as
+# real separators. %s rather than %b: nothing is escaped, so nothing needs
+# decoding, and a backslash in a path must stay a backslash.
 print_workspace_banner() {
   [[ -n "$workspaces" ]] || return 0
 
@@ -29,7 +47,7 @@ print_workspace_banner() {
   while IFS=$'\t' read -r label branch path; do
     [[ -n "$path" ]] || continue
     printf '  %-24s %-36s %s\n' "$label" "$branch" "$path"
-  done < <(printf '%b\n' "$workspaces")
+  done < <(printf '%s\n' "$workspaces")
   printf '\n'
 
   # Deliberately no cd between them: this is the one shell the agent runs in, and
@@ -68,7 +86,7 @@ if [[ "$task_kind" != "general" && -n "$task_id" && -d "$session_cwd" ]]; then
 fi
 
 if [[ -n "$bootstrap_notice" ]]; then
-  printf '%b\n\n' "$bootstrap_notice"
+  printf '%s\n\n' "$bootstrap_notice"
   exit 0
 fi
 
@@ -145,7 +163,7 @@ eval "set -- $session_args $agent_args"
 #
 # The reason this was abandoned in 5c62f10 no longer holds. Two other bugs were
 # in play then: the brief rode the command line typed into the pane, which the
-# tty truncated at ~4 KB (fixed separately in d06977a, which moved the contents
+# tty truncated (at 1024 bytes on macOS; fixed separately in d06977a, which moved the contents
 # into a file so only this path travels through argv), and the CLI was not
 # exec'd, so it was not the pane's foreground process (fixed in f9c6883).
 # Re-verified directly against claude 2.1.263: a 42 KB brief containing quotes,

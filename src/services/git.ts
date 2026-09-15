@@ -101,16 +101,35 @@ export function parseGitWorkspaceStatus(output: string): GitWorkspaceStatus {
   };
 }
 
-export function parseWorktreeList(output: string): string[] {
-  const worktrees: string[] = [];
+/** One entry of `git worktree list --porcelain`. */
+export interface WorktreeEntry {
+  path: string;
+  /** Short branch name, or null for a detached or bare checkout. */
+  branch: string | null;
+  /** Its directory is gone; git keeps the entry until the next prune. */
+  prunable: boolean;
+}
+
+export function parseWorktreeEntries(output: string): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = [];
+  let current: WorktreeEntry | null = null;
 
   for (const line of output.split('\n')) {
     if (line.startsWith('worktree ')) {
-      worktrees.push(line.slice('worktree '.length).trim());
+      current = { path: line.slice('worktree '.length).trim(), branch: null, prunable: false };
+      entries.push(current);
+    } else if (current && line.startsWith('branch refs/heads/')) {
+      current.branch = line.slice('branch refs/heads/'.length).trim();
+    } else if (current && (line === 'prunable' || line.startsWith('prunable '))) {
+      current.prunable = true;
     }
   }
 
-  return worktrees;
+  return entries;
+}
+
+export function parseWorktreeList(output: string): string[] {
+  return parseWorktreeEntries(output).map((entry) => entry.path);
 }
 
 function gitArgv(repoPath: string, ...args: string[]): string[] {
@@ -401,6 +420,18 @@ export class GitService {
     return parseWorktreeList(
       await this.run(gitArgv(repoPath, 'worktree', 'list', '--porcelain'), repoPath),
     );
+  }
+
+  /**
+   * Where `branch` is already checked out in this repo — the main checkout or
+   * any linked worktree — or null. git refuses a second worktree for a branch
+   * that has one, so this is the checkout to use instead.
+   */
+  async findBranchCheckoutAsync(repoPath: string, branch: string): Promise<string | null> {
+    const entries = parseWorktreeEntries(
+      await this.run(gitArgv(repoPath, 'worktree', 'list', '--porcelain'), repoPath),
+    );
+    return entries.find((entry) => entry.branch === branch && !entry.prunable)?.path ?? null;
   }
 
   async getWorkspaceStatus(repoPath: string): Promise<GitWorkspaceStatus> {

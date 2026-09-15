@@ -214,12 +214,18 @@ describe('WorktreeService multi-branch cards', () => {
       .run(repo.id, repo.label, repo.path, repo.baseBranch);
   }
 
-  /** Records every worktree git was asked to create, without running git. */
-  function makeGit() {
+  /**
+   * Records every worktree git was asked to create, without running git.
+   * `checkedOut` maps a branch to the checkout git already has it on.
+   */
+  function makeGit(checkedOut: Record<string, string> = {}) {
     return {
       createWorktreeAsync: vi.fn(
         async (_repoPath: string, _worktreePath: string, _branch: string, _base: string) =>
           undefined,
+      ),
+      findBranchCheckoutAsync: vi.fn(
+        async (_repoPath: string, branch: string) => checkedOut[branch] ?? null,
       ),
     };
   }
@@ -346,5 +352,49 @@ describe('WorktreeService multi-branch cards', () => {
     expect(workspace.repoPath).toBe(repoA);
     expect(git.createWorktreeAsync).not.toHaveBeenCalled();
     expect(board.getTaskBranches(task.id)[0]?.worktreePath).toBeUndefined();
+  });
+
+  it('works in the checkout a branch is already on instead of failing the card', async () => {
+    // Arrange — the user has the second branch checked out in the main checkout.
+    // git refuses it a worktree, and that used to fail the whole open and drop
+    // the card into a plain shell with no agent.
+    const task = board.createTask({ title: 'Stacked work', repoId: 'repo-a' });
+    board.addTaskBranch({ taskId: task.id, repoId: 'repo-a', branchName: 'ab/stacked-top-0002' });
+    const git = makeGit({ 'ab/stacked-top-0002': repoA });
+    const service = new WorktreeService(db, board, git as never);
+
+    // Act
+    const workspace = await service.prepareTaskWorkspace(task.id);
+
+    // Assert — only the first branch gets a worktree; the second is mapped to
+    // where it really is.
+    expect(git.createWorktreeAsync.mock.calls.map((call) => call[2])).toEqual([task.branchName]);
+    const second = workspace.workspaces?.find((entry) => entry.branch === 'ab/stacked-top-0002');
+    expect(second?.worktreePath).toBe(repoA);
+  });
+
+  it('never records a borrowed checkout as the card worktree, so cleanup cannot remove it', async () => {
+    // Arrange — the borrowed branch is the active one, which is what the card's
+    // own worktree_path mirrors.
+    const task = board.createTask({ title: 'Stacked work', repoId: 'repo-a' });
+    const second = board.addTaskBranch({
+      taskId: task.id,
+      repoId: 'repo-a',
+      branchName: 'ab/stacked-top-0002',
+    });
+    board.setActiveTaskBranch(task.id, second.id);
+    const service = new WorktreeService(db, board, makeGit({ 'ab/stacked-top-0002': repoA }) as never);
+
+    // Act
+    const workspace = await service.prepareTaskWorkspace(task.id);
+
+    // Assert — the session opens there, and the bootstrap script is told not to
+    // run a checkout in it, but neither the card nor the branch records it:
+    // cleanup force-removes whatever is recorded.
+    expect(workspace.path).toBe(repoA);
+    expect(workspace.usedWorktree).toBe(true);
+    expect(board.getTask(task.id)?.worktreePath).toBeFalsy();
+    expect(board.getTaskBranches(task.id).find((branch) => branch.id === second.id)?.worktreePath)
+      .toBeUndefined();
   });
 });

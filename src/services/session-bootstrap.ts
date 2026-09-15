@@ -1,5 +1,5 @@
 import type { AgentCLI, AgentPermissionMode, TaskKind } from '../types/index.js';
-import { shellJoin } from './shell-quote.js';
+import { shellJoin, shellQuote } from './shell-quote.js';
 
 /**
  * One checkout the card owns, as handed to the agent.
@@ -14,7 +14,7 @@ export interface SessionWorkspaceEntry {
   path: string;
 }
 
-export interface SessionBootstrapCommandOptions {
+export interface SessionBootstrapEnvOptions {
   /**
    * The card this session belongs to, exported as `AGENTBOARD_TASK_ID` so a
    * `agentboard task create` run from inside the session can mark whatever it
@@ -37,7 +37,6 @@ export interface SessionBootstrapCommandOptions {
   usesWorktree?: boolean;
   cwd?: string;
   bootstrapNotice?: string;
-  sessionBootstrapScript: string;
   agentPermissionMode?: AgentPermissionMode;
   agentArgs?: Partial<Record<AgentCLI, string[]>>;
   /**
@@ -73,10 +72,6 @@ const BYPASS_PERMISSION_FLAGS: Partial<Record<AgentCLI, string[]>> = {
   claude: ['--dangerously-skip-permissions'],
 };
 
-function shellString(value: string): string {
-  return JSON.stringify(value);
-}
-
 const WORKSPACE_COLUMN_SEPARATOR = '\t';
 const WORKSPACE_ROW_SEPARATOR = '\n';
 
@@ -84,10 +79,9 @@ const WORKSPACE_ROW_SEPARATOR = '\n';
  * The card's checkouts as a single env var: three tab-separated columns per row,
  * one row per checkout.
  *
- * Deliberately has no escaping of its own. shellString is JSON.stringify, which
- * already turns these separators into `\t` and `\n` escape sequences that survive
- * the shell's double-quote parsing intact; the bootstrap script turns them back
- * into real separators with `printf %b` before splitting.
+ * Deliberately has no escaping of its own. The value is single-quoted in the
+ * settings file, which carries real tabs and newlines through `source` intact,
+ * and the bootstrap script splits on them directly.
  */
 function encodeWorkspaces(workspaces: readonly SessionWorkspaceEntry[]): string {
   return workspaces
@@ -117,7 +111,20 @@ export function resolveAgentArgs(
   return [...permissionArgs, ...nameArgs, ...(agentArgs[agentCli] ?? [])];
 }
 
-export function buildNewSessionBootstrapCommand({
+/**
+ * The session's settings, as a file for session-bootstrap.sh to source.
+ *
+ * These used to ride the command line typed into the pane. A pane's shell is
+ * usually still starting when that line arrives, so the terminal is in
+ * canonical mode and keeps at most 1024 bytes of one line (MAX_CANON on macOS)
+ * — everything past it, the Enter included, is dropped. A git error in the
+ * bootstrap notice, a long `--name` or a multi-branch workspace map was enough
+ * to cross it, and the card opened on a shell holding half a command.
+ *
+ * Every value is single-quoted, so a `$` or a backtick in a title or a git
+ * error is never expanded when the script sources the file.
+ */
+export function buildSessionBootstrapEnv({
   taskId,
   sessionName,
   taskKind = 'repo',
@@ -128,14 +135,13 @@ export function buildNewSessionBootstrapCommand({
   usesWorktree = false,
   cwd,
   bootstrapNotice,
-  sessionBootstrapScript,
   agentPermissionMode,
   agentArgs,
   workspaces = [],
   agentSessionId,
   initialPromptFile,
   resumeNoticeFile,
-}: SessionBootstrapCommandOptions): string {
+}: SessionBootstrapEnvOptions): string {
   const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs, sessionName);
   const envVars: Array<[string, string]> = [
     ['AGENTBOARD_TASK_ID', taskId ?? ''],
@@ -150,15 +156,21 @@ export function buildNewSessionBootstrapCommand({
     ['AGENTBOARD_AGENT_ARGS', shellJoin(resolvedAgentArgs)],
     ['AGENTBOARD_WORKSPACES', encodeWorkspaces(workspaces)],
     ['AGENTBOARD_AGENT_SESSION_ID', agentSessionId ?? ''],
-    // A path, never the brief itself: the whole command line is typed into the
-    // session's pane, and a long brief would push it past the ~4 KB the pane
-    // accepts, truncating the command mid-quote.
+    // A path, never the brief itself: only the script knows whether this open
+    // is a fresh start that should read it.
     ['AGENTBOARD_INITIAL_PROMPT_FILE', initialPromptFile ?? ''],
     ['AGENTBOARD_RESUME_PROMPT_FILE', resumeNoticeFile ?? ''],
   ];
 
-  return [
-    ...envVars.map(([key, value]) => `${key}=${shellString(value)}`),
-    shellString(sessionBootstrapScript),
-  ].join(' ');
+  return envVars.map(([key, value]) => `export ${key}=${shellQuote(value)}\n`).join('');
+}
+
+/**
+ * The line typed into the pane: the settings file's path and the script.
+ *
+ * Two paths and nothing else, so its length no longer depends on anything about
+ * the card — see {@link buildSessionBootstrapEnv}.
+ */
+export function buildSessionBootstrapCommand(envFile: string, sessionBootstrapScript: string): string {
+  return `AGENTBOARD_BOOTSTRAP_ENV_FILE=${shellQuote(envFile)} ${shellQuote(sessionBootstrapScript)}`;
 }

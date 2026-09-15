@@ -38,19 +38,32 @@ export function localBriefPath(taskId: string, slot: SessionSlot): string {
   return join(tmpdir(), 'agentboard', briefRelativePath(taskId, slot));
 }
 
+/**
+ * The session's settings — every `AGENTBOARD_*` value session-bootstrap.sh
+ * reads — which the script sources and then removes. See
+ * `buildSessionBootstrapEnv` for why they are not on the command line.
+ */
+export function bootstrapEnvRelativePath(taskId: string, slot: SessionSlot): string {
+  return `${BRIEF_DIRECTORY}/${taskId}-${slot}-env.sh`;
+}
+
 /** Where a local session reads its queued messages from. */
 export function localResumeNoticePath(taskId: string, slot: SessionSlot): string {
   return join(tmpdir(), 'agentboard', resumeNoticeRelativePath(taskId, slot));
 }
 
+/** Where a local session reads its settings from. */
+export function localBootstrapEnvPath(taskId: string, slot: SessionSlot): string {
+  return join(tmpdir(), 'agentboard', bootstrapEnvRelativePath(taskId, slot));
+}
+
 /**
  * Park the brief on disk and hand back its path.
  *
- * The bootstrap command is *typed into the session's pane*, and anything past
- * roughly 4 KB of it is dropped on the way in — which leaves the shell sitting
- * on an unterminated quote, waiting forever. A brief is free text with no
- * length ceiling, so it travels as a path rather than as a value, and the
- * command line stays the size it was before briefs existed.
+ * The bootstrap command is *typed into the session's pane*, and a shell that is
+ * still starting keeps only the first 1024 bytes of that line (MAX_CANON on
+ * macOS), dropping the rest and the Enter with it. A brief is free text with no
+ * length ceiling, so it travels as a path rather than as a value.
  *
  * Rewritten on every open rather than cleaned up: the card's next session wants
  * the same file, and the board already holds the same text.
@@ -66,6 +79,11 @@ export function writeLocalResumeNotice(
   notice: string,
 ): string {
   return writeBriefFile(localResumeNoticePath(taskId, slot), notice);
+}
+
+/** {@link writeLocalBrief}, for the session's settings file. */
+export function writeLocalBootstrapEnv(taskId: string, slot: SessionSlot, env: string): string {
+  return writeBriefFile(localBootstrapEnvPath(taskId, slot), env);
 }
 
 function writeBriefFile(path: string, contents: string): string {

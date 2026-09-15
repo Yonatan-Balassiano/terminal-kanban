@@ -13,8 +13,13 @@ import type {
   SessionSlot,
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
-import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
-import { BRIEF_FILE_MODE, briefRelativePath, resumeNoticeRelativePath } from '../session-brief.js';
+import { buildSessionBootstrapCommand, buildSessionBootstrapEnv } from '../session-bootstrap.js';
+import {
+  BRIEF_FILE_MODE,
+  bootstrapEnvRelativePath,
+  briefRelativePath,
+  resumeNoticeRelativePath,
+} from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 import { shellJoin } from '../shell-quote.js';
 import { buildControlPath, TransportUnreachableError, type SshTransport } from '../transport/index.js';
@@ -347,28 +352,35 @@ export class SshTmuxBackend implements SessionBackend {
       const remoteResumeNoticeFile = opts.resumeNotice
         ? await this.ensureRemoteResumeNotice(opts.taskId, opts.slot, opts.resumeNotice)
         : undefined;
-      const bootstrapCommand = buildNewSessionBootstrapCommand({
-        taskId: opts.taskId,
-        sessionName: opts.sessionName,
-        taskKind: opts.taskKind,
-        repoPath: opts.repoPath,
-        branch: opts.branch,
-        baseBranch: opts.baseBranch,
-        agentCli: opts.agentCli,
-        usesWorktree: opts.usesWorktree,
-        cwd: opts.cwd,
-        bootstrapNotice: opts.bootstrapNotice,
-        sessionBootstrapScript: remoteBootstrapScript,
-        agentPermissionMode: opts.agentPermissionMode,
-        agentArgs: opts.agentArgs,
-        agentSessionId: opts.agentSessionId,
-        // The remote session-bootstrap.sh reads this file and hands its
-        // contents to the agent CLI as argv — see TmuxBackend for why the
-        // pane is no longer involved in getting a brief to an agent.
-        initialPromptFile: remoteBriefFile,
-        resumeNoticeFile: remoteResumeNoticeFile,
-      });
-      await this.sendInput(backendSessionId, `${bootstrapCommand}\r`);
+      // Settings travel as a remote file too, for the same 1024-byte reason as
+      // TmuxBackend: only its path is typed into the remote pane.
+      const remoteEnvFile = await this.ensureRemoteFile(
+        bootstrapEnvRelativePath(opts.taskId, opts.slot),
+        buildSessionBootstrapEnv({
+          taskId: opts.taskId,
+          sessionName: opts.sessionName,
+          taskKind: opts.taskKind,
+          repoPath: opts.repoPath,
+          branch: opts.branch,
+          baseBranch: opts.baseBranch,
+          agentCli: opts.agentCli,
+          usesWorktree: opts.usesWorktree,
+          cwd: opts.cwd,
+          bootstrapNotice: opts.bootstrapNotice,
+          agentPermissionMode: opts.agentPermissionMode,
+          agentArgs: opts.agentArgs,
+          agentSessionId: opts.agentSessionId,
+          // The remote session-bootstrap.sh reads this file and hands its
+          // contents to the agent CLI as argv — see TmuxBackend for why the
+          // pane is no longer involved in getting a brief to an agent.
+          initialPromptFile: remoteBriefFile,
+          resumeNoticeFile: remoteResumeNoticeFile,
+        }),
+      );
+      await this.sendInput(
+        backendSessionId,
+        `${buildSessionBootstrapCommand(remoteEnvFile, remoteBootstrapScript)}\r`,
+      );
       this.rememberInspect(backendSessionId, { backendSessionId, status: 'active' });
       // The brief rides the bootstrap command's own argv from here — see
       // session-bootstrap.sh, which runs on the remote host. Nothing is pasted,
