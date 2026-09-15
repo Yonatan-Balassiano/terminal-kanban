@@ -697,6 +697,70 @@ describe('SshTmuxBackend.create initial brief', () => {
     expect(remoteCalls.filter((args) => args[0] === 'load-buffer')).toHaveLength(0);
     expect(remoteCalls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(0);
   });
+
+  it('writes its settings to the remote host and types only their path', async () => {
+    // Arrange — a worktree-failure notice alone used to push the typed line past
+    // the 1024 bytes a starting shell keeps, cutting off the Enter with it.
+    const remoteCalls: string[][] = [];
+    const writeFileIfChanged = vi.fn(
+      async (_path: string, _contents: string, _mode?: number) => true,
+    );
+    const backend = new SshTmuxBackend({
+      transport: {
+        host: 'test.host',
+        id: 'ssh:test.host',
+        isRemote: true,
+        exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+        exists: vi.fn(async () => true),
+        mkdirp: vi.fn(async () => undefined),
+        removeDir: vi.fn(async () => undefined),
+        writeFileIfChanged,
+        reachability: vi.fn(async () => 'ok' as const),
+      } as never,
+      host: 'test.host',
+      remoteRunner: async (args) => {
+        remoteCalls.push(args);
+        if (args[0] === 'has-session') {
+          throw new Error('missing');
+        }
+        return ok();
+      },
+      localRunner: async (args) => {
+        if (args[0] === 'has-session') {
+          throw new Error('missing');
+        }
+        return ok();
+      },
+      idGenerator: () => 'session-id',
+      now: () => 1_000,
+      paneIdleOptions: {
+        timeoutMs: 1000,
+        intervalMs: 0,
+        stableChecks: 1,
+        postPasteDelayMs: 0,
+        maxSubmitRetries: 0,
+        submitRetryIntervalMs: 0,
+        trustPromptTimeoutMs: 0,
+      },
+    });
+    const notice = `Git command failed: git worktree add\n${'fatal: already used\n'.repeat(100)}`;
+
+    // Act
+    await backend.create({ ...createOpts(), bootstrapNotice: notice });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert
+    const settingsPath = '/home/coder/.agentboard/briefs/1234abcd-primary-env.sh';
+    const settings = writeFileIfChanged.mock.calls.find(([path]) => path === settingsPath);
+    expect(settings?.[1]).toContain(notice);
+    const typed = remoteCalls
+      .filter((args) => args[0] === 'send-keys' && args[3] === '-l')
+      .map((args) => args[4])
+      .join('');
+    expect(typed).toContain(`AGENTBOARD_BOOTSTRAP_ENV_FILE=${settingsPath}`);
+    expect(typed).not.toContain('Git command failed');
+    expect(Buffer.byteLength(typed)).toBeLessThan(1024);
+  });
 });
 
 describe('SshTmuxBackend auto-trust', () => {

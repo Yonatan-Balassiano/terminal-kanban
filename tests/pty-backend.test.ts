@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { PtyBackend } from '../src/services/session-backends/pty.js';
-import { localBriefPath } from '../src/services/session-brief.js';
+import { localBootstrapEnvPath, localBriefPath } from '../src/services/session-brief.js';
 import type { CreateSessionOpts } from '../src/types/index.js';
 
 function baseOpts(overrides: Partial<CreateSessionOpts> = {}): CreateSessionOpts {
@@ -45,9 +45,27 @@ describe('PtyBackend initial brief', () => {
 
     try {
       // Assert — the file the bootstrap script will read holds the brief
-      // verbatim. Its contents never travel through the command line, which is
-      // what used to truncate briefs past ~4 KB.
+      // verbatim. Its contents never travel through the command line, which a
+      // starting shell cuts at 1024 bytes.
       expect(readFileSync(localBriefPath('abc12345', 'primary'), 'utf8')).toBe(brief);
+    } finally {
+      await backend.terminate(session.backendSessionId);
+    }
+  });
+
+  it('parks its settings in a file rather than on the command line', async () => {
+    // Arrange — a worktree-failure notice alone used to push the line past 1024 bytes.
+    const notice = `Git command failed: git worktree add\n${'fatal: already used\n'.repeat(100)}`;
+    const backend = new PtyBackend();
+
+    // Act
+    const session = await backend.create(baseOpts({ bootstrapNotice: notice }));
+
+    try {
+      // Assert
+      const settings = readFileSync(localBootstrapEnvPath('abc12345', 'primary'), 'utf8');
+      expect(settings).toContain('export AGENTBOARD_TASK_ID=abc12345\n');
+      expect(settings).toContain(notice);
     } finally {
       await backend.terminate(session.backendSessionId);
     }

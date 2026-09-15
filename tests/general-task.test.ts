@@ -10,7 +10,7 @@ import { WorktreeService } from '../src/services/worktree.js';
 import { ViewService } from '../src/services/view.js';
 import { SyncService } from '../src/services/sync.js';
 import { SessionManager } from '../src/services/session-manager.js';
-import { buildNewSessionBootstrapCommand } from '../src/services/session-bootstrap.js';
+import { buildSessionBootstrapEnv } from '../src/services/session-bootstrap.js';
 import type { CreateSessionOpts } from '../src/types/index.js';
 
 describe('general tasks', () => {
@@ -159,17 +159,16 @@ describe('general tasks', () => {
 
   describe('session bootstrap', () => {
     it('marks the session as general so the script skips checkout', () => {
-      const command = buildNewSessionBootstrapCommand({
+      const settings = buildSessionBootstrapEnv({
         taskKind: 'general',
         repoPath: '',
         branch: '',
         agentCli: 'claude',
         cwd: '/Users/someone',
-        sessionBootstrapScript: '/scripts/session-bootstrap.sh',
       });
 
-      expect(command).toContain('AGENTBOARD_TASK_KIND="general"');
-      expect(command).toContain('AGENTBOARD_SESSION_CWD="/Users/someone"');
+      expect(settings).toContain('export AGENTBOARD_TASK_KIND=general\n');
+      expect(settings).toContain('export AGENTBOARD_SESSION_CWD=/Users/someone\n');
     });
 
     it('runs the agent without any git command for a general session', () => {

@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
-  buildNewSessionBootstrapCommand,
+  buildSessionBootstrapEnv,
   resolveAgentArgs,
 } from '../src/services/session-bootstrap.js';
 
@@ -58,30 +58,28 @@ describe('resolveAgentArgs', () => {
   });
 });
 
-describe('bootstrap command', () => {
+describe('bootstrap settings', () => {
   it('carries the resolved arguments as a shell-quoted env var', () => {
     // Act
-    const command = buildNewSessionBootstrapCommand({
+    const settings = buildSessionBootstrapEnv({
       repoPath: '/repo',
       branch: 'ab/x-1',
       agentCli: 'claude',
-      sessionBootstrapScript: '/s.sh',
       agentPermissionMode: 'bypass',
     });
 
     // Assert
-    expect(command).toContain('AGENTBOARD_AGENT_ARGS="--dangerously-skip-permissions"');
+    expect(settings).toContain('export AGENTBOARD_AGENT_ARGS=--dangerously-skip-permissions\n');
   });
 
   it('passes an empty argument list in the default mode', () => {
-    const command = buildNewSessionBootstrapCommand({
+    const settings = buildSessionBootstrapEnv({
       repoPath: '/repo',
       branch: 'ab/x-1',
       agentCli: 'claude',
-      sessionBootstrapScript: '/s.sh',
     });
 
-    expect(command).toContain('AGENTBOARD_AGENT_ARGS=""');
+    expect(settings).toContain("export AGENTBOARD_AGENT_ARGS=''\n");
   });
 });
 
@@ -99,6 +97,13 @@ describe('session-bootstrap.sh argument handling', () => {
         env: {
           ...process.env,
           PATH: `${dir}:${process.env['PATH']}`,
+          // Blanked, not left out: run from inside an AgentBoard card, the test
+          // process inherits that card's own values, and a session id adds
+          // --session-id to the argv this test counts.
+          AGENTBOARD_AGENT_SESSION_ID: '',
+          AGENTBOARD_INITIAL_PROMPT_FILE: '',
+          AGENTBOARD_RESUME_PROMPT_FILE: '',
+          AGENTBOARD_WORKSPACES: '',
           AGENTBOARD_REPO_PATH: dir,
           AGENTBOARD_SESSION_CWD: dir,
           AGENTBOARD_TASK_BRANCH: 'ab/test-1',

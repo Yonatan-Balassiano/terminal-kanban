@@ -381,20 +381,27 @@ describe('TmuxBackend brief handling', () => {
     };
   }
 
+  /** The settings file the typed command pointed the bootstrap script at. */
+  function settingsTyped(typed: string): string {
+    const match = typed.match(/AGENTBOARD_BOOTSTRAP_ENV_FILE=(?:'([^']*)'|(\S+))/);
+    expect(match).not.toBeNull();
+    return readFileSync(match![1] ?? match![2]!, 'utf8');
+  }
+
   it('never types the brief into the pane, however long it is', async () => {
-    // Arrange — a brief far past the roughly 4 KB a pane accepts. Sending it
-    // inline truncates the command mid-quote, and the shell then waits forever
-    // for the closing quote instead of ever launching the agent.
+    // Arrange — a brief far past the 1024 bytes a starting shell keeps of a
+    // typed line. Anything past that is dropped, Enter included, and the pane
+    // sits on half a command instead of ever launching the agent.
     const brief = `Rework the variant matcher.\n\n${'context line\n'.repeat(600)}`;
     expect(brief.length).toBeGreaterThan(4096);
 
     // Act
     const { typed, longestLiteral } = await createWithBrief(brief);
 
-    // Assert — the pane sees a path, and a command line nowhere near the limit.
+    // Assert — the pane sees a path, and a command line under the limit.
     expect(typed).not.toContain('Rework the variant matcher');
-    expect(typed).toContain('AGENTBOARD_INITIAL_PROMPT_FILE=');
-    expect(longestLiteral).toBeLessThan(2048);
+    expect(typed).toContain('AGENTBOARD_BOOTSTRAP_ENV_FILE=');
+    expect(longestLiteral).toBeLessThan(1024);
   });
 
   it('parks the brief where the bootstrap script will find it', async () => {
@@ -404,10 +411,12 @@ describe('TmuxBackend brief handling', () => {
     // Act
     const { typed } = await createWithBrief(brief);
 
-    // Assert — the path it named holds exactly the brief.
-    const match = typed.match(/AGENTBOARD_INITIAL_PROMPT_FILE="([^"]+)"/);
+    // Assert — the path the settings name holds exactly the brief.
+    const match = settingsTyped(typed).match(
+      /^export AGENTBOARD_INITIAL_PROMPT_FILE=(?:'([^']*)'|(\S+))$/m,
+    );
     expect(match).not.toBeNull();
-    expect(readFileSync(match![1]!, 'utf8')).toBe(brief);
+    expect(readFileSync(match![1] ?? match![2]!, 'utf8')).toBe(brief);
   });
 
   it('names no brief file for a card that has none', async () => {
@@ -415,7 +424,7 @@ describe('TmuxBackend brief handling', () => {
     const { typed, calls } = await createWithBrief('');
 
     // Assert
-    expect(typed).toContain('AGENTBOARD_INITIAL_PROMPT_FILE=""');
+    expect(settingsTyped(typed)).toContain("export AGENTBOARD_INITIAL_PROMPT_FILE=''\n");
     // Nothing to deliver, so no pane-idle poll or paste ever runs.
     expect(calls.some((args) => args[0] === 'capture-pane')).toBe(false);
   });

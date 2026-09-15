@@ -9,8 +9,12 @@ import type {
   SessionSlot,
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
-import { buildNewSessionBootstrapCommand } from '../session-bootstrap.js';
-import { writeLocalBrief, writeLocalResumeNotice } from '../session-brief.js';
+import { buildSessionBootstrapCommand, buildSessionBootstrapEnv } from '../session-bootstrap.js';
+import {
+  writeLocalBootstrapEnv,
+  writeLocalBrief,
+  writeLocalResumeNotice,
+} from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
 
 const require = createRequire(import.meta.url);
@@ -65,28 +69,34 @@ export class PtyBackend implements SessionBackend {
     });
 
     // Bootstrap on master, pull, then switch to the task branch.
-    const checkoutCmd = `${buildNewSessionBootstrapCommand({
-      taskId: opts.taskId,
-      sessionName: opts.sessionName,
-      taskKind: opts.taskKind,
-      repoPath: opts.repoPath,
-      branch: opts.branch,
-      baseBranch: opts.baseBranch,
-      agentCli: opts.agentCli,
-      usesWorktree: opts.usesWorktree,
-      cwd: opts.cwd,
-      bootstrapNotice: opts.bootstrapNotice,
-      sessionBootstrapScript: opts.sessionBootstrapScript,
-      agentPermissionMode: opts.agentPermissionMode,
-      agentArgs: opts.agentArgs,
-      agentSessionId: opts.agentSessionId,
-      initialPromptFile: opts.initialPrompt
-        ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
-        : undefined,
-      resumeNoticeFile: opts.resumeNotice
-        ? writeLocalResumeNotice(opts.taskId, opts.slot, opts.resumeNotice)
-        : undefined,
-    })}\n`;
+    // Written to this pty while its shell is still starting, so the same
+    // 1024-byte line limit applies as for tmux: settings go in a file.
+    const envFile = writeLocalBootstrapEnv(
+      opts.taskId,
+      opts.slot,
+      buildSessionBootstrapEnv({
+        taskId: opts.taskId,
+        sessionName: opts.sessionName,
+        taskKind: opts.taskKind,
+        repoPath: opts.repoPath,
+        branch: opts.branch,
+        baseBranch: opts.baseBranch,
+        agentCli: opts.agentCli,
+        usesWorktree: opts.usesWorktree,
+        cwd: opts.cwd,
+        bootstrapNotice: opts.bootstrapNotice,
+        agentPermissionMode: opts.agentPermissionMode,
+        agentArgs: opts.agentArgs,
+        agentSessionId: opts.agentSessionId,
+        initialPromptFile: opts.initialPrompt
+          ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
+          : undefined,
+        resumeNoticeFile: opts.resumeNotice
+          ? writeLocalResumeNotice(opts.taskId, opts.slot, opts.resumeNotice)
+          : undefined,
+      }),
+    );
+    const checkoutCmd = `${buildSessionBootstrapCommand(envFile, opts.sessionBootstrapScript)}\n`;
 
     // No headless seeding any more. It existed only because a pty had no way
     // to hand its agent an opening brief — this backend cannot paste into its
