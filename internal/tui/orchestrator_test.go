@@ -61,11 +61,19 @@ func TestRenderTaskCardPaintsAnOrchestratorsBackground(t *testing.T) {
 	// each one, or only the padding ends up tinted.
 	for _, line := range strings.Split(orchestrator, "\n") {
 		for _, segment := range strings.Split(line, "\x1b[0m")[1:] {
-			if segment == "" || ansiPattern.ReplaceAllString(segment, "") == "" {
+			visible := ansiPattern.ReplaceAllString(segment, "")
+			if visible == "" || isBorderOnly(visible) {
 				continue
 			}
 			if !strings.Contains(segment, background) {
 				t.Fatalf("text after a reset lost the background: line %q", line)
+			}
+		}
+		// Only the inside of the card is filled. A border glyph sits mid-cell,
+		// so painting its cell spills colour outside the card's outline.
+		for _, segment := range strings.Split(line, "\x1b[0m") {
+			if isBorderOnly(ansiPattern.ReplaceAllString(segment, "")) && strings.Contains(segment, background) {
+				t.Fatalf("border is painted with the card's background: line %q", line)
 			}
 		}
 	}
@@ -210,4 +218,9 @@ func relativeLuminance(hex string) float64 {
 		luminance += weight * channel
 	}
 	return luminance
+}
+
+// isBorderOnly reports whether text is made only of card border glyphs.
+func isBorderOnly(text string) bool {
+	return text != "" && strings.Trim(text, "─│╭╮╰╯═║╔╗╚╝") == ""
 }

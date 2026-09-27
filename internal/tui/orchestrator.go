@@ -99,8 +99,8 @@ func renderTaskTitleLines(m *Model, task TaskRecord, titleLines []string, isActi
 	return rendered
 }
 
-// taskCardFrame draws the border around a card's rendered lines, filling an
-// orchestrator's card with its own Solid colour.
+// taskCardFrame draws the border around a card's rendered lines, filling the
+// inside of an orchestrator's card with its own Solid colour.
 func taskCardFrame(m *Model, task TaskRecord, border lipgloss.Border, borderColor string, width int, lines []string) string {
 	style := lipgloss.NewStyle().
 		Width(width).
@@ -111,10 +111,10 @@ func taskCardFrame(m *Model, task TaskRecord, border lipgloss.Border, borderColo
 		return style.Render(strings.Join(lines, "\n"))
 	}
 	colour, _ := m.orchestratorColourFor(task)
-	background := lipgloss.Color(colour.Solid)
+	// Background only, never BorderBackground: a border glyph is drawn in the
+	// middle of its cell, so filling that cell puts colour outside the outline.
 	return style.
-		Background(background).
-		BorderBackground(background).
+		Background(lipgloss.Color(colour.Solid)).
 		Render(reapplyBackgroundAfterResets(strings.Join(lines, "\n"), colour.Solid))
 }
 
