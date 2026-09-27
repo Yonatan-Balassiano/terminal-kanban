@@ -8,11 +8,13 @@ import (
 )
 
 // orchestratorColour is one orchestrator's identity on the board: Solid fills
-// the orchestrator's own card, and Tint — a dimmer shade of the same hue —
-// sits behind the title of every card below it, so a family reads as one.
+// the orchestrator's own card, Border — a bright shade of the same hue — draws
+// its outline, and Tint — a dimmer shade — sits behind the title of every card
+// below it, so a family reads as one.
 type orchestratorColour struct {
-	Solid string
-	Tint  string
+	Solid  string
+	Border string
+	Tint   string
 }
 
 // orchestratorPalette is handed out in orchestrator creation order. The
@@ -21,12 +23,12 @@ type orchestratorColour struct {
 // rounds a near-black shade to black. TestOrchestratorPaletteIsVisible pins
 // the contrast each one needs, both against the board and under uiChrome.Text.
 var orchestratorPalette = []orchestratorColour{
-	{Solid: "#5b3fc4", Tint: "#4a35a0"}, // indigo
-	{Solid: "#0f7a6e", Tint: "#0b5049"}, // teal
-	{Solid: "#a15c07", Tint: "#6b3d05"}, // amber
-	{Solid: "#b0245f", Tint: "#8a1d4b"}, // rose
-	{Solid: "#1d5fd1", Tint: "#143f8a"}, // blue
-	{Solid: "#3d7a1a", Tint: "#285012"}, // green
+	{Solid: "#5b3fc4", Border: "#a78bfa", Tint: "#4a35a0"}, // indigo
+	{Solid: "#0f7a6e", Border: "#2dd4bf", Tint: "#0b5049"}, // teal
+	{Solid: "#a15c07", Border: "#fbbf24", Tint: "#6b3d05"}, // amber
+	{Solid: "#b0245f", Border: "#f472b6", Tint: "#8a1d4b"}, // rose
+	{Solid: "#1d5fd1", Border: "#60a5fa", Tint: "#143f8a"}, // blue
+	{Solid: "#3d7a1a", Border: "#a3e635", Tint: "#285012"}, // green
 }
 
 // maxParentDepth bounds the walk up a card's parents, so a corrupt parent
@@ -99,8 +101,11 @@ func renderTaskTitleLines(m *Model, task TaskRecord, titleLines []string, isActi
 	return rendered
 }
 
-// taskCardFrame draws the border around a card's rendered lines, filling the
-// inside of an orchestrator's card with its own Solid colour.
+// taskCardFrame draws the border around a card's rendered lines. An
+// orchestrator's card is filled with its own Solid colour and outlined in its
+// Border colour, which takes precedence over the state colour the border
+// would otherwise carry — that state still shows in the card's header and
+// badges, and selection still shows as the double border.
 func taskCardFrame(m *Model, task TaskRecord, border lipgloss.Border, borderColor string, width int, lines []string) string {
 	style := lipgloss.NewStyle().
 		Width(width).
@@ -111,6 +116,7 @@ func taskCardFrame(m *Model, task TaskRecord, border lipgloss.Border, borderColo
 		return style.Render(strings.Join(lines, "\n"))
 	}
 	colour, _ := m.orchestratorColourFor(task)
+	style = style.BorderForeground(lipgloss.Color(colour.Border))
 	// Background only, never BorderBackground: a border glyph is drawn in the
 	// middle of its cell, so filling that cell puts colour outside the outline.
 	return style.

@@ -180,7 +180,9 @@ func TestOrchestratorPaletteIsVisible(t *testing.T) {
 	const (
 		minSolidAgainstBoard = 2.4
 		minTintAgainstBoard  = 1.7
-		minTextContrast      = 3.5
+		// A one-cell line needs far more contrast than a filled area to be seen.
+		minBorderAgainstBoard = 5.0
+		minTextContrast       = 3.5
 	)
 	for index, colour := range orchestratorPalette {
 		checks := []struct {
@@ -190,6 +192,7 @@ func TestOrchestratorPaletteIsVisible(t *testing.T) {
 		}{
 			{"solid vs board", colour.Solid, uiChrome.Panel, minSolidAgainstBoard},
 			{"tint vs board", colour.Tint, uiChrome.Panel, minTintAgainstBoard},
+			{"border vs board", colour.Border, uiChrome.Panel, minBorderAgainstBoard},
 			{"text on solid", uiChrome.Text, colour.Solid, minTextContrast},
 			{"text on tint", uiChrome.Text, colour.Tint, minTextContrast},
 		}
@@ -231,4 +234,26 @@ func lastVisibleSegment(segments []string) string {
 		}
 	}
 	return ""
+}
+
+// The outline carries the orchestrator's colour too, so its card reads as that
+// colour even from the edge of the column — and it overrides the state colour
+// the border would otherwise show (here, a failed CI run's red).
+func TestOrchestratorBorderTakesItsColour(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(previous)
+
+	lead := TaskRecord{ID: "lead", Title: "Lead", IsOrchestrator: true, CIState: "failed", UpdatedAt: 1}
+	model := &Model{tasks: []TaskRecord{lead}}
+	want := termenv.TrueColor.Color(orchestratorPalette[0].Border).Sequence(false)
+
+	card := renderTaskCard(model, lead, false, false, nil, "web5-poc")
+
+	for _, line := range strings.Split(card, "\n") {
+		outline := strings.Split(line, "\x1b[0m")[0]
+		if !strings.Contains(outline, want) {
+			t.Fatalf("orchestrator outline = %q, want border colour %q", outline, want)
+		}
+	}
 }
