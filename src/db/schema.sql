@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- The child task whose PR just opened, so this card can flag "review this
   -- subtask's PR" until acknowledged. NULL when there is nothing to review.
   child_pr_alert_task_id TEXT,
+  -- Marks the card that coordinates other cards (typically its own subtasks).
+  -- Purely presentational: the TUI pins it to the top of its column and gives
+  -- it a distinct background. Set via `agentboard task orchestrator`.
+  is_orchestrator INTEGER NOT NULL DEFAULT 0,
   -- The agent CLI's own --name, so this card's session is addressable by a
   -- readable name (SendMessage/ListAgents) rather than only its task id.
   -- Assigned once at creation, same as branch_name; carries the parent's own

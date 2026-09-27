@@ -145,7 +145,10 @@ type TaskRecord struct {
 	// Set when this card was spun off from another one as its subtask.
 	ParentTaskID string `json:"parentTaskId"`
 	// The child task whose PR is waiting on this card to review, if any.
-	ChildPRAlertTaskID        string           `json:"childPrAlertTaskId"`
+	ChildPRAlertTaskID string `json:"childPrAlertTaskId"`
+	// Set on a card that coordinates other cards: pinned to the top of its
+	// column and painted with orchestratorCardBackground.
+	IsOrchestrator            bool             `json:"isOrchestrator"`
 	RepoID                    string           `json:"repoId"`
 	Location                  string           `json:"location"`
 	AgentCLI                  AgentCLI         `json:"agentCli"`

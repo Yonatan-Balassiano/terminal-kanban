@@ -112,6 +112,7 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     kind: (row['kind'] as TaskKind | null) ?? 'repo',
     parentTaskId: (row['parent_task_id'] as string | null) ?? undefined,
     childPrAlertTaskId: (row['child_pr_alert_task_id'] as string | null) ?? undefined,
+    isOrchestrator: row['is_orchestrator'] === 1 || row['is_orchestrator'] === true,
     sessionName: (row['session_name'] as string | null) ?? undefined,
     repoId: (row['repo_id'] as string | null) ?? undefined,
     agentCli: (row['agent_cli'] as 'claude' | 'codex' | null) ?? 'claude',
@@ -855,6 +856,16 @@ export class BoardService {
          WHERE id = ?`,
       )
       .run(childTaskId, now, parentTaskId);
+    return result.changes > 0;
+  }
+
+  /** Marks or unmarks `taskId`'s card as an orchestrator. False if no such card. */
+  setTaskOrchestrator(taskId: string, orchestrator: boolean): boolean {
+    const result = this.db
+      .prepare<[number, number, string]>(
+        'UPDATE tasks SET is_orchestrator = ?, updated_at = ? WHERE id = ?',
+      )
+      .run(orchestrator ? 1 : 0, Date.now(), taskId);
     return result.changes > 0;
   }
 

@@ -1201,6 +1201,53 @@ export function buildCli(): Command {
     });
 
   task
+    .command('orchestrator [task]')
+    .description(
+      "Mark a card as an orchestrator — pinned to the top of its column with a distinct background. Defaults to the calling session's own card",
+    )
+    .option('--off', 'Unmark the card instead')
+    .action(async (taskArg: string | undefined, opts: { off?: boolean }) => {
+      try {
+        // Same two-path self-detection `task create` uses for subtask linking,
+        // so an agent can mark its own card without knowing its id.
+        const taskId =
+          taskArg ??
+          (process.env['AGENTBOARD_TASK_ID'] || undefined) ??
+          findParentTaskIdFromWorktree(process.cwd());
+        if (!taskId) {
+          throw new Error(
+            'No task id given, and this is not running inside a card\'s session. Pass the card id explicitly.',
+          );
+        }
+
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          const task = board.tasks.find((t) => t.id === taskId);
+          if (!task) {
+            throw new Error(`Unknown task "${taskId}". No card with that id exists.`);
+          }
+
+          const orchestrator = !opts.off;
+          await rpc.call('setTaskOrchestrator', { taskId, orchestrator });
+          console.log(
+            orchestrator
+              ? `Marked ${taskId} (${task.title}) as an orchestrator.`
+              : `Unmarked ${taskId} (${task.title}) as an orchestrator.`,
+          );
+        } finally {
+          rpc.disconnect();
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  task
     .command('delete <task>')
     .description(
       "Delete a card — terminates its session(s) and removes its worktree(s), archiving any uncommitted work first",

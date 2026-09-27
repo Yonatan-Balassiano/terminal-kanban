@@ -33,6 +33,7 @@ import type {
   InspectSessionParams,
   AcknowledgeSessionAttentionParams,
   AcknowledgeChildPrAlertParams,
+  SetTaskOrchestratorParams,
   OpenSessionParams,
   ReconnectSessionParams,
   TeleportTaskParams,
@@ -637,6 +638,18 @@ export async function dispatch(
             payload: services.view.getBoardSnapshot(),
           });
         }
+        return { id: req.id, result: null };
+      }
+
+      case 'setTaskOrchestrator': {
+        const params = p as unknown as SetTaskOrchestratorParams;
+        if (!services.board.setTaskOrchestrator(params.taskId, params.orchestrator === true)) {
+          throw new Error(`Unknown task "${params.taskId}"`);
+        }
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
         return { id: req.id, result: null };
       }
 
