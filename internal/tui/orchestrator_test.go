@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -158,4 +160,54 @@ func taskByID(m *Model, id string) TaskRecord {
 		}
 	}
 	return TaskRecord{}
+}
+
+// The first palette was dark shades a step or two above the board's own
+// background, and on a dark terminal they could not be seen at all. Every
+// colour has to stand off the board, and still carry the card's text.
+func TestOrchestratorPaletteIsVisible(t *testing.T) {
+	const (
+		minSolidAgainstBoard = 2.4
+		minTintAgainstBoard  = 1.7
+		minTextContrast      = 3.5
+	)
+	for index, colour := range orchestratorPalette {
+		checks := []struct {
+			name     string
+			a, b     string
+			minRatio float64
+		}{
+			{"solid vs board", colour.Solid, uiChrome.Panel, minSolidAgainstBoard},
+			{"tint vs board", colour.Tint, uiChrome.Panel, minTintAgainstBoard},
+			{"text on solid", uiChrome.Text, colour.Solid, minTextContrast},
+			{"text on tint", uiChrome.Text, colour.Tint, minTextContrast},
+		}
+		for _, check := range checks {
+			if got := contrastRatio(check.a, check.b); got < check.minRatio {
+				t.Errorf("palette[%d] %s = %.2f, want >= %.1f", index, check.name, got, check.minRatio)
+			}
+		}
+	}
+}
+
+// contrastRatio is the WCAG contrast ratio between two #rrggbb colours.
+func contrastRatio(a, b string) float64 {
+	la, lb := relativeLuminance(a), relativeLuminance(b)
+	return (math.Max(la, lb) + 0.05) / (math.Min(la, lb) + 0.05)
+}
+
+func relativeLuminance(hex string) float64 {
+	weights := []float64{0.2126, 0.7152, 0.0722}
+	luminance := 0.0
+	for index, weight := range weights {
+		value, _ := strconv.ParseUint(hex[1+2*index:3+2*index], 16, 8)
+		channel := float64(value) / 255
+		if channel <= 0.03928 {
+			channel /= 12.92
+		} else {
+			channel = math.Pow((channel+0.055)/1.055, 2.4)
+		}
+		luminance += weight * channel
+	}
+	return luminance
 }

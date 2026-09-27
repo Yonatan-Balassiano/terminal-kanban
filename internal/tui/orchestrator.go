@@ -15,15 +15,18 @@ type orchestratorColour struct {
 	Tint  string
 }
 
-// orchestratorPalette is handed out in orchestrator creation order. Every
-// Solid is dark enough to keep uiChrome.Text readable on top of it.
+// orchestratorPalette is handed out in orchestrator creation order. The
+// colours are deliberately saturated mid-tones: a dark card background next
+// to a dark board all but vanishes, and a terminal limited to 256 colours
+// rounds a near-black shade to black. TestOrchestratorPaletteIsVisible pins
+// the contrast each one needs, both against the board and under uiChrome.Text.
 var orchestratorPalette = []orchestratorColour{
-	{Solid: "#3b2a66", Tint: "#271d42"}, // indigo
-	{Solid: "#0f4a42", Tint: "#0c302c"}, // teal
-	{Solid: "#5a3d0a", Tint: "#3a2808"}, // amber
-	{Solid: "#5c2140", Tint: "#3b162a"}, // rose
-	{Solid: "#16406e", Tint: "#102a47"}, // blue
-	{Solid: "#2b4f1c", Tint: "#1c3313"}, // green
+	{Solid: "#5b3fc4", Tint: "#4a35a0"}, // indigo
+	{Solid: "#0f7a6e", Tint: "#0b5049"}, // teal
+	{Solid: "#a15c07", Tint: "#6b3d05"}, // amber
+	{Solid: "#b0245f", Tint: "#8a1d4b"}, // rose
+	{Solid: "#1d5fd1", Tint: "#143f8a"}, // blue
+	{Solid: "#3d7a1a", Tint: "#285012"}, // green
 }
 
 // maxParentDepth bounds the walk up a card's parents, so a corrupt parent
