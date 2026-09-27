@@ -2355,8 +2355,14 @@ func (m *Model) tasksByTrack() map[string][]TaskRecord {
 		tasksByTrack[task.TrackID] = append(tasksByTrack[task.TrackID], task)
 	}
 	for trackID := range tasksByTrack {
-		sort.Slice(tasksByTrack[trackID], func(i, j int) bool {
-			return tasksByTrack[trackID][i].SortKey < tasksByTrack[trackID][j].SortKey
+		tasks := tasksByTrack[trackID]
+		// Orchestrators first, so the card coordinating the others is always
+		// the first one you see; sort key orders each group as before.
+		sort.Slice(tasks, func(i, j int) bool {
+			if tasks[i].IsOrchestrator != tasks[j].IsOrchestrator {
+				return tasks[i].IsOrchestrator
+			}
+			return tasks[i].SortKey < tasks[j].SortKey
 		})
 	}
 	return tasksByTrack

@@ -64,6 +64,16 @@ Brief the way you'd brief a stranger with zero context: why, the actual task, ac
 
 Every time, with no separate confirmation step. A card without `--start` sits idle in `backlog`, which defeats the point. `--start` is a daemon RPC — it works from a sandboxed shell, and you never need to drive tmux yourself.
 
+### 4. If you're coordinating, mark yourself as the orchestrator
+
+```bash
+agentboard task orchestrator          # your own card (found via AGENTBOARD_TASK_ID or .agentboard/task-id)
+agentboard task orchestrator <id>     # someone else's card
+agentboard task orchestrator --off    # unmark
+```
+
+Do this the moment your card's job becomes coordinating other cards rather than doing the work itself — typically when you spin off a second subtask. The board pins an orchestrator card to the top of its column and paints it with a distinct background, so the user finds the card in charge first. It is purely presentational: it changes nothing about linking, notifications, or when your card reaches `done`. A card that only spun off one incidental follow-up is not an orchestrator — don't mark it.
+
 ## What you get for free
 
 - **Auto-linking.** A card created from inside a running session is linked as a subtask of your card automatically — no flag. Use `--parent <id>` to link elsewhere. If a card comes out unlinked, run `task create` from inside your worktree (the fallback marker file is found by walking up from the cwd).

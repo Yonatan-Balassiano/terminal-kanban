@@ -159,6 +159,11 @@ export interface TaskRecord {
   /** The child task whose PR is waiting on this card to review, if any. */
   childPrAlertTaskId?: string;
   /**
+   * Whether this card coordinates other cards. The TUI pins it to the top of
+   * its column and paints it with a distinct background.
+   */
+  isOrchestrator?: boolean;
+  /**
    * This card's session's `--name` — how other Claude Code sessions address
    * it via SendMessage/ListAgents. Assigned once at creation; for a subtask,
    * prefixed with the parent's own sessionName so hierarchy is visible
@@ -606,6 +611,7 @@ export type RPCMethod =
   | 'setDualSessionMode'
   | 'acknowledgeSessionAttention'
   | 'acknowledgeChildPrAlert'
+  | 'setTaskOrchestrator'
   | 'sendInput'
   | 'notifyTaskSession'
   | 'redeliverInitialPrompt'
@@ -825,6 +831,11 @@ export interface AcknowledgeSessionAttentionParams {
 
 export interface AcknowledgeChildPrAlertParams {
   taskId: string;
+}
+
+export interface SetTaskOrchestratorParams {
+  taskId: string;
+  orchestrator: boolean;
 }
 
 export interface SendInputParams {
