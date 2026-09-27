@@ -40,12 +40,13 @@ func TestRenderTaskCardPaintsAnOrchestratorsBackground(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	defer lipgloss.SetColorProfile(previous)
 
-	background := termenv.TrueColor.Color(orchestratorCardBackground).Sequence(true)
+	background := termenv.TrueColor.Color(orchestratorPalette[0].Solid).Sequence(true)
 	plainTask := TaskRecord{ID: "task-1", Title: "Worker", UpdatedAt: 1}
 	orchestratorTask := TaskRecord{ID: "task-2", Title: "Lead", UpdatedAt: 1, IsOrchestrator: true}
+	model := &Model{tasks: []TaskRecord{plainTask, orchestratorTask}}
 
-	plain := renderTaskCard(&Model{}, plainTask, false, false, nil, "web5-poc")
-	orchestrator := renderTaskCard(&Model{}, orchestratorTask, false, false, nil, "web5-poc")
+	plain := renderTaskCard(model, plainTask, false, false, nil, "web5-poc")
+	orchestrator := renderTaskCard(model, orchestratorTask, false, false, nil, "web5-poc")
 
 	if strings.Contains(plain, background) {
 		t.Fatalf("plain card carries the orchestrator background: %q", plain)
@@ -72,4 +73,89 @@ func TestRenderTaskCardPaintsAnOrchestratorsBackground(t *testing.T) {
 			lipgloss.Width(orchestrator), lipgloss.Height(orchestrator),
 			lipgloss.Width(plain), lipgloss.Height(plain))
 	}
+}
+
+// Two orchestrators side by side must be told apart at a glance, and the
+// colour must not reshuffle between redraws — so it follows creation order.
+func TestEachOrchestratorGetsItsOwnStableColour(t *testing.T) {
+	model := &Model{tasks: []TaskRecord{
+		{ID: "late", IsOrchestrator: true, CreatedAt: 20},
+		{ID: "plain", CreatedAt: 5},
+		{ID: "early", IsOrchestrator: true, CreatedAt: 10},
+	}}
+
+	early, okEarly := model.orchestratorColourFor(model.tasks[2])
+	late, okLate := model.orchestratorColourFor(model.tasks[0])
+	_, okPlain := model.orchestratorColourFor(model.tasks[1])
+
+	if !okEarly || !okLate || okPlain {
+		t.Fatalf("ok flags = early %v, late %v, plain %v; want true, true, false", okEarly, okLate, okPlain)
+	}
+	if early != orchestratorPalette[0] || late != orchestratorPalette[1] {
+		t.Fatalf("colours = %v, %v; want palette[0], palette[1] in creation order", early, late)
+	}
+}
+
+// A subtask — or a subtask's subtask — belongs to the nearest orchestrator
+// above it, so its whole family reads as one colour.
+func TestSubtasksTakeTheirOrchestratorsColour(t *testing.T) {
+	model := &Model{tasks: []TaskRecord{
+		{ID: "other", IsOrchestrator: true, CreatedAt: 1},
+		{ID: "lead", IsOrchestrator: true, CreatedAt: 2},
+		{ID: "child", ParentTaskID: "lead", CreatedAt: 3},
+		{ID: "grandchild", ParentTaskID: "child", CreatedAt: 4},
+		{ID: "orphan", ParentTaskID: "gone", CreatedAt: 5},
+		// A parent cycle must not hang the render loop.
+		{ID: "loop-a", ParentTaskID: "loop-b", CreatedAt: 6},
+		{ID: "loop-b", ParentTaskID: "loop-a", CreatedAt: 7},
+	}}
+
+	for _, id := range []string{"child", "grandchild"} {
+		colour, ok := model.orchestratorColourFor(taskByID(model, id))
+		if !ok || colour != orchestratorPalette[1] {
+			t.Fatalf("%s colour = %v (ok %v), want the lead's palette[1]", id, colour, ok)
+		}
+	}
+	for _, id := range []string{"orphan", "loop-a"} {
+		if _, ok := model.orchestratorColourFor(taskByID(model, id)); ok {
+			t.Fatalf("%s has an orchestrator colour, want none", id)
+		}
+	}
+}
+
+func TestRenderTaskCardTintsASubtasksTitle(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(previous)
+
+	lead := TaskRecord{ID: "lead", Title: "Lead", IsOrchestrator: true, UpdatedAt: 1}
+	child := TaskRecord{ID: "child", Title: "Child work", ParentTaskID: "lead", UpdatedAt: 1}
+	model := &Model{tasks: []TaskRecord{lead, child}}
+	tint := termenv.TrueColor.Color(orchestratorPalette[0].Tint).Sequence(true)
+	solid := termenv.TrueColor.Color(orchestratorPalette[0].Solid).Sequence(true)
+
+	card := renderTaskCard(model, child, false, false, nil, "web5-poc")
+
+	titleLine := ""
+	for _, line := range strings.Split(card, "\n") {
+		if strings.Contains(ansiPattern.ReplaceAllString(line, ""), "Child work") {
+			titleLine = line
+		}
+	}
+	if !strings.Contains(titleLine, tint) {
+		t.Fatalf("subtask title line = %q, want tint %q", titleLine, tint)
+	}
+	// Only the title is tinted; the card itself is not filled like its lead.
+	if strings.Contains(card, solid) {
+		t.Fatalf("subtask card carries the orchestrator's solid fill: %q", card)
+	}
+}
+
+func taskByID(m *Model, id string) TaskRecord {
+	for _, task := range m.tasks {
+		if task.ID == id {
+			return task
+		}
+	}
+	return TaskRecord{}
 }

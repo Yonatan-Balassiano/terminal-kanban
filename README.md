@@ -201,7 +201,7 @@ agentboard task notify <id> "<message>"                                      # m
 agentboard task restart <id>                                                 # relaunch its pane, keeping id/branch/worktree/conversation
 agentboard task redeliver-prompt <id>                                        # re-send a card's opening brief (rarely needed)
 agentboard task attach-pr <id> <pr-number> [--repo <ref>] [--base <branch>]  # attach a PR auto-discovery missed
-agentboard task orchestrator [<id>] [--off]                                  # pin a card to the top of its column, highlighted; defaults to your own card
+agentboard task orchestrator [<id>] [--off]                                  # pin a card to the top of its column in its own colour; its subtasks share it
 agentboard task delete <id> [--force] [--purge]                              # delete a card; archives uncommitted work unless --purge
 ```
 

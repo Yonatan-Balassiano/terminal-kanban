@@ -147,7 +147,7 @@ type TaskRecord struct {
 	// The child task whose PR is waiting on this card to review, if any.
 	ChildPRAlertTaskID string `json:"childPrAlertTaskId"`
 	// Set on a card that coordinates other cards: pinned to the top of its
-	// column and painted with orchestratorCardBackground.
+	// column and filled with its own colour from orchestratorPalette.
 	IsOrchestrator            bool             `json:"isOrchestrator"`
 	RepoID                    string           `json:"repoId"`
 	Location                  string           `json:"location"`

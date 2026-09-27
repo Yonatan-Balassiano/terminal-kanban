@@ -72,7 +72,7 @@ agentboard task orchestrator <id>     # someone else's card
 agentboard task orchestrator --off    # unmark
 ```
 
-Do this the moment your card's job becomes coordinating other cards rather than doing the work itself — typically when you spin off a second subtask. The board pins an orchestrator card to the top of its column and paints it with a distinct background, so the user finds the card in charge first. It is purely presentational: it changes nothing about linking, notifications, or when your card reaches `done`. A card that only spun off one incidental follow-up is not an orchestrator — don't mark it.
+Do this the moment your card's job becomes coordinating other cards rather than doing the work itself — typically when you spin off a second subtask. The board pins an orchestrator card to the top of its column and fills it with its own colour; every card below it — your subtasks and theirs — gets a dimmer shade of that colour behind its title, so the user can see at a glance which cards belong to which orchestrator. It is purely presentational: it changes nothing about linking, notifications, or when your card reaches `done`. A card that only spun off one incidental follow-up is not an orchestrator — don't mark it.
 
 ## What you get for free
 
