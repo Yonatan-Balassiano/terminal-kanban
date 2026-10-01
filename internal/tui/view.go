@@ -896,13 +896,7 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 			lipgloss.NewStyle().Foreground(lipgloss.Color(ternaryString(isSelected, uiChrome.Accent, uiChrome.Blue))).Render(headerLabel),
 	}
 	if compact {
-		for index, line := range titleLines {
-			style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
-			if isActiveSession && index == 0 {
-				style = style.Bold(true)
-			}
-			lines = append(lines, style.Render(line))
-		}
+		lines = append(lines, renderTaskTitleLines(m, task, titleLines, isActiveSession, contentWidth)...)
 		lines = append(lines, joinSpaceBetween(
 			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("#"+truncateText(task.ID, min(8, contentWidth))),
 			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(branchLabel),
@@ -914,17 +908,11 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 			border = lipgloss.DoubleBorder()
 		}
 
-		return taskCardFrame(task, border, borderColor, cardStyleWidth, lines)
+		return taskCardFrame(m, task, border, borderColor, cardStyleWidth, lines)
 	}
 
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Line)).Render(strings.Repeat("─", contentWidth)))
-	for index, line := range titleLines {
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text))
-		if isActiveSession && index == 0 {
-			style = style.Bold(true)
-		}
-		lines = append(lines, style.Render(line))
-	}
+	lines = append(lines, renderTaskTitleLines(m, task, titleLines, isActiveSession, contentWidth)...)
 	githubStatus := githubStatusBadgeModel(task)
 	if githubStatus != nil {
 		lines = append(lines, badge(
@@ -997,45 +985,7 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 		border = lipgloss.DoubleBorder()
 	}
 
-	return taskCardFrame(task, border, borderColor, cardStyleWidth, lines)
-}
-
-// orchestratorCardBackground tints a card marked as an orchestrator, so the
-// card coordinating the others stands out from the column at a glance.
-const orchestratorCardBackground = "#2a1f45"
-
-// taskCardFrame draws the border around a card's rendered lines, filling an
-// orchestrator's card with orchestratorCardBackground.
-func taskCardFrame(task TaskRecord, border lipgloss.Border, borderColor string, width int, lines []string) string {
-	style := lipgloss.NewStyle().
-		Width(width).
-		Border(border).
-		BorderForeground(lipgloss.Color(borderColor)).
-		Padding(0, 1)
-	if !task.IsOrchestrator {
-		return style.Render(strings.Join(lines, "\n"))
-	}
-	background := lipgloss.Color(orchestratorCardBackground)
-	return style.
-		Background(background).
-		BorderBackground(background).
-		Render(reapplyBackgroundAfterResets(strings.Join(lines, "\n"), orchestratorCardBackground))
-}
-
-// reapplyBackgroundAfterResets keeps a background under already-styled text.
-// Each styled segment ends in a full SGR reset, which would drop the outer
-// style's background for the rest of the line — so re-emit it after each one.
-func reapplyBackgroundAfterResets(content string, color string) string {
-	profileColor := lipgloss.ColorProfile().Color(color)
-	if profileColor == nil {
-		return content
-	}
-	sequence := profileColor.Sequence(true)
-	if sequence == "" {
-		return content
-	}
-	const reset = "\x1b[0m"
-	return strings.ReplaceAll(content, reset, reset+"\x1b["+sequence+"m")
+	return taskCardFrame(m, task, border, borderColor, cardStyleWidth, lines)
 }
 
 // overviewScope is one selectable row on the overview screen: every repo, plus
