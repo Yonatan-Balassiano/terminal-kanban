@@ -194,10 +194,9 @@ type TaskRecord struct {
 	PRMergedCount  int                `json:"prMergedCount"`
 	// Nil until the daemon has resolved where this card's merged work got to.
 	// Nil is "not known", never "not shipped".
-	Release    *TaskReleaseSummary `json:"release"`
-	ArchivedAt *int64              `json:"archivedAt"`
-	CreatedAt  int64               `json:"createdAt"`
-	UpdatedAt  int64               `json:"updatedAt"`
+	Release   *TaskReleaseSummary `json:"release"`
+	CreatedAt int64               `json:"createdAt"`
+	UpdatedAt int64               `json:"updatedAt"`
 }
 
 // TaskBranchRecord is one repo + branch a card is working in, and the pull
@@ -357,15 +356,14 @@ type UIStateRecord struct {
 }
 
 type FilterModel struct {
-	RepoIDs         []string        `json:"repoIds,omitempty"`
-	PillarIDs       []string        `json:"pillarIds,omitempty"`
-	LabelIDs        []string        `json:"labelIds,omitempty"`
-	TrackIDs        []string        `json:"trackIds,omitempty"`
-	PRState         []PRState       `json:"prState,omitempty"`
-	CIState         []CIState       `json:"ciState,omitempty"`
-	SessionState    []SessionStatus `json:"sessionState,omitempty"`
-	SearchText      string          `json:"searchText,omitempty"`
-	IncludeArchived bool            `json:"includeArchived,omitempty"`
+	RepoIDs      []string        `json:"repoIds,omitempty"`
+	PillarIDs    []string        `json:"pillarIds,omitempty"`
+	LabelIDs     []string        `json:"labelIds,omitempty"`
+	TrackIDs     []string        `json:"trackIds,omitempty"`
+	PRState      []PRState       `json:"prState,omitempty"`
+	CIState      []CIState       `json:"ciState,omitempty"`
+	SessionState []SessionStatus `json:"sessionState,omitempty"`
+	SearchText   string          `json:"searchText,omitempty"`
 }
 
 type BoardSnapshot struct {

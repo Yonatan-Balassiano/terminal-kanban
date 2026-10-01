@@ -22,11 +22,6 @@ export class ViewService {
 
   applyFilter(tasks: TaskRecord[], filter: FilterModel): TaskRecord[] {
     return tasks.filter((task) => {
-      // includeArchived: exclude archived tasks unless explicitly requested
-      if (!filter.includeArchived && task.archivedAt !== undefined) {
-        return false;
-      }
-
       // repoIds — a general task belongs to no repo, so any repo filter excludes it
       if (filter.repoIds && filter.repoIds.length > 0) {
         if (task.repoId === undefined || !filter.repoIds.includes(task.repoId)) return false;
@@ -86,7 +81,7 @@ export class ViewService {
     const uiState = this.board.getUIState();
 
     // Tasks: already filtered by repoId; apply additional filter if provided
-    let tasks = this.board.getTasks({ repoId, includeArchived: filter?.includeArchived });
+    let tasks = this.board.getTasks({ repoId });
     if (filter) {
       tasks = this.applyFilter(tasks, filter);
     }

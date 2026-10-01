@@ -169,8 +169,7 @@ async function createReleaseTracker(deps: {
       github: deps.github,
     }),
     listTaskPRs: prsForTask,
-    // Any card with merged work has something that might have shipped. Archived
-    // cards are nobody's pending question.
+    // Any card with merged work has something that might have shipped.
     listTrackedTaskIds: () =>
       deps.board
         .getTasks()
@@ -603,14 +602,6 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const taskLifecycle = new TaskLifecycleService(db, board, git, session, transports);
   const sync = new SyncService(board, github, git, db);
   sync.transports = transports;
-  // Fires on reaching done, not on a merge: a card whose pull requests have
-  // landed but whose change has not shipped still needs its worktrees.
-  sync.onTaskMergedOrClosed = async (taskId) => {
-    // Archives uncommitted work before removing the worktree, same as a
-    // delete — a card reaching done is the other moment an agent's notes
-    // silently disappeared.
-    await taskLifecycle.cleanupTaskResources(taskId);
-  };
   if (release) {
     sync.isFullyReleased = (taskId) => release.isFullyReleased(taskId);
   }
@@ -643,7 +634,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   }
 
   const reviewTasks = board
-    .getTasks({ includeArchived: true })
+    .getTasks()
     .filter((task) => task.trackId === 'review');
   for (const task of reviewTasks) {
     board.moveTask({ id: task.id, trackId: 'pr' });
@@ -651,8 +642,8 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   board.deleteTrack('review');
 
   // Sessions outlive the daemon, but ones that died while it was down would
-  // otherwise keep status 'active' forever and block worktree cleanup on
-  // archive. Reconciling here settles them once, off the startup path.
+  // otherwise keep status 'active' forever. Reconciling here settles them
+  // once, off the startup path.
   void session.reconcile().catch(() => {
     // A backend that cannot answer right now is retried on the next start.
   });

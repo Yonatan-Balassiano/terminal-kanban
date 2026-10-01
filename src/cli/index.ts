@@ -333,14 +333,6 @@ function formatFleetAge(ms: number): string {
   return `${hours}h${minutes}m`;
 }
 
-function filterListedTasks(tasks: TaskRecord[], archivedOnly: boolean): TaskRecord[] {
-  if (!archivedOnly) {
-    return tasks;
-  }
-
-  return tasks.filter((task) => task.archivedAt !== undefined);
-}
-
 // --------------- task create helpers ------------------------
 
 /**
@@ -694,25 +686,23 @@ export function buildCli(): Command {
     .command('ls')
     .description('List tasks on the board')
     .option('--repo <id>', 'Filter by repo ID')
-    .option('--archived', 'List archived tasks only')
     .option('--json', 'Output as JSON')
-    .action(async (opts: { repo?: string; archived?: boolean; json?: boolean }) => {
+    .action(async (opts: { repo?: string; json?: boolean }) => {
       try {
         const paths = configPaths();
         await ensureRunning(daemonOpts(paths));
         const rpc = await createRPCClient(paths.socketPath);
         const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard', {
           ...(opts.repo ? { repoId: opts.repo } : {}),
-          ...(opts.archived ? { filter: { includeArchived: true } } : {}),
         });
         rpc.disconnect();
 
-        const tasks = filterListedTasks(board.tasks, opts.archived === true);
+        const tasks = board.tasks;
 
         if (opts.json) {
           console.log(JSON.stringify(tasks, null, 2));
         } else {
-          printTaskTable(tasks, opts.archived ? 'No archived tasks found.' : 'No tasks found.');
+          printTaskTable(tasks, 'No tasks found.');
         }
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);

@@ -1492,8 +1492,8 @@ export class SessionManager {
    * Retire earlier session rows for a task slot once a new one takes over.
    *
    * Only the row linked from `tasks` is authoritative. When a session had to be
-   * recreated, the previous row kept `status='active'` forever — which blocks
-   * worktree cleanup on archive and inflates every scan over live sessions.
+   * recreated, the previous row kept `status='active'` forever — which inflates
+   * every scan over live sessions.
    *
    * The backend session is deliberately left alone: a superseded row usually
    * carries the *same* `backend_session_id` as the live one, so terminating it
@@ -1731,7 +1731,7 @@ export class SessionManager {
 
     const items: AttentionItem[] = [];
     for (const task of this.board.getTasks()) {
-      if (task.archivedAt != null || task.trackId === 'done') {
+      if (task.trackId === 'done') {
         continue;
       }
 

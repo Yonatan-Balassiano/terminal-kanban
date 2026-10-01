@@ -159,7 +159,6 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     prCount: (row['pr_count'] as number | null) ?? 0,
     prOpenCount: (row['pr_open_count'] as number | null) ?? 0,
     prMergedCount: (row['pr_merged_count'] as number | null) ?? 0,
-    archivedAt: (row['archived_at'] as number | null) ?? undefined,
     createdAt: row['created_at'] as number,
     updatedAt: row['updated_at'] as number,
   };
@@ -172,17 +171,13 @@ export class BoardService {
 
   // ---- Task methods ------------------------------------------
 
-  getTasks(filter?: { repoId?: string; includeArchived?: boolean }): TaskRecord[] {
+  getTasks(filter?: { repoId?: string }): TaskRecord[] {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
     if (filter?.repoId) {
       conditions.push('t.repo_id = ?');
       params.push(filter.repoId);
-    }
-
-    if (!filter?.includeArchived) {
-      conditions.push('t.archived_at IS NULL');
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -638,15 +633,6 @@ export class BoardService {
     apply();
   }
 
-  archiveTask(id: string): void {
-    const now = Date.now();
-    this.db
-      .prepare<[number, number, string], void>(
-        'UPDATE tasks SET archived_at = ?, updated_at = ? WHERE id = ?',
-      )
-      .run(now, now, id);
-  }
-
   deleteTask(id: string): void {
     this.db.prepare<[string], void>('DELETE FROM tasks WHERE id = ?').run(id);
   }
@@ -886,10 +872,8 @@ export class BoardService {
   /**
    * Whether `parentTaskId` still has a subtask that has not reached `done`.
    *
-   * Used to hold a parent card in `shipping` — and its session alive — until
-   * every subtask it spun off is also done, not just its own branches. An
-   * archived subtask does not count: archiving removes it from consideration
-   * the same as it does everywhere else in the board.
+   * Used to hold a parent card in `shipping` until every subtask it spun off
+   * is also done, not just its own branches.
    */
   hasIncompleteChildTasks(parentTaskId: string): boolean {
     const row = this.db
@@ -897,7 +881,6 @@ export class BoardService {
         `SELECT COUNT(*) AS count
          FROM tasks
          WHERE parent_task_id = ?
-           AND archived_at IS NULL
            AND track_id <> 'done'`,
       )
       .get(parentTaskId);

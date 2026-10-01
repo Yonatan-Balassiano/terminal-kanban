@@ -7,11 +7,12 @@ description: Work with AgentBoard from inside an agent session — find your bea
 
 AgentBoard is a terminal-native kanban board for AI coding sessions. A **card** is a unit of work; a **session** is an agent working it. You are (almost always) an agent running inside a card's session.
 
-Three things are worth knowing up front, because they change what is safe to do:
+Four things are worth knowing up front, because they change what is safe to do:
 
 - **A card's conversation is not in its pane.** It lives in the agent's own transcript, under a session id AgentBoard pins. So a pane can be replaced without losing anything.
 - **A card's opening brief arrives on the agent CLI's argv at launch**, not by anything typing into the pane. It cannot be truncated or partially submitted.
-- **A card's uncommitted work is archived, not deleted**, when the card is deleted or reaches done.
+- **A card's uncommitted work is archived, not deleted**, when the card is deleted.
+- **Reaching `done` changes nothing but the column.** The card's session and worktree stay as they are; they go only when the card is deleted.
 
 ## Find your bearings
 
@@ -79,7 +80,7 @@ Do this the moment your card's job becomes coordinating other cards rather than 
 - **Auto-linking.** A card created from inside a running session is linked as a subtask of your card automatically — no flag. Use `--parent <id>` to link elsewhere. If a card comes out unlinked, run `task create` from inside your worktree (the fallback marker file is found by walking up from the cwd).
 - **Session naming.** The subtask's session is named `<your session name>/<its title>`, so `ListAgents` shows the hierarchy with no lookup. Override with `--session-name`.
 - **PR notification, two ways.** When the subtask's PR opens, your card is flagged on the board (durable, always correct) *and* the subtask is told to `SendMessage` you directly (prompt, but skippable). Trust the board flag; treat the message as a courtesy.
-- **Your session stays alive until every subtask is done.** Even once your own branches have shipped, the board holds your card in `shipping` — not `done` — while any subtask you spun off is still open. `done` is what tears down a session and its worktree, so this is deliberate: it's often your session that's needed to check on or unblock a stuck subtask. Nothing to do here — it resolves itself the moment the last subtask reaches `done`.
+- **Your card stays in `shipping` until every subtask is done.** Even once your own branches have shipped, the board holds your card in `shipping` — not `done` — while any subtask you spun off is still open. Nothing to do here — it resolves itself the moment the last subtask reaches `done`. Your session is not affected either way: reaching `done` does not close it.
 
 ## Talking to other sessions
 

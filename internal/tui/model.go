@@ -2334,9 +2334,6 @@ func (m *Model) visibleTasks() []TaskRecord {
 	if len(m.filters.TrackIDs) > 0 {
 		visible = filterTasks(visible, func(task TaskRecord) bool { return slices.Contains(m.filters.TrackIDs, task.TrackID) })
 	}
-	if !m.filters.IncludeArchived {
-		visible = filterTasks(visible, func(task TaskRecord) bool { return task.ArchivedAt == nil })
-	}
 	if m.filters.SearchText != "" {
 		needle := strings.ToLower(m.filters.SearchText)
 		visible = filterTasks(visible, func(task TaskRecord) bool {

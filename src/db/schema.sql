@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   ci_state TEXT NOT NULL DEFAULT 'none',
   review_state TEXT NOT NULL DEFAULT 'none',
   unresolved_thread_count INTEGER NOT NULL DEFAULT 0,
-  archived_at INTEGER,
+  archived_at INTEGER, -- unused: cards are no longer archived; kept so existing databases need no migration
   description TEXT,
   -- The card's brief, handed to the agent as its opening prompt the first time
   -- a conversation starts. Kept apart from `description` so a card whose notes

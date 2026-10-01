@@ -1479,9 +1479,6 @@ function summarizeFilters(filters: FilterModel): string {
   if (filters.searchText) {
     parts.push(`search=${filters.searchText}`);
   }
-  if (filters.includeArchived) {
-    parts.push('includeArchived=true');
-  }
   return parts.join(' ') || 'none';
 }
 

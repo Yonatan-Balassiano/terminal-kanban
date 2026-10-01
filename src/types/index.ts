@@ -44,7 +44,6 @@ export type EventType =
   | 'task.created'
   | 'task.renamed'
   | 'task.moved'
-  | 'task.archived'
   | 'task.deleted'
   | 'pillar.changed'
   | 'label.changed'
@@ -229,7 +228,6 @@ export interface TaskRecord {
    * absent is "not known", never "not shipped".
    */
   release?: TaskReleaseSummary;
-  archivedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -300,7 +298,6 @@ export interface FilterModel {
   ciState?: CIState[];
   sessionState?: SessionStatus[];
   searchText?: string;
-  includeArchived?: boolean;
 }
 
 // --------------- Board snapshot (TUI read model) ------------
@@ -594,7 +591,6 @@ export type RPCMethod =
   | 'deletePillar'
   | 'assignPillar'
   | 'setLabels'
-  | 'archiveTask'
   | 'deleteTask'
   | 'addRepo'
   | 'updateRepo'
@@ -730,10 +726,6 @@ export interface AssignPillarParams {
 export interface SetLabelsParams {
   id: string;
   labelIds: string[];
-}
-
-export interface ArchiveTaskParams {
-  id: string;
 }
 
 export interface DeleteTaskParams {

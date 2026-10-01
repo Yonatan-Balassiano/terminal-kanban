@@ -121,17 +121,6 @@ describe('general tasks', () => {
       expect(git.removeWorktreeAsync).not.toHaveBeenCalled();
       expect(board.getTask(task.id)).toBeNull();
     });
-
-    it('archives a general task', async () => {
-      const task = board.createTask({ title: 'Done thinking', kind: 'general' });
-      const lifecycle = new TaskLifecycleService(db, board, { removeWorktreeAsync: vi.fn() } as never, {
-        terminateTaskSessions: vi.fn(),
-      } as never);
-
-      await lifecycle.archiveTask(task.id);
-
-      expect(board.getTask(task.id)?.archivedAt).toBeDefined();
-    });
   });
 
   describe('board snapshot filtering', () => {

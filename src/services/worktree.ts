@@ -164,7 +164,6 @@ export class WorktreeService {
         `SELECT COUNT(*) AS count
          FROM tasks
          WHERE repo_id = ?
-           AND archived_at IS NULL
            AND (session_id IS NOT NULL OR secondary_session_id IS NOT NULL)
            AND id <> ?`,
       )
