@@ -35,7 +35,6 @@ const FilterModelSchema = z.object({
   ciState: z.array(z.enum(['none', 'pending', 'failed', 'passed'] as const)).optional(),
   sessionState: z.array(z.enum(['active', 'idle', 'orphaned', 'terminated'] as const)).optional(),
   searchText: z.string().optional(),
-  includeArchived: z.boolean().optional(),
 });
 
 const TrackConfigSchema = z.object({

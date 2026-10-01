@@ -101,7 +101,6 @@ function normalizeBaseBranch(value: string | null | undefined): string | undefin
 
 export class SyncService {
   private board: BoardService;
-  onTaskMergedOrClosed?: (taskId: string) => Promise<void>;
   /**
    * Whether every merged pull request on a card has actually reached production.
    *
@@ -338,7 +337,7 @@ export class SyncService {
 
   private async enqueueAll(opts: ReconcileOptions): Promise<SyncResult> {
     const taskIds = this.board
-      .getTasks({ includeArchived: false })
+      .getTasks()
       // A finished card has nothing left to ask GitHub about, and a board is
       // mostly finished cards. Polling them anyway is what ran the GraphQL
       // budget out. A manual sync still reaches them, so a reopened pull
@@ -356,7 +355,7 @@ export class SyncService {
 
   private async enqueueActiveTasks(opts: ReconcileOptions): Promise<SyncResult> {
     const taskIds = this.board
-      .getTasks({ includeArchived: false })
+      .getTasks()
       .filter((task) => task.sessionId != null || task.secondarySessionId != null)
       .filter((task) => !this.isTaskSettled(task))
       .map((task) => task.id);
@@ -455,7 +454,7 @@ export class SyncService {
     const task = this.board.getTask(taskId);
 
     // A general task has no repo, branch, or PR — there is nothing to reconcile.
-    if (!task || task.archivedAt != null || task.kind === 'general') {
+    if (!task || task.kind === 'general') {
       this.clearDelayedRetry(taskId);
       return result;
     }
@@ -715,7 +714,7 @@ export class SyncService {
    */
   private evaluateTrackTransition(taskId: string): number {
     const task = this.board.getTask(taskId);
-    if (!task || task.archivedAt != null) {
+    if (!task) {
       return 0;
     }
 
@@ -741,30 +740,25 @@ export class SyncService {
 
     const released = this.isFullyReleased?.(taskId) ?? true;
     // A parent's own branches can ship while a subtask it spun off is still
-    // being worked — done is terminal and tears down the session, so a
-    // parent with open subtasks stays in shipping (session alive) until
-    // every one of them has also reached done, the same gate `released`
-    // already applies to the parent's own branches.
+    // being worked — the work the card stands for is not finished, so a
+    // parent with open subtasks stays in shipping until every one of them
+    // has also reached done, the same gate `released` already applies to the
+    // parent's own branches.
     const childrenDone = !this.board.hasIncompleteChildTasks(taskId);
     const nextTrack = released && childrenDone ? 'done' : 'shipping';
     if (task.trackId === nextTrack) {
       return 0;
     }
 
+    // Done is only a column: the move leaves the card's sessions and worktrees
+    // exactly as they were. They go when the card is deleted.
     this.board.moveTask({ id: taskId, trackId: nextTrack });
 
-    // Cleanup is deliberately tied to reaching done, not to a merge. A card in
-    // shipping is still waiting on a rollout and its worktrees have to survive
-    // in case the change has to be revisited.
-    if (nextTrack === 'done') {
-      void this.onTaskMergedOrClosed?.(taskId);
-
-      // A subtask that reached done needs its parent's badge cleared the same
-      // as a merge/close does below — done is itself a terminal state, and a
-      // tmux/ssh-backed parent has no other path to ever clear it.
-      if (task.parentTaskId) {
-        this.clearChildPrAlertIfMine(task.parentTaskId, taskId);
-      }
+    // A subtask that reached done needs its parent's badge cleared the same
+    // as a merge/close does below — done is itself a terminal state, and a
+    // tmux/ssh-backed parent has no other path to ever clear it.
+    if (nextTrack === 'done' && task.parentTaskId) {
+      this.clearChildPrAlertIfMine(task.parentTaskId, taskId);
     }
 
     return 1;

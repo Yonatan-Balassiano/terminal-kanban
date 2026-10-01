@@ -190,7 +190,6 @@ function makeBoard(
       [task, ...otherTasks].some(
         (candidate) =>
           candidate.parentTaskId === parentTaskId &&
-          candidate.archivedAt == null &&
           candidate.trackId !== 'done',
       ),
     ),
@@ -914,10 +913,7 @@ describe('SyncService', () => {
         run: vi.fn(),
       })),
     };
-    const onMerged = vi.fn().mockResolvedValue(undefined);
-
     const sync = new SyncService(board as never, github as never, git as never, db as never);
-    sync.onTaskMergedOrClosed = onMerged;
 
     // Act
     await sync.trigger();
@@ -927,8 +923,6 @@ describe('SyncService', () => {
     expect(getBranches()[1]?.prState).toBe('open');
     expect(board.moveTask).not.toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
     expect(board.moveTask).not.toHaveBeenCalledWith({ id: 'task-1', trackId: 'shipping' });
-    // Nothing may be cleaned up while work is still in flight.
-    expect(onMerged).not.toHaveBeenCalled();
   });
 
   it('parks a fully merged card in shipping until its change has shipped', async () => {
@@ -960,10 +954,7 @@ describe('SyncService', () => {
         run: vi.fn(),
       }),
     };
-    const onMerged = vi.fn().mockResolvedValue(undefined);
-
     const sync = new SyncService(board as never, github as never, git as never, db as never);
-    sync.onTaskMergedOrClosed = onMerged;
     sync.isFullyReleased = () => false;
 
     // Act
@@ -971,13 +962,12 @@ describe('SyncService', () => {
 
     // Assert — merged is not shipped, and its worktrees must survive.
     expect(board.moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'shipping' });
-    expect(onMerged).not.toHaveBeenCalled();
   });
 
   it('parks a released parent card in shipping while a subtask is still open', async () => {
     // Arrange — the parent's own branch is fully released, but it spun off a
-    // subtask that has not reached done yet. Done tears down the session, so
-    // the parent must not move there while that subtask is still working.
+    // subtask that has not reached done yet. The card's work is not finished,
+    // so the parent must not move there while that subtask is still working.
     const child = makeTask({ id: 'child-1', parentTaskId: 'task-1', trackId: 'pr' });
     const { board } = makeBoard({ trackId: 'pr' }, [], [child]);
     const github = {
@@ -1006,10 +996,7 @@ describe('SyncService', () => {
         run: vi.fn(),
       }),
     };
-    const onMerged = vi.fn().mockResolvedValue(undefined);
-
     const sync = new SyncService(board as never, github as never, git as never, db as never);
-    sync.onTaskMergedOrClosed = onMerged;
     sync.isFullyReleased = () => true;
 
     // Act
@@ -1018,7 +1005,6 @@ describe('SyncService', () => {
     // Assert — released is not enough on its own; the open subtask holds it
     // in shipping, session intact, until that subtask is also done.
     expect(board.moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'shipping' });
-    expect(onMerged).not.toHaveBeenCalled();
   });
 
   it('moves a parent card to done once every subtask has also reached done', async () => {
@@ -1056,19 +1042,14 @@ describe('SyncService', () => {
         run: vi.fn(),
       }),
     };
-    const onMerged = vi.fn().mockResolvedValue(undefined);
-
     const sync = new SyncService(board as never, github as never, git as never, db as never);
-    sync.onTaskMergedOrClosed = onMerged;
     sync.isFullyReleased = () => true;
 
     // Act
     await sync.trigger();
 
-    // Assert — nothing left to wait on, so the parent finally goes to done
-    // and its session is cleaned up.
+    // Assert — nothing left to wait on, so the parent finally goes to done.
     expect(board.moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
-    expect(onMerged).toHaveBeenCalledWith('task-1');
   });
 
   it('goes straight to done when release tracking cannot be asked', async () => {
@@ -1101,17 +1082,13 @@ describe('SyncService', () => {
         run: vi.fn(),
       }),
     };
-    const onMerged = vi.fn().mockResolvedValue(undefined);
-
     const sync = new SyncService(board as never, github as never, git as never, db as never);
-    sync.onTaskMergedOrClosed = onMerged;
 
     // Act
     await sync.trigger();
 
     // Assert
     expect(board.moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'done' });
-    expect(onMerged).toHaveBeenCalledWith('task-1');
   });
 
   it('adopts a sibling pull request opened on the same branch in another repo', async () => {

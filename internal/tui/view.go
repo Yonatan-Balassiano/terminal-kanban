@@ -2362,9 +2362,6 @@ func countActiveFilters(filters FilterModel) int {
 	if filters.SearchText != "" {
 		count++
 	}
-	if filters.IncludeArchived {
-		count++
-	}
 	return count
 }
 

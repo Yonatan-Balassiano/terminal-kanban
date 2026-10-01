@@ -69,43 +69,31 @@ describe('agentboard ls', () => {
     logSpy.mockClear();
   });
 
-  it('lists only archived tasks when --archived is passed', async () => {
+  it('lists every task on the board', async () => {
     const call = vi.fn().mockResolvedValue(
       makeBoard([
         makeTask({ id: 'active-1', title: 'Active task' }),
-        makeTask({
-          id: 'archived-1',
-          title: 'Archived task',
-          archivedAt: 1_710_000_000_000,
-        }),
+        makeTask({ id: 'done-1', title: 'Finished task', trackId: 'done' }),
       ]),
     );
     const disconnect = vi.fn();
     mocks.createRPCClient.mockResolvedValue({ call, disconnect });
 
-    await buildCli().parseAsync(['node', 'agentboard', 'ls', '--archived']);
+    await buildCli().parseAsync(['node', 'agentboard', 'ls']);
 
-    expect(call).toHaveBeenCalledWith('getBoard', {
-      filter: { includeArchived: true },
-    });
-    expect(disconnect).toHaveBeenCalledTimes(1);
-
-    const output = logSpy.mock.calls.map((callArgs) => callArgs.join(' ')).join('\n');
-    expect(output).toContain('Archived task');
-    expect(output).not.toContain('Active task');
+    expect(call).toHaveBeenCalledWith('getBoard', {});
+    const output = logSpy.mock.calls.flat().join('\n');
+    expect(output).toContain('Active task');
+    expect(output).toContain('Finished task');
   });
 
-  it('shows an archived-specific empty message when no archived tasks exist', async () => {
-    const call = vi.fn().mockResolvedValue(
-      makeBoard([
-        makeTask({ id: 'active-1', title: 'Active task' }),
-      ]),
-    );
+  it('shows an empty message when the board has no tasks', async () => {
+    const call = vi.fn().mockResolvedValue(makeBoard([]));
     const disconnect = vi.fn();
     mocks.createRPCClient.mockResolvedValue({ call, disconnect });
 
-    await buildCli().parseAsync(['node', 'agentboard', 'ls', '--archived']);
+    await buildCli().parseAsync(['node', 'agentboard', 'ls']);
 
-    expect(logSpy).toHaveBeenCalledWith('No archived tasks found.');
+    expect(logSpy).toHaveBeenCalledWith('No tasks found.');
   });
 });

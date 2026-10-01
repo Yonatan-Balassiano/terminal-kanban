@@ -181,7 +181,6 @@ agentboard                 # launch the TUI
 agentboard init            # initialize config/state directories
 agentboard doctor          # run environment checks
 agentboard ls              # list tasks
-agentboard ls --archived   # list archived tasks
 agentboard ls --json       # list tasks as JSON
 agentboard sync            # trigger GitHub sync manually
 agentboard attach <task>   # open session and print attach command

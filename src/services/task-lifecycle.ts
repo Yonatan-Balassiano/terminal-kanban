@@ -18,8 +18,6 @@ interface TaskCleanupRow {
   worktreePath: string | null;
   sessionId: string | null;
   secondarySessionId: string | null;
-  sessionStatus: string | null;
-  secondarySessionStatus: string | null;
 }
 
 interface TaskCleanupContext {
@@ -30,8 +28,6 @@ interface TaskCleanupContext {
   worktreePath: string | null;
   sessionId: string | null;
   secondarySessionId: string | null;
-  sessionStatus: string | null;
-  secondarySessionStatus: string | null;
 }
 
 export interface CleanupOptions {
@@ -52,17 +48,12 @@ export interface DeleteTaskResult {
   archiveRef: string;
 }
 
-function blocksArchiveCleanup(...statuses: Array<string | null>): boolean {
-  return statuses.some((status) => status === 'active' || status === 'idle');
-}
-
 export class TaskLifecycleService {
   private remoteGit: GitService | null = null;
 
   constructor(
     private db: Db,
     private board: BoardService & {
-      archiveTask: (id: string) => void;
       deleteTask: (id: string) => void;
       setTaskWorktree?: (taskId: string, worktreePath: string | null) => void;
     },
@@ -81,13 +72,9 @@ export class TaskLifecycleService {
            r.remote_path AS remoteRepoPath,
            t.worktree_path AS worktreePath,
            t.session_id AS sessionId,
-           t.secondary_session_id AS secondarySessionId,
-           s.status AS sessionStatus,
-           s2.status AS secondarySessionStatus
+           t.secondary_session_id AS secondarySessionId
          FROM tasks t
          LEFT JOIN repos r ON r.id = t.repo_id
-         LEFT JOIN sessions s ON s.id = t.session_id
-         LEFT JOIN sessions s2 ON s2.id = t.secondary_session_id
          WHERE t.id = ?`,
       )
       .get(taskId);
@@ -104,8 +91,6 @@ export class TaskLifecycleService {
       worktreePath: row.worktreePath,
       sessionId: row.sessionId,
       secondarySessionId: row.secondarySessionId,
-      sessionStatus: row.sessionStatus,
-      secondarySessionStatus: row.secondarySessionStatus,
     };
   }
 
@@ -149,7 +134,7 @@ export class TaskLifecycleService {
       if (error instanceof TransportUnreachableError) {
         throw error;
       }
-      // Keep the recorded path so a later archive or delete can retry it.
+      // Keep the recorded path so a later delete can retry it.
     }
   }
 
@@ -302,17 +287,6 @@ export class TaskLifecycleService {
       return undefined;
     }
     return location === 'remote' ? (row.remote_path ?? row.path) : row.path;
-  }
-
-  async archiveTask(taskId: string): Promise<void> {
-    const task = this.loadTaskCleanupContext(taskId);
-    this.board.archiveTask(taskId);
-
-    if (blocksArchiveCleanup(task.sessionStatus, task.secondarySessionStatus)) {
-      return;
-    }
-
-    await this.removeAllTaskWorktrees(task, {});
   }
 
   async cleanupTaskResources(taskId: string, options: CleanupOptions = {}): Promise<string[]> {
