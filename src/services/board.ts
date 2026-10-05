@@ -473,6 +473,16 @@ export class BoardService {
       .get(trackId);
     const sortKey = (maxRow?.max_key ?? 0) + 1000;
 
+    // A top-level card becomes an orchestrator the moment it gets its first
+    // subtask. Top-level only, so a family keeps one colour instead of a
+    // nested parent splitting off its own; first subtask only, so an explicit
+    // `task orchestrator --off` is not undone by the next one.
+    const makesParentOrchestrator =
+      parent !== null &&
+      !parent.parentTaskId &&
+      !parent.isOrchestrator &&
+      !this.hasChildTasks(parent.id);
+
     this.db
       .prepare<unknown[], void>(
         `INSERT INTO tasks
@@ -507,6 +517,10 @@ export class BoardService {
     // no work in it at all.
     if (!isGeneral && params.repoId && branchName) {
       this.addTaskBranch({ taskId: id, repoId: params.repoId, branchName });
+    }
+
+    if (parent && makesParentOrchestrator) {
+      this.setTaskOrchestrator(parent.id, true);
     }
 
     return this.getTask(id)!;
@@ -867,6 +881,16 @@ export class BoardService {
       )
       .run(now, taskId);
     return result.changes > 0;
+  }
+
+  /** Whether any card, in any column, is a subtask of `parentTaskId`. */
+  hasChildTasks(parentTaskId: string): boolean {
+    const row = this.db
+      .prepare<[string], { found: number }>(
+        'SELECT 1 AS found FROM tasks WHERE parent_task_id = ? LIMIT 1',
+      )
+      .get(parentTaskId);
+    return row !== undefined;
   }
 
   /**

@@ -65,7 +65,7 @@ Brief the way you'd brief a stranger with zero context: why, the actual task, ac
 
 Every time, with no separate confirmation step. A card without `--start` sits idle in `backlog`, which defeats the point. `--start` is a daemon RPC — it works from a sandboxed shell, and you never need to drive tmux yourself.
 
-### 4. If you're coordinating, mark yourself as the orchestrator
+### 4. Your card becomes an orchestrator on its first subtask
 
 ```bash
 agentboard task orchestrator          # your own card (found via AGENTBOARD_TASK_ID or .agentboard/task-id)
@@ -73,7 +73,7 @@ agentboard task orchestrator <id>     # someone else's card
 agentboard task orchestrator --off    # unmark
 ```
 
-Do this the moment your card's job becomes coordinating other cards rather than doing the work itself — typically when you spin off a second subtask. The board pins an orchestrator card to the top of its column and fills and outlines it in its own colour; every card below it — your subtasks and theirs — gets a dimmer shade of that colour behind its title, so the user can see at a glance which cards belong to which orchestrator. It is purely presentational: it changes nothing about linking, notifications, or when your card reaches `done`. A card that only spun off one incidental follow-up is not an orchestrator — don't mark it.
+You rarely need to run this: a top-level card is marked automatically the moment its first subtask is created. A card that is itself a subtask is never auto-marked, so its own subtasks stay in the family colour of the orchestrator above it. Only the first subtask triggers it — if the card was unmarked with `--off`, later subtasks leave it unmarked. Use the command to unmark, to re-mark, or to mark a card that has no subtasks. The board pins an orchestrator card to the top of its column and fills and outlines it in its own colour; every card below it — your subtasks and theirs — gets a dimmer shade of that colour behind its title, so the user can see at a glance which cards belong to which orchestrator. It is purely presentational: it changes nothing about linking, notifications, or when your card reaches `done`. A card that only spun off one incidental follow-up is not really an orchestrator — unmark it with `--off`.
 
 ## What you get for free
 
