@@ -44,4 +44,41 @@ describe('BoardService orchestrator flag', () => {
   it('reports no change for a card that does not exist', () => {
     expect(board.setTaskOrchestrator('missing', true)).toBe(false);
   });
+
+  it('marks a top-level card when it gets its first subtask', () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Lead card', repoId: 'repo-1' });
+
+    // Act
+    const child = board.createTask({ title: 'Child', repoId: 'repo-1', parentTaskId: parent.id });
+
+    // Assert
+    expect(board.getTask(parent.id)?.isOrchestrator).toBe(true);
+    expect(board.getTask(child.id)?.isOrchestrator).toBe(false);
+  });
+
+  it('does not mark a subtask that gets subtasks of its own', () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Lead card', repoId: 'repo-1' });
+    const child = board.createTask({ title: 'Child', repoId: 'repo-1', parentTaskId: parent.id });
+
+    // Act
+    board.createTask({ title: 'Grandchild', repoId: 'repo-1', parentTaskId: child.id });
+
+    // Assert
+    expect(board.getTask(child.id)?.isOrchestrator).toBe(false);
+  });
+
+  it('leaves a card unmarked by hand alone when it gets another subtask', () => {
+    // Arrange
+    const parent = board.createTask({ title: 'Lead card', repoId: 'repo-1' });
+    board.createTask({ title: 'First', repoId: 'repo-1', parentTaskId: parent.id });
+    board.setTaskOrchestrator(parent.id, false);
+
+    // Act
+    board.createTask({ title: 'Second', repoId: 'repo-1', parentTaskId: parent.id });
+
+    // Assert
+    expect(board.getTask(parent.id)?.isOrchestrator).toBe(false);
+  });
 });

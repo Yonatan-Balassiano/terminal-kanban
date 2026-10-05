@@ -1193,7 +1193,7 @@ export function buildCli(): Command {
   task
     .command('orchestrator [task]')
     .description(
-      "Mark a card as an orchestrator — pinned to the top of its column with a distinct background. Defaults to the calling session's own card",
+      "Mark a card as an orchestrator — pinned to the top of its column with a distinct background. Defaults to the calling session's own card. A top-level card is marked automatically on its first subtask",
     )
     .option('--off', 'Unmark the card instead')
     .action(async (taskArg: string | undefined, opts: { off?: boolean }) => {
