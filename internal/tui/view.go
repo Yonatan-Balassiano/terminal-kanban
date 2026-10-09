@@ -1500,7 +1500,9 @@ func renderStatusBar(m *Model) string {
 	} else if contextTask != nil && contextTask.SessionAttentionNeeded {
 		leftParts = append(leftParts, badge("attention", "info", "!", false))
 	}
-	if m.statusMessage != "" {
+	if m.searchInputActive {
+		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText("/"+m.searchInput+"█", max(1, m.width/2))))
+	} else if m.statusMessage != "" {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Text)).Render(truncateText(m.statusMessage, max(1, m.width/2))))
 	} else if contextTask != nil {
 		leftParts = append(leftParts, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("Selected: "+contextTask.Title))
@@ -1512,14 +1514,18 @@ func renderStatusBar(m *Model) string {
 	// tail of a reminder costs less than losing the status message or the
 	// attention badge, which are the parts that are actually news.
 	left := strings.Join(leftParts, " ")
-	hints := truncateText(kbdHints(m.focus), max(1, m.width-plainWidth(left)-1))
+	hintText := kbdHints(m.focus)
+	if m.searchInputActive {
+		hintText = "Enter find  Esc cancel"
+	}
+	hints := truncateText(hintText, max(1, m.width-plainWidth(left)-1))
 	return joinSpaceBetween(left, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(hints), m.width)
 }
 
 func renderHelpModal() string {
 	sections := [][]string{
-		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "a or A opens the local AI chat modal", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
-		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar, D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell", "M resets the main checkout to this task's worktree state"},
+		{"Navigation", "Arrow keys move between columns and tasks, h/k/l mirror left/up/right", ": or Ctrl+P opens the command palette", "a or A opens the local AI chat modal", "/ searches card titles: Enter jumps to the first match, N next, P previous, Esc clears", "Enter opens the selected task shell", "t focuses the terminal pane", "z expands the terminal workspace"},
+		{"Task", "n new task, r rename, Ctrl+D edit description, d delete", "p assign pillar, P create pillar (previous match while a search is live), D delete pillar and its tasks", "B toggles the dual shell layout for the selected task", "[ and ] move the selected task between tracks", "i opens IDE, x reveals workspace, R recreates the task shell", "M resets the main checkout to this task's worktree state"},
 		{"Remote", "Remote tasks run their agent in tmux on another machine", "Ctrl+R reconnects the selected remote card to that machine", "It keeps the running agent when the remote session survived, and starts the host first when it is switched off", "R recreates instead: it always throws the running agent away", "Ctrl+T teleports the selected card to the other host, working tree and conversation included"},
 		{"GitHub", "c create PR now, C retry pushed-branch PR creation", "j comment on the selected open or draft PR", "o open PR, v open checks, m merge approved passing PR", "s runs a sync for PR, CI, and review status"},
 		{"Multi-PR cards", "A card can span several repos and PRs; its badge sums them up", "e opens the PR pane beside the board and stays open while you move", "E opens the PR picker: o open, v checks, j comment, m merge that PR", "c/j/m on the card itself stand down once there are several PRs"},

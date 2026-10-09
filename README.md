@@ -242,6 +242,7 @@ npm run reset-deamon
 - `←` / `→` / `↑` / `↓`: move between columns and tasks
 - `h` / `k` / `l`: left/up/right navigation shortcuts
 - `,` / `.`: switch repo tab
+- `/`: search card titles — type a query and press `Enter` to jump to the first matching card; `N` next match, `P` previous match (both wrap), `Esc` clears the search
 - `Esc`: return from terminal to board
 
 ### Task actions
@@ -250,7 +251,7 @@ npm run reset-deamon
 - `r`: rename task
 - `Ctrl+D`: edit task description
 - `d`: delete task
-- `P`: create pillar
+- `P`: create pillar (steps to the previous match instead while a `/` search is live)
 - `D`: delete selected task pillar and all tasks in it
 - `p`: assign pillar
 - `[` / `]`: move task left/right between tracks
