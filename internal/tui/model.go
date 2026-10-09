@@ -186,6 +186,9 @@ type Model struct {
 	selectedTrackIndex            int
 	selectedTaskIndex             int
 	selectedArtifactIndex         int
+	searchInputActive             bool
+	searchInput                   string
+	searchQuery                   string
 	terminalPaneVisible           bool
 	terminalLayoutMode            TerminalLayoutMode
 	boardDensityMode              string
@@ -674,6 +677,10 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return m.handleTerminalKey(key)
 	}
 
+	if m.searchInputActive {
+		return m.handleCardSearchInputKey(key)
+	}
+
 	// Only branch navigation and closing are claimed here; everything else falls
 	// through to the board so the pane can be read while moving between cards.
 	if m.focus == FocusDetail {
@@ -724,6 +731,19 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 		return m.persistActiveRepoCmd()
 	case ":":
 		m.openCommandPaletteModal()
+		return nil
+	case "/":
+		m.openCardSearch()
+		return nil
+	case "N":
+		if m.searchQuery != "" {
+			m.jumpToCardMatch(1)
+		}
+		return nil
+	case "esc":
+		if m.searchQuery != "" {
+			m.clearCardSearch()
+		}
 		return nil
 	case "enter":
 		task := m.selectedTask()
@@ -841,6 +861,12 @@ func (m *Model) handleKey(key tea.KeyMsg) tea.Cmd {
 	case "p":
 		m.openPillarPickerModal(m.selectedTask())
 	case "P":
+		// While a search is live P steps back through its matches; with none
+		// it keeps its usual meaning.
+		if m.searchQuery != "" {
+			m.jumpToCardMatch(-1)
+			return nil
+		}
 		m.openCreatePillarModal("")
 	case "D":
 		if task := m.selectedTask(); task != nil {
