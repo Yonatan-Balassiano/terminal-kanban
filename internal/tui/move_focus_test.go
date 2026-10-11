@@ -36,24 +36,74 @@ func TestMovedCardKeepsTheSelection(t *testing.T) {
 	}
 }
 
-func TestBoardRefreshWithoutAMoveLeavesTheSelectionInPlace(t *testing.T) {
+func TestSyncMovingTheSelectedCardKeepsItSelected(t *testing.T) {
 	model := &Model{
 		focus:  FocusBoard,
-		tracks: []TrackRecord{{ID: "in-progress", SortOrder: 0}, {ID: "done", SortOrder: 1}},
+		tracks: []TrackRecord{{ID: "in-progress", SortOrder: 0}, {ID: "pr", SortOrder: 1}},
 		tasks: []TaskRecord{
 			{ID: "a", TrackID: "in-progress", SortKey: 1},
 			{ID: "b", TrackID: "in-progress", SortKey: 2},
 		},
 	}
-	model.selectTaskByID("a")
+	model.selectTaskByID("b")
 
+	// The sync loop advances the selected card to PR on its own.
 	synced := BoardSnapshot{Tracks: model.tracks, Tasks: []TaskRecord{
-		{ID: "a", TrackID: "done", SortKey: 1},
+		{ID: "a", TrackID: "in-progress", SortKey: 1},
+		{ID: "b", TrackID: "pr", SortKey: 2},
+	}}
+	model.Update(boardLoadedMsg{board: synced})
+
+	if got := selectedID(t, model); got != "b" {
+		t.Fatalf("selected = %q, want the card the sync loop moved", got)
+	}
+	if model.selectedTrackIndex != 1 {
+		t.Fatalf("selected column = %d, want the PR column", model.selectedTrackIndex)
+	}
+}
+
+func TestSyncMovingAnotherCardLeavesTheSelectionOnItsCard(t *testing.T) {
+	model := &Model{
+		focus:  FocusBoard,
+		tracks: []TrackRecord{{ID: "in-progress", SortOrder: 0}, {ID: "pr", SortOrder: 1}},
+		tasks: []TaskRecord{
+			{ID: "a", TrackID: "in-progress", SortKey: 1},
+			{ID: "b", TrackID: "in-progress", SortKey: 2},
+		},
+	}
+	model.selectTaskByID("b")
+
+	// A card above the selection leaves the column, so "b" shifts up a row.
+	synced := BoardSnapshot{Tracks: model.tracks, Tasks: []TaskRecord{
+		{ID: "a", TrackID: "pr", SortKey: 1},
 		{ID: "b", TrackID: "in-progress", SortKey: 2},
 	}}
-	model.Update(boardActionMsg{board: &synced})
+	model.Update(boardLoadedMsg{board: synced})
 
+	if got := selectedID(t, model); got != "b" {
+		t.Fatalf("selected = %q, want the selection to stay on its card", got)
+	}
 	if model.selectedTrackIndex != 0 {
 		t.Fatalf("selected column = %d, want the user's column to stay put", model.selectedTrackIndex)
+	}
+}
+
+func TestRemovedSelectedCardFallsBackToTheNearestSlot(t *testing.T) {
+	model := &Model{
+		focus:  FocusBoard,
+		tracks: []TrackRecord{{ID: "in-progress", SortOrder: 0}},
+		tasks: []TaskRecord{
+			{ID: "a", TrackID: "in-progress", SortKey: 1},
+			{ID: "b", TrackID: "in-progress", SortKey: 2},
+		},
+	}
+	model.selectTaskByID("b")
+
+	model.Update(boardLoadedMsg{board: BoardSnapshot{Tracks: model.tracks, Tasks: []TaskRecord{
+		{ID: "a", TrackID: "in-progress", SortKey: 1},
+	}}})
+
+	if got := selectedID(t, model); got != "a" {
+		t.Fatalf("selected = %q, want the remaining card", got)
 	}
 }
