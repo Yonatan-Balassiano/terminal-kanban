@@ -2224,6 +2224,10 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 	m.repos = board.Repos
 	m.pillars = board.Pillars
 	m.labels = board.Labels
+	selectedTaskID := ""
+	if selected := m.selectedTask(); selected != nil {
+		selectedTaskID = selected.ID
+	}
 	m.tracks = board.Tracks
 	oldAttention := map[string]bool{}
 	for _, task := range m.tasks {
@@ -2299,8 +2303,15 @@ func (m *Model) applyBoard(board BoardSnapshot) {
 		}
 	}
 
-	m.selectedTrackIndex = clamp(m.selectedTrackIndex, 0, max(0, len(m.sortedTracks())-1))
-	m.selectedTaskIndex = clamp(m.selectedTaskIndex, 0, max(0, len(m.selectedTrackTasks())-1))
+	// The selection is a column and a row, so a card moving under it — the
+	// sync loop advancing it to PR, a sibling leaving the column — would leave
+	// it on whatever slid into that slot. Keep it on the same card instead,
+	// wherever that card now sits; only a card that is gone (or filtered out)
+	// falls back to the nearest slot.
+	if !m.selectTaskByID(selectedTaskID) {
+		m.selectedTrackIndex = clamp(m.selectedTrackIndex, 0, max(0, len(m.sortedTracks())-1))
+		m.selectedTaskIndex = clamp(m.selectedTaskIndex, 0, max(0, len(m.selectedTrackTasks())-1))
+	}
 }
 
 func (m *Model) chatTranscript() []ChatMessage {
