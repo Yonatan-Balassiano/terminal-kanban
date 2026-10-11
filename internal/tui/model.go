@@ -51,7 +51,10 @@ type boardActionMsg struct {
 	status            string
 	activateTaskID    string
 	focusTerminalSlot SessionSlot
-	err               error
+	// selectTaskID moves the board selection onto this card once the new
+	// board is applied, wherever it now sits.
+	selectTaskID string
+	err          error
 }
 
 type sessionOpenedMsg struct {
@@ -445,6 +448,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.board != nil {
 			m.applyBoard(*msg.board)
+			m.selectTaskByID(msg.selectTaskID)
 		}
 		if msg.status != "" {
 			m.statusMessage = msg.status
@@ -2043,11 +2047,25 @@ func (m *Model) moveContextTaskCmd(task *TaskRecord, direction int) tea.Cmd {
 	if trackIndex < 0 || nextIndex < 0 || nextIndex >= len(sortedTracks) {
 		return nil
 	}
-	return m.boardActionCmd(
+	move := m.boardActionCmd(
 		"moveTask",
 		map[string]string{"id": task.ID, "trackId": sortedTracks[nextIndex].ID},
 		"Moved task.",
 	)
+	// The selection is a column and a row, so left alone it stays where the
+	// card was and lands on whichever card slides into that slot. Follow the
+	// moved card instead; the board scrolls to keep the selection in view.
+	// Only for a move made here — a card the sync loop moves never pulls
+	// focus away from where the user is looking.
+	taskID := task.ID
+	return func() tea.Msg {
+		msg := move()
+		if action, ok := msg.(boardActionMsg); ok && action.err == nil {
+			action.selectTaskID = taskID
+			return action
+		}
+		return msg
+	}
 }
 
 func (m *Model) setUIStateCmd(patch map[string]interface{}) tea.Cmd {
