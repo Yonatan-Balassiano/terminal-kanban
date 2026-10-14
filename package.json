@@ -7,13 +7,15 @@
     "agentboard": "./dist/bin/agentboard.js"
   },
   "scripts": {
-    "build": "npm run build:ts && npm run build:go",
+    "build": "npm run build:ts && npm run build:go && npm run build:web",
     "build:go": "mkdir -p .cache/go-build .cache/go-path .cache/go-mod dist-go && GOCACHE=\"$PWD/.cache/go-build\" GOPATH=\"$PWD/.cache/go-path\" GOMODCACHE=\"$PWD/.cache/go-mod\" go build -o dist-go/agentboard-tui ./cmd/agentboard-tui",
     "build:ts": "tsc && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
+    "build:web": "vite build --config web/vite.config.ts",
     "bootstrap": "bash scripts/bootstrap.sh",
     "dev": "npm run build:go && tsx src/bin/agentboard.ts",
+    "dev:web": "vite --config web/vite.config.ts",
     "lint": "eslint src",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "format": "prettier --write src",
@@ -36,10 +38,16 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.12.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
     "prettier": "^3.3.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tsx": "^4.16.2",
     "typescript": "^5.5.4",
     "typescript-eslint": "^8.0.0",
+    "vite": "^6.4.3",
     "vitest": "^2.0.5"
   },
   "engines": {

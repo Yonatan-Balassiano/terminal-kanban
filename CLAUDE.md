@@ -79,6 +79,14 @@ Sessions are either PTY-backed (embedded in the TUI terminal pane) or tmux-backe
 
 `getTaskDevPortalURL` (`view.go`) links `https://wix-bo.com/dev/project/<artifact-id>`, using `task.Release.BlockingArtifactName` — but only while `task.Release.Stage` is `"rc-built"` or `"rolling-out"`. Both are load-bearing: `BlockingArtifactName` is empty until the card has merged (no `TaskReleaseSummary` at all pre-merge — see `summarizeRelease` in `release-matching.ts`) and empty again once fully `"ga"` (nothing left blocking it, so there's no name to build the link from), and `"awaiting-build"` means there's no release candidate built yet for the page to show anything about — for both of those edges `openPRCmd` (`model.go`) falls back to the PR link, same as before this existed. Only the plain `o` keypress prefers the dev portal; `v` (open PR checks) always stays PR-specific, since checks are a property of the pull request, not the artifact.
 
+### Web board (`ui: "web"`)
+
+A second transport in front of the same `dispatch()`: `src/daemon/web-server.ts` serves `POST /api/rpc`, Server-Sent Events on `/api/events` (every `serverEvents` push except `session_update`) and the built React app (`web/` → `dist/web`) on `127.0.0.1:<web.port>` (default 4317). Localhost alone is not a boundary — any page in the browser can reach it — so every API call needs the token in `<stateDir>/web-token` (handed over once as `?t=`, swapped for an HttpOnly cookie), a matching `Host` (DNS rebinding) and no foreign `Origin`, and only `WEB_RPC_METHODS` are reachable. Widen that list deliberately; it is the whole write surface.
+
+In web mode the tmux layout window has no board pane. `focusTask` (`web-layout.ts`) opens the card's session, joins its pane into the window marked `@agentboard_web_layout`, and only then parks the old pane in `agentboard-task-panes` — a window with no panes is destroyed along with the session the terminal is attached to. It checks the layout exists **before** opening the session: opening starts the agent, and a session nobody can see is one nobody asked for. It shares the pane tag, holding session and layout lock with the Go TUI's `attachTaskSessionInTmux`.
+
+The web board deliberately has no columns and no "done": a card is New / Working / Idle / Needs you / Stopped (from `getFleetStatus`), and progress is per pull request, with merged PRs advanced by `getReleaseStatus` (`web/src/model.ts`).
+
 ## Key Constraints
 
 - Node.js version must be exactly `24.x` (see `engines` in `package.json`)

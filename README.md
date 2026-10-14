@@ -178,6 +178,8 @@ gh pr merge <pr-number> -s
 
 ```bash
 agentboard                 # launch the TUI
+agentboard --ui web        # web board in the browser; the terminal shows only the selected card's session
+agentboard web [--print]   # open (or print the sign-in URL of) the web board
 agentboard init            # initialize config/state directories
 agentboard doctor          # run environment checks
 agentboard ls              # list tasks
@@ -227,7 +229,9 @@ agentboard daemon status --json
 
 ```bash
 npm run build
+npm run build:web          # build only the web board (web/ → dist/web)
 npm run dev
+npm run dev:web            # web board with hot reload, proxied to the running daemon
 npm run test
 npm run lint
 npm run typecheck
@@ -303,6 +307,25 @@ Current behavior:
 - no checks means “all”
 
 Applied filters are summarized in the filter bar under the header.
+
+## Web Board
+
+`agentboard --ui web` (or `"ui": "web"` in the config) moves the board into the
+browser. The tmux layout session then holds only the selected card's Claude
+session; clicking a card in the browser opens its details and shows its session
+in the terminal. The TUI stays the default.
+
+- **Cards are grouped by parent and subtask**, not by column. A card's own
+  state is only *New*, *Working*, *Idle*, *Needs you* or *Stopped*; progress
+  lives on each pull request: *Draft*, *Open*, *Merged*, *RC built*,
+  *Rolling out*, *GA'd* or *Closed*.
+- **Shipped families are hidden by default** — no live session and every PR
+  GA'd, closed, or merged with nothing to deploy. Tick *Show shipped* to see them.
+- **Read-only.** The only action is showing a card's session; creating, moving
+  and deleting cards stay in the CLI and the TUI for now.
+- The daemon serves it on `http://127.0.0.1:4317` (`"web": { "port": … }` to
+  change). API calls need a token from the state dir, which `agentboard web`
+  hands to the browser once as a cookie. tmux backend only.
 
 ## Layout Modes
 

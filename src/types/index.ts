@@ -641,6 +641,7 @@ export type RPCMethod =
   | 'setActiveTaskBranch'
   | 'mergeTaskBranchPR'
   | 'commentTaskBranchPR'
+  | 'focusTask'
   | 'subscribe';
 
 // --------------- RPC param/result types ---------------------
@@ -1064,6 +1065,28 @@ export interface TmuxConfig {
   layoutSessionName: string;
 }
 
+/**
+ * Which board the `agentboard` command shows. `tui` is the Go board in the
+ * left tmux pane; `web` hands the board to the browser and leaves the tmux
+ * window to the selected card's session alone.
+ */
+export type UIMode = 'tui' | 'web';
+
+export interface WebConfig {
+  /** Port the daemon's local web server binds on 127.0.0.1. */
+  port: number;
+}
+
+export interface FocusTaskParams {
+  taskId: string;
+}
+
+export interface FocusTaskResult {
+  session: SessionRecord;
+  /** The tmux pane now showing in the web layout window. */
+  paneId: string;
+}
+
 /** Where an artifact stands between production and its newest release candidate. */
 export type ArtifactStatus = 'in-sync' | 'drift' | 'no-ga' | 'unknown';
 
@@ -1311,6 +1334,9 @@ export interface AppConfig {
   agentMacros: AgentMacro[];
   theme?: ThemeMode;
   iconMode?: 'unicode' | 'ascii';
+  /** Defaults to 'tui'. */
+  ui?: UIMode;
+  web: WebConfig;
 }
 
 export interface RepoOverlayConfig {
