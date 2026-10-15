@@ -1,8 +1,35 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
+import Markdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { rpc } from './api';
 import type { GetConversationResult } from '../../src/types/index.js';
 
 const POLL_MS = 3_000;
+
+// react-markdown never renders raw HTML from the text, so a transcript cannot inject markup.
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+  table: ({ children }) => (
+    <div className="md-table">
+      <table>{children}</table>
+    </div>
+  ),
+};
+
+/** Memoised: the poll re-renders every 3s, and re-parsing unchanged messages is wasted work. */
+const MessageText = memo(function MessageText({ text }: { text: string }) {
+  return (
+    <div className="msg-text md">
+      <Markdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+        {text}
+      </Markdown>
+    </div>
+  );
+});
 
 const UNAVAILABLE: Record<NonNullable<GetConversationResult['unavailable']>, string> = {
   'no-session': 'No conversation yet. Press Enter to start the session.',
@@ -75,13 +102,16 @@ export function Conversation({ taskId }: { taskId: string }) {
         >
           {data.messages.map((message, index) =>
             message.role === 'tool' ? (
-              <div key={index} className="msg msg-tool mono" title={message.text}>
-                ⚙ {message.text}
+              <div key={index} className="msg msg-tool" title={message.text}>
+                <span className="msg-mark">⎿</span>
+                <span className="msg-tool-text">{message.text}</span>
               </div>
             ) : (
               <div key={index} className={`msg msg-${message.role}`}>
-                <div className="msg-who">{message.role === 'user' ? 'You' : 'Claude'}</div>
-                <div className="msg-text">{message.text}</div>
+                <span className="msg-mark" aria-label={message.role === 'user' ? 'You' : 'Claude'}>
+                  {message.role === 'user' ? '>' : '●'}
+                </span>
+                <MessageText text={message.text} />
               </div>
             ),
           )}

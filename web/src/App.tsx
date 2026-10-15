@@ -39,9 +39,12 @@ type Toast = { kind: 'ok' | 'error'; text: string };
 
 const LAYOUT_NOT_RUNNING = /web terminal layout is not running/i;
 
+/** A field that takes typed text. A focused checkbox or button must not swallow the board's keys. */
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
-  return Boolean(el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)));
+  if (!el) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  return el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'reset'].includes((el as HTMLInputElement).type);
 }
 
 function errorText(err: unknown): string {
