@@ -501,7 +501,19 @@ export class GitService {
       'id_ed25519',
       '*credentials*.json',
     ];
-    const excludeFile = join(tmpdir(), `agentboard-wip-exclude-${randomBytes(6).toString('hex')}`);
+    // Resolved by git on the repo's own host, never from this process's tmpdir():
+    // for a remote card the transport is ssh, and a local `/var/folders/...`
+    // path does not exist (and cannot be created) on the far side.
+    const excludeFile = await this.run(
+      gitArgv(
+        repoPath,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        `agentboard-wip-exclude-${randomBytes(6).toString('hex')}`,
+      ),
+      repoPath,
+    );
     await this.transport.writeFileIfChanged(excludeFile, excludePatterns.join('\n') + '\n');
     try {
       await this.run(

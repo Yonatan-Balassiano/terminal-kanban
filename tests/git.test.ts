@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { GitService } from '../src/services/git.js';
+import { LocalTransport } from '../src/services/transport/local.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -162,5 +163,27 @@ describe('GitService.stageAndCommitWip', () => {
     expect(committed).not.toContain('.env');
     // Excluded from the commit, not deleted from disk.
     expect(git(repo, 'status', '--porcelain')).toContain('.env');
+  });
+
+  it('writes its temporary excludes file inside the repo, not this process tmpdir', async () => {
+    // Arrange — the transport may be ssh to a host where this process's
+    // tmpdir() (macOS `/var/folders/...`) does not exist and cannot be made.
+    writeFileSync(join(repo, 'notes.txt'), 'legit change\n');
+    const transport = new LocalTransport();
+    const written: string[] = [];
+    const write = transport.writeFileIfChanged.bind(transport);
+    transport.writeFileIfChanged = async (path, content, mode) => {
+      written.push(path);
+      return write(path, content, mode);
+    };
+    const service = new GitService(transport);
+
+    // Act
+    await service.stageAndCommitWip(repo, '[teleport wip] test');
+
+    // Assert
+    expect(written).toHaveLength(1);
+    expect(written[0].startsWith(realpathSync(join(repo, '.git')))).toBe(true);
+    expect(existsSync(written[0])).toBe(false);
   });
 });
