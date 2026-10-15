@@ -232,3 +232,81 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 
 .empty-screen { max-width: 480px; margin: 15vh auto; padding: 0 16px; }
 .empty-screen h1 { font-size: 20px; }
+
+/* ---------- toolbar, dialogs, toast */
+.layout.no-detail { grid-template-columns: minmax(0, 1fr); }
+.icon-button {
+  width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+  cursor: pointer; font-weight: 600; color: var(--muted);
+}
+.icon-button:hover { color: var(--fg); }
+.topbar .primary { height: 30px; }
+.secondary {
+  border: 1px solid var(--line); background: var(--surface); padding: 6px 14px; border-radius: 6px; cursor: pointer;
+}
+.primary.danger, .tool.danger:hover:not(:disabled) { background: var(--pr-closed); color: #fff; border-color: var(--pr-closed); }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.toolbar-gap { width: 8px; }
+.tool {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 3px 8px;
+  font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+}
+.tool:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.tool:disabled { opacity: .45; cursor: default; }
+kbd {
+  font: 11px var(--mono); padding: 0 5px; border-radius: 4px; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--muted); line-height: 16px;
+}
+
+.backdrop {
+  position: fixed; inset: 0; background: rgb(10 12 16 / .45); display: flex; align-items: flex-start;
+  justify-content: center; padding: 10vh 16px; z-index: 20;
+}
+.modal {
+  width: min(560px, 100%); max-height: 84vh; overflow: auto; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; box-shadow: 0 20px 50px rgb(0 0 0 / .25);
+}
+.modal-title { margin: 0 0 12px; font-size: 16px; }
+.form { display: flex; flex-direction: column; gap: 12px; }
+.form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.form label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; }
+.form input:not([type='checkbox']), .form select, .form textarea {
+  font: 14px/1.4 var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 7px 10px;
+}
+.form textarea { resize: vertical; }
+.form p { margin: 0 0 6px; }
+.form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.form-actions .muted { margin-right: auto; }
+
+.modal:has(.help) { width: min(760px, 100%); }
+.help { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; }
+.help h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 10px 0 6px; }
+.help dl { margin: 0; }
+.help-row { display: grid; grid-template-columns: 104px 1fr; align-items: start; gap: 8px; padding: 3px 0; font-size: 13px; }
+.help-row dt { display: flex; flex-wrap: wrap; gap: 3px; align-items: flex-start; align-content: flex-start; }
+.help-row dd { margin: 0; }
+@media (max-width: 640px) { .help { grid-template-columns: 1fr; } }
+
+.toast {
+  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 30; max-width: min(640px, 90vw);
+  padding: 9px 16px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / .25); cursor: pointer;
+}
+.toast-error { background: var(--pr-closed); color: #fff; }
+
+/* ---------- conversation */
+.h2-note { margin-left: 8px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.convo {
+  display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto;
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--bg);
+}
+.msg { border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+.msg-who { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+.msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-user { background: var(--accent-soft); align-self: flex-end; max-width: 92%; }
+.msg-assistant { background: var(--surface); border: 1px solid var(--line); }
+.msg-tool {
+  font-size: 11.5px; color: var(--muted); padding: 1px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

@@ -51,6 +51,7 @@ import type {
   TaskBranchRecord,
   TaskRecord,
   FocusTaskParams,
+  GetConversationParams,
   FocusTaskResult,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
@@ -1049,6 +1050,12 @@ export async function dispatch(
         const paneId = await services.webLayout.focus(session.backendSessionId);
         const result: FocusTaskResult = { session, paneId };
         return { id: req.id, result };
+      }
+
+      case 'getConversation': {
+        const params = p as unknown as GetConversationParams;
+        const limit = Math.min(Math.max(Number(params.limit) || 30, 1), 200);
+        return { id: req.id, result: services.session.getConversation(params.taskId, limit) };
       }
 
       case 'subscribe':

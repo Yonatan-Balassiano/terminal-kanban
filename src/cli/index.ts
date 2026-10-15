@@ -618,7 +618,7 @@ export function buildCli(): Command {
   program
     .command('web')
     .description(
-      'Open the web board in the browser (read-only; clicking a card shows its session in the web tmux layout)'
+      'Open the web board in the browser (clicking a card shows its session in the web tmux layout)'
     )
     .option('--print', 'Print the sign-in URL instead of opening the browser')
     .option('--home', 'Run the placeholder pane of the web tmux layout (internal)')

@@ -22,7 +22,7 @@ Four things are worth knowing up front, because they change what is safe to do:
 | `agentboard fleet` | Every live session and its state — one call instead of poking N panes |
 | `agentboard attention` | Which cards want a human right now, and why |
 | `agentboard repos ls` | Repo ids/labels, for `--repo` |
-| `agentboard web --print` | The web board's sign-in URL, for a human — read-only, no `--json` |
+| `agentboard web --print` | The web board's sign-in URL, for a human — no `--json`; agents use the CLI, not the web board |
 
 Add `--json` to any of them when you need to parse the result.
 

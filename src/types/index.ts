@@ -642,6 +642,7 @@ export type RPCMethod =
   | 'mergeTaskBranchPR'
   | 'commentTaskBranchPR'
   | 'focusTask'
+  | 'getConversation'
   | 'subscribe';
 
 // --------------- RPC param/result types ---------------------
@@ -1075,6 +1076,27 @@ export type UIMode = 'tui' | 'web';
 export interface WebConfig {
   /** Port the daemon's local web server binds on 127.0.0.1. */
   port: number;
+}
+
+export interface GetConversationParams {
+  taskId: string;
+  /** How many of the last messages to return. Defaults to 30. */
+  limit?: number;
+}
+
+export interface ConversationPreviewMessage {
+  role: 'user' | 'assistant' | 'tool';
+  text: string;
+  at?: number;
+}
+
+export interface GetConversationResult {
+  /** Oldest first. */
+  messages: ConversationPreviewMessage[];
+  /** When the conversation was last written. */
+  updatedAt?: number;
+  /** Why there is nothing to show, when there is nothing. */
+  unavailable?: 'no-session' | 'no-transcript' | 'remote';
 }
 
 export interface FocusTaskParams {

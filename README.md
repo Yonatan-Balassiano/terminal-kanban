@@ -322,8 +322,14 @@ its details and shows its session there. The TUI stays the default.
   *Rolling out*, *GA'd* or *Closed*.
 - **Shipped families are hidden by default** — no live session and every PR
   GA'd, closed, or merged with nothing to deploy. Tick *Show shipped* to see them.
-- **Read-only.** The only action is showing a card's session; creating, moving
-  and deleting cards stay in the CLI and the TUI for now.
+- **The conversation, in the details pane.** The last turns of the selected
+  card's Claude conversation, read from its transcript and refreshed every few
+  seconds.
+- **Actions and the TUI's keys.** `n` new card (optionally a subtask, started
+  right away), `r` rename, `d` delete (uncommitted work is archived; the browser
+  can never purge), `R` restart, `c`/`m`/`j` create, merge and comment on the
+  PR, `o`/`v` open the PR or its checks, `s` sync. Arrows (and `k`, `h`, `l`)
+  move through the tree; Enter shows the card in the terminal. `?` lists them all.
 - The daemon serves it on `http://127.0.0.1:4317` (`"web": { "port": … }` to
   change). API calls need a token from the state dir, which `agentboard web`
   hands to the browser once as a cookie. tmux backend only.

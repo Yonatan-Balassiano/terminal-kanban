@@ -20,8 +20,33 @@ import {
   type TaskRecord,
 } from './model';
 import { useBoard } from './useBoard';
+import { Conversation } from './Conversation';
+import { ConfirmDialog, HelpDialog, NewCardDialog, TextDialog, type NewCardInput } from './Dialogs';
+import { commandForKey, navigate, openTarget, primaryPR, visibleCards, type Command } from './keys';
 
 type FocusStatus = { taskId: string; kind: 'pending' | 'ok' | 'error'; message: string };
+
+type Dialog =
+  | { kind: 'new' }
+  | { kind: 'rename'; task: TaskRecord }
+  | { kind: 'delete'; task: TaskRecord }
+  | { kind: 'restart'; task: TaskRecord }
+  | { kind: 'merge'; task: TaskRecord }
+  | { kind: 'comment'; task: TaskRecord }
+  | { kind: 'help' };
+
+type Toast = { kind: 'ok' | 'error'; text: string };
+
+const LAYOUT_NOT_RUNNING = /web terminal layout is not running/i;
+
+function isTyping(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return Boolean(el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)));
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 function readStored<T>(key: string, fallback: T): T {
   try {
@@ -50,22 +75,28 @@ export function App() {
     () => new Set(readStored<string[]>('agentboard.collapsed', [])),
   );
   const [focus, setFocus] = useState<FocusStatus | null>(null);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const [detailOpen, setDetailOpen] = useState<boolean>(() => readStored('agentboard.detailOpen', true));
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => writeStored('agentboard.filter', { ...filter, query: '' }), [filter]);
   useEffect(() => writeStored('agentboard.selected', selectedId), [selectedId]);
   useEffect(() => writeStored('agentboard.collapsed', [...collapsed]), [collapsed]);
+  useEffect(() => writeStored('agentboard.detailOpen', detailOpen), [detailOpen]);
 
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === '/' && document.activeElement !== searchRef.current) {
-        event.preventDefault();
-        searchRef.current?.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), toast.kind === 'error' ? 8000 : 4000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  // Keep the keyboard selection on screen.
+  useEffect(() => {
+    if (selectedId) document.getElementById(`card-${selectedId}`)?.scrollIntoView({ block: 'nearest' });
+  }, [selectedId]);
 
   const tree = useMemo(
     () => (board ? buildCardTree(board, fleet, releases, filter) : []),
@@ -79,23 +110,7 @@ export function App() {
 
   const selected = board?.tasks.find((task) => task.id === selectedId) ?? null;
 
-  const showInTerminal = useCallback(async (task: TaskRecord) => {
-    setFocus({ taskId: task.id, kind: 'pending', message: 'Opening session…' });
-    try {
-      await rpc('focusTask', { taskId: task.id });
-      setFocus({ taskId: task.id, kind: 'ok', message: 'Showing in terminal' });
-    } catch (err) {
-      setFocus({ taskId: task.id, kind: 'error', message: err instanceof Error ? err.message : String(err) });
-    }
-  }, []);
-
-  const selectCard = useCallback(
-    (task: TaskRecord) => {
-      setSelectedId(task.id);
-      void showInTerminal(task);
-    },
-    [showInTerminal],
-  );
+  const visible = useMemo(() => visibleCards(tree, collapsed), [tree, collapsed]);
 
   const toggleCollapsed = useCallback((id: string) => {
     setCollapsed((previous) => {
@@ -105,6 +120,230 @@ export function App() {
       return next;
     });
   }, []);
+
+  const showInTerminal = useCallback(async (task: TaskRecord) => {
+    setFocus({ taskId: task.id, kind: 'pending', message: 'Opening session…' });
+    try {
+      await rpc('focusTask', { taskId: task.id });
+      setFocus({ taskId: task.id, kind: 'ok', message: 'Showing in terminal' });
+    } catch (err) {
+      setFocus({ taskId: task.id, kind: 'error', message: errorText(err) });
+    }
+  }, []);
+
+  const closeDialog = useCallback(() => {
+    setDialog(null);
+    setDialogBusy(false);
+    setDialogError(null);
+  }, []);
+
+  /** Runs a dialog's action: the dialog stays open, showing the error, if it fails. */
+  const runDialog = useCallback(
+    async (action: () => Promise<string | void>) => {
+      setDialogBusy(true);
+      setDialogError(null);
+      try {
+        const message = await action();
+        closeDialog();
+        if (message) setToast({ kind: 'ok', text: message });
+      } catch (err) {
+        setDialogBusy(false);
+        setDialogError(errorText(err));
+      }
+    },
+    [closeDialog],
+  );
+
+  /** Runs an action with no dialog, reporting the outcome as a toast. */
+  const runQuick = useCallback(async (pending: string, action: () => Promise<string>) => {
+    setToast({ kind: 'ok', text: pending });
+    try {
+      setToast({ kind: 'ok', text: await action() });
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+    }
+  }, []);
+
+  const createCard = useCallback(
+    (input: NewCardInput) =>
+      runDialog(async () => {
+        const repo = board?.repos.find((r) => r.id === input.repoId);
+        const created = await rpc<TaskRecord>('createTask', {
+          title: input.title,
+          kind: repo ? 'repo' : 'general',
+          repoId: repo?.id,
+          pillarId: repo?.defaultPillarId,
+          parentTaskId: input.parentTaskId,
+          description: input.description || undefined,
+          initialPrompt: input.description || undefined,
+        });
+        setSelectedId(created.id);
+        if (input.parentTaskId) {
+          setCollapsed((previous) => {
+            const next = new Set(previous);
+            next.delete(input.parentTaskId as string);
+            return next;
+          });
+        }
+        if (!input.start) return `Created “${created.title}”`;
+        try {
+          await rpc('focusTask', { taskId: created.id });
+          setFocus({ taskId: created.id, kind: 'ok', message: 'Showing in terminal' });
+        } catch (err) {
+          // No layout to show it in: start it anyway, the user asked for that.
+          if (!LAYOUT_NOT_RUNNING.test(errorText(err))) throw err;
+          await rpc('openSession', { taskId: created.id, slot: 'primary' });
+        }
+        return `Created and started “${created.title}”`;
+      }),
+    [board, runDialog],
+  );
+
+  const runCommand = useCallback(
+    (command: Command) => {
+      const task = selected;
+      if (typeof command === 'object') {
+        const repo = board?.repos[command.repoIndex];
+        if (repo) setFilter((f) => ({ ...f, repoId: f.repoId === repo.id ? '' : repo.id }));
+        return;
+      }
+      switch (command) {
+        case 'up':
+        case 'down':
+        case 'collapse':
+        case 'expand': {
+          const move = navigate(visible, selectedId, command, collapsed);
+          if (move.toggle) toggleCollapsed(move.toggle);
+          if (move.select) setSelectedId(move.select);
+          return;
+        }
+        case 'search':
+          searchRef.current?.focus();
+          searchRef.current?.select();
+          return;
+        case 'clear':
+          if (filter.query) setFilter((f) => ({ ...f, query: '' }));
+          return;
+        case 'help':
+          setDialog({ kind: 'help' });
+          return;
+        case 'new':
+          setDialog({ kind: 'new' });
+          return;
+        case 'toggle-detail':
+          setDetailOpen((open) => !open);
+          return;
+        case 'repo-prev':
+        case 'repo-next': {
+          const ids = ['', ...(board?.repos.map((r) => r.id) ?? [])];
+          const step = command === 'repo-next' ? 1 : -1;
+          setFilter((f) => ({ ...f, repoId: ids[(ids.indexOf(f.repoId) + step + ids.length) % ids.length] ?? '' }));
+          return;
+        }
+        case 'sync':
+          void runQuick('Syncing with GitHub…', async () => {
+            await rpc('triggerSync');
+            return 'Sync done';
+          });
+          return;
+        case 'needs-you': {
+          if (!board) return;
+          const all = visibleCards(buildCardTree(board, fleet, releases, { ...filter, showShipped: true }), new Set());
+          const target = all.find((card) => card.node.state === 'needs-you');
+          if (!target) {
+            setToast({ kind: 'ok', text: 'No card needs you right now' });
+            return;
+          }
+          // Unfold its ancestors so the selection is on screen.
+          setCollapsed((previous) => {
+            const next = new Set(previous);
+            for (let t = board.tasks.find((x) => x.id === target.node.task.id); t?.parentTaskId; ) {
+              next.delete(t.parentTaskId);
+              t = board.tasks.find((x) => x.id === t?.parentTaskId);
+            }
+            return next;
+          });
+          setSelectedId(target.node.task.id);
+          return;
+        }
+      }
+
+      if (!task) {
+        setToast({ kind: 'error', text: 'Select a card first' });
+        return;
+      }
+      switch (command) {
+        case 'show':
+          void showInTerminal(task);
+          return;
+        case 'rename':
+          setDialog({ kind: 'rename', task });
+          return;
+        case 'delete':
+          setDialog({ kind: 'delete', task });
+          return;
+        case 'restart':
+          setDialog({ kind: 'restart', task });
+          return;
+        case 'merge-pr':
+          setDialog({ kind: 'merge', task });
+          return;
+        case 'comment-pr':
+          setDialog({ kind: 'comment', task });
+          return;
+        case 'create-pr':
+          void runQuick('Creating the pull request…', async () => {
+            const pr = await rpc<{ number?: number; url?: string } | null>('createTaskPR', { taskId: task.id });
+            return pr?.number ? `PR #${pr.number} is open` : 'Pull request requested';
+          });
+          return;
+        case 'open-pr':
+        case 'open-checks': {
+          const url = command === 'open-pr' ? openTarget(task, releases.get(task.id)) : primaryPR(task)?.prUrl;
+          if (!url) {
+            setToast({ kind: 'error', text: 'This card has no pull request yet' });
+            return;
+          }
+          window.open(command === 'open-checks' ? `${url}/checks` : url, '_blank', 'noopener');
+          return;
+        }
+      }
+    },
+    [board, collapsed, filter, fleet, releases, runQuick, selected, selectedId, showInTerminal, toggleCollapsed, visible],
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (dialog) return; // the dialog has the keyboard
+      if (isTyping(event.target)) {
+        if (event.key === 'Escape' && event.target === searchRef.current) {
+          setFilter((f) => ({ ...f, query: '' }));
+          searchRef.current?.blur();
+        } else if (event.key === 'Enter' && event.target === searchRef.current) {
+          // Like the TUI: Enter in the search jumps to the first match.
+          searchRef.current?.blur();
+          const first = visible[0];
+          if (first) setSelectedId(first.node.task.id);
+        }
+        return;
+      }
+      const command = commandForKey(event);
+      if (!command) return;
+      event.preventDefault();
+      runCommand(command);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dialog, runCommand, visible]);
+
+  const selectCard = useCallback(
+    (task: TaskRecord) => {
+      setSelectedId(task.id);
+      void showInTerminal(task);
+    },
+    [showInTerminal],
+  );
+
 
   if (!signedIn) {
     return (
@@ -158,12 +397,18 @@ export function App() {
             />
             Show shipped{hiddenShipped > 0 ? ` (${hiddenShipped})` : ''}
           </label>
+          <button className="primary" onClick={() => setDialog({ kind: 'new' })} title="New card (n)">
+            + New card
+          </button>
+          <button className="icon-button" onClick={() => setDialog({ kind: 'help' })} title="Keyboard shortcuts (?)">
+            ?
+          </button>
         </div>
       </header>
 
       {error && <div className="banner">{error}</div>}
 
-      <div className="layout">
+      <div className={detailOpen ? 'layout' : 'layout no-detail'}>
         <main className="tree" aria-label="Cards">
           {!board && <p className="muted pad">Loading board…</p>}
           {board && tree.length === 0 && (
@@ -189,25 +434,161 @@ export function App() {
           </ul>
         </main>
 
-        <aside className="detail" aria-label="Card details">
-          {selected && board ? (
-            <CardDetail
-              task={selected}
-              board={board}
-              fleet={fleet}
-              releases={releases.get(selected.id)}
-              focus={focus?.taskId === selected.id ? focus : null}
-              onShow={() => void showInTerminal(selected)}
-              onSelect={(task) => setSelectedId(task.id)}
-            />
-          ) : (
-            <div className="detail-empty">
-              <p>Select a card to see its pull requests.</p>
-              <p className="muted">Clicking a card also shows its Claude session in the terminal.</p>
-            </div>
-          )}
-        </aside>
+        {detailOpen && (
+          <aside className="detail" aria-label="Card details">
+            {selected && board ? (
+              <CardDetail
+                task={selected}
+                board={board}
+                fleet={fleet}
+                releases={releases.get(selected.id)}
+                focus={focus?.taskId === selected.id ? focus : null}
+                onShow={() => void showInTerminal(selected)}
+                onSelect={(task) => setSelectedId(task.id)}
+                onCommand={runCommand}
+              />
+            ) : (
+              <div className="detail-empty">
+                <p>Select a card to see its pull requests and conversation.</p>
+                <p className="muted">
+                  Clicking a card also shows its Claude session in the terminal. Arrows move, Enter shows, ? lists
+                  every key.
+                </p>
+              </div>
+            )}
+          </aside>
+        )}
       </div>
+
+      {toast && (
+        <div className={`toast toast-${toast.kind}`} role="status" onClick={() => setToast(null)}>
+          {toast.text}
+        </div>
+      )}
+
+      {board && dialog?.kind === 'new' && (
+        <NewCardDialog
+          board={board}
+          defaultRepoId={filter.repoId || selected?.repoId}
+          selected={selected}
+          busy={dialogBusy}
+          error={dialogError}
+          onSubmit={(input) => void createCard(input)}
+          onClose={closeDialog}
+        />
+      )}
+      {dialog?.kind === 'rename' && (
+        <TextDialog
+          title="Rename card"
+          label="Title"
+          initial={dialog.task.title}
+          submitLabel="Rename"
+          busy={dialogBusy}
+          error={dialogError}
+          onSubmit={(title) =>
+            void runDialog(async () => {
+              await rpc('renameTask', { id: dialog.task.id, title });
+            })
+          }
+          onClose={closeDialog}
+        />
+      )}
+      {dialog?.kind === 'comment' && (
+        <TextDialog
+          title={`Comment on PR #${primaryPR(dialog.task)?.prNumber ?? ''}`}
+          label="Comment (Markdown)"
+          multiline
+          submitLabel="Post comment"
+          busy={dialogBusy}
+          error={dialogError}
+          onSubmit={(body) =>
+            void runDialog(async () => {
+              await rpc('commentTaskPR', { taskId: dialog.task.id, body });
+              return 'Comment posted';
+            })
+          }
+          onClose={closeDialog}
+        />
+      )}
+      {dialog?.kind === 'delete' && (
+        <ConfirmDialog
+          title="Delete card"
+          danger
+          confirmLabel="Delete"
+          body={
+            <>
+              <p>
+                Delete <strong>{dialog.task.title}</strong>? Its sessions are stopped and its worktrees removed.
+              </p>
+              <p className="muted small">
+                Uncommitted work is committed first and kept under <code>refs/agentboard/archive/{dialog.task.id}</code>.
+                {board && board.tasks.some((t) => t.parentTaskId === dialog.task.id) && ' Its subtasks stay on the board.'}
+              </p>
+            </>
+          }
+          busy={dialogBusy}
+          error={dialogError}
+          onConfirm={() =>
+            void runDialog(async () => {
+              const index = visible.findIndex((card) => card.node.task.id === dialog.task.id);
+              const outcome = await rpc<{ archivedShas: string[]; archiveRef: string }>('deleteTask', {
+                id: dialog.task.id,
+              });
+              const next = visible[index + 1] ?? visible[index - 1];
+              setSelectedId(next && next.node.task.id !== dialog.task.id ? next.node.task.id : null);
+              return outcome.archivedShas.length > 0
+                ? `Deleted. Uncommitted work saved at ${outcome.archiveRef}`
+                : 'Deleted';
+            })
+          }
+          onClose={closeDialog}
+        />
+      )}
+      {dialog?.kind === 'restart' && (
+        <ConfirmDialog
+          title="Restart session"
+          confirmLabel="Restart"
+          body={
+            <p>
+              Kill the session pane of <strong>{dialog.task.title}</strong> and start it again? The branch, worktree
+              and conversation are kept.
+            </p>
+          }
+          busy={dialogBusy}
+          error={dialogError}
+          onConfirm={() =>
+            void runDialog(async () => {
+              const task = dialog.task;
+              await rpc('recreateSession', { taskId: task.id, slot: 'primary' });
+              void showInTerminal(task);
+              return 'Session restarted';
+            })
+          }
+          onClose={closeDialog}
+        />
+      )}
+      {dialog?.kind === 'merge' && (
+        <ConfirmDialog
+          title="Merge pull request"
+          confirmLabel="Merge"
+          body={
+            <p>
+              Squash-merge PR <strong>#{primaryPR(dialog.task)?.prNumber}</strong> of{' '}
+              <strong>{dialog.task.title}</strong>?
+            </p>
+          }
+          busy={dialogBusy}
+          error={dialogError}
+          onConfirm={() =>
+            void runDialog(async () => {
+              await rpc('mergeTaskPR', { taskId: dialog.task.id });
+              return 'Merged';
+            })
+          }
+          onClose={closeDialog}
+        />
+      )}
+      {dialog?.kind === 'help' && <HelpDialog onClose={closeDialog} />}
     </div>
   );
 }
@@ -237,7 +618,7 @@ function CardBranch(props: CardBranchProps) {
   const pending = focus?.taskId === task.id && focus.kind === 'pending';
 
   return (
-    <li role="treeitem" aria-expanded={hasChildren ? !isCollapsed : undefined} aria-selected={selectedId === task.id}>
+    <li id={`card-${task.id}`} role="treeitem" aria-expanded={hasChildren ? !isCollapsed : undefined} aria-selected={selectedId === task.id}>
       <div
         className={[
           'card',
@@ -324,9 +705,10 @@ interface CardDetailProps {
   focus: FocusStatus | null;
   onShow: () => void;
   onSelect: (task: TaskRecord) => void;
+  onCommand: (command: Command) => void;
 }
 
-function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect }: CardDetailProps) {
+function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onCommand }: CardDetailProps) {
   const state = cardState(task, fleet);
   const repo = board.repos.find((r) => r.id === task.repoId);
   const parent = task.parentTaskId ? board.tasks.find((t) => t.id === task.parentTaskId) : undefined;
@@ -336,6 +718,7 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect }: C
     .map((id) => board.labels.find((label) => label.id === id)?.label)
     .filter((label): label is string => Boolean(label));
   const branches = [...task.branches].sort((a, b) => a.sortKey - b.sortKey);
+  const pr = primaryPR(task);
 
   return (
     <article className="detail-body">
@@ -356,11 +739,23 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect }: C
       </div>
 
       <div className="actions">
-        <button className="primary" onClick={onShow} disabled={focus?.kind === 'pending'}>
+        <button className="primary" onClick={onShow} disabled={focus?.kind === 'pending'} title="Enter">
           Show in terminal
         </button>
         {focus && <span className={`focus-msg focus-${focus.kind}`}>{focus.message}</span>}
       </div>
+      <div className="toolbar">
+        <ToolButton label="Rename" shortcut="r" onClick={() => onCommand('rename')} />
+        <ToolButton label="Restart" shortcut="R" onClick={() => onCommand('restart')} />
+        <ToolButton label="Delete" shortcut="d" onClick={() => onCommand('delete')} danger />
+        <span className="toolbar-gap" />
+        <ToolButton label="Open PR" shortcut="o" onClick={() => onCommand('open-pr')} disabled={!pr} />
+        <ToolButton label="Create PR" shortcut="c" onClick={() => onCommand('create-pr')} disabled={task.kind === 'general' || Boolean(pr && pr.prState !== 'closed')} />
+        <ToolButton label="Comment" shortcut="j" onClick={() => onCommand('comment-pr')} disabled={!pr || (pr.prState !== 'open' && pr.prState !== 'draft')} />
+        <ToolButton label="Merge" shortcut="m" onClick={() => onCommand('merge-pr')} disabled={!pr || pr.prState !== 'open'} />
+      </div>
+
+      <Conversation taskId={task.id} />
 
       <dl className="meta">
         <dt>Repo</dt>
@@ -439,6 +834,19 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect }: C
         </section>
       )}
     </article>
+  );
+}
+
+function ToolButton(props: { label: string; shortcut: string; onClick: () => void; disabled?: boolean; danger?: boolean }) {
+  return (
+    <button
+      className={props.danger ? 'tool danger' : 'tool'}
+      onClick={props.onClick}
+      disabled={props.disabled}
+      title={`${props.label} (${props.shortcut})`}
+    >
+      {props.label} <kbd>{props.shortcut}</kbd>
+    </button>
   );
 }
 

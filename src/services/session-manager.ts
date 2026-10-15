@@ -6,6 +6,7 @@ import type {
   AttentionItem,
   BackendSessionInfo,
   FleetSessionStatus,
+  GetConversationResult,
   SessionRecord,
   SessionBackend,
   SessionBackendType,
@@ -35,7 +36,7 @@ import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
 import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
 import type { SessionWorkspaceEntry } from './session-bootstrap.js';
-import { readTranscriptActivity, transcriptHasUserMessage } from './session-transcript.js';
+import { readTranscriptActivity, readTranscriptTail, transcriptHasUserMessage } from './session-transcript.js';
 import { composeResumeNotice, PendingMessageService } from './pending-messages.js';
 import { localResumeNoticePath } from './session-brief.js';
 import {
@@ -1655,6 +1656,34 @@ export class SessionManager {
       return true;
     }
     return session.initialPromptDelivered ?? null;
+  }
+
+  /**
+   * The end of a card's conversation, for the web board's preview. Read from
+   * the primary slot's own transcript — the newest session row that has a
+   * conversation id, live or not, since a stopped card's last words are still
+   * worth reading. Remote (ssh) cards keep theirs on the far host.
+   */
+  getConversation(taskId: string, limit?: number): GetConversationResult {
+    const row = this.db
+      .prepare<[string], { agent_session_id: string; backend_type: string }>(
+        `SELECT agent_session_id, backend_type FROM sessions
+          WHERE task_id = ? AND slot = 'primary' AND agent_session_id IS NOT NULL
+          ORDER BY updated_at DESC
+          LIMIT 1`
+      )
+      .get(taskId);
+    if (!row) {
+      return { messages: [], unavailable: 'no-session' };
+    }
+    if (row.backend_type === 'ssh') {
+      return { messages: [], unavailable: 'remote' };
+    }
+    const tail = readTranscriptTail(row.agent_session_id, limit);
+    if (!tail) {
+      return { messages: [], unavailable: 'no-transcript' };
+    }
+    return tail;
   }
 
   async getFleetStatus(): Promise<FleetSessionStatus[]> {

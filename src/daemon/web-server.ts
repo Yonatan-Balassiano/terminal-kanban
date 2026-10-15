@@ -11,8 +11,8 @@
 // the token from the state dir (handed over once through `agentboard web` and
 // kept in an HttpOnly cookie), the Host header must name this server (DNS
 // rebinding), a cross-site Origin is refused, and only the methods in
-// `WEB_RPC_METHODS` are reachable — the browser board is read-only apart from
-// showing a card's session.
+// `WEB_RPC_METHODS` are reachable — the card actions the TUI offers, and no
+// configuration, raw input or remote-host methods.
 
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -26,13 +26,34 @@ import { dispatch, serverEvents } from './server.js';
 
 export { loadOrCreateWebToken, webBoardUrl } from './web-token.js';
 
+/**
+ * Everything the browser can call. This list is the web board's whole write
+ * surface: widen it deliberately. Left out on purpose — `sendInput` (typing
+ * into a pane), repo and config edits, teleport/reconnect (remote hosts), and
+ * `deleteTask`'s `purge` (stripped below: the web board always keeps the archive).
+ */
 export const WEB_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
+  // read
   'daemonStatus',
   'getBoard',
   'getFleetStatus',
   'getAttentionItems',
   'getReleaseStatus',
+  'getConversation',
+  // sessions
   'focusTask',
+  'openSession',
+  'recreateSession',
+  // cards
+  'createTask',
+  'renameTask',
+  'updateTaskDescription',
+  'deleteTask',
+  // pull requests
+  'createTaskPR',
+  'mergeTaskPR',
+  'commentTaskPR',
+  'triggerSync',
 ]);
 
 export const WEB_TOKEN_COOKIE = 'agentboard_web';
@@ -145,10 +166,14 @@ export function createWebServer(opts: WebServerOptions): http.Server {
       });
       return;
     }
+    let params = body.params;
+    if (method === 'deleteTask' && params && typeof params === 'object') {
+      params = { ...(params as Record<string, unknown>), purge: false };
+    }
     const rpcReq: RPCRequest = {
       id: crypto.randomUUID(),
       method: method as RPCMethod,
-      params: body.params,
+      params,
     };
     const response = await dispatch(rpcReq, opts.services, opts.socketPath);
     sendJson(res, response.error ? 500 : 200, response);

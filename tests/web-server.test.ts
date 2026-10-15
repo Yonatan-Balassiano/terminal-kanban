@@ -30,6 +30,7 @@ async function startHarness(): Promise<Harness> {
     },
     webLayout: { isRunning: vi.fn(async () => true), focus: vi.fn(async () => '%7') },
     board: { deleteTask: vi.fn() },
+    taskLifecycle: { deleteTask: vi.fn(async () => ({ archivedShas: [], archiveRef: 'refs/agentboard/archive/t1' })) },
   } as unknown as ServiceContainer;
 
   // The port is only known after listening, and the Host check needs it, so
@@ -76,9 +77,15 @@ describe('web server', () => {
     expect(body.result.tasks).toHaveLength(1);
   });
 
-  it('refuses methods outside the read-only allowlist', async () => {
-    const res = await rpc(h, 'deleteTask', { taskId: 't1' });
+  it('refuses methods outside the allowlist', async () => {
+    const res = await rpc(h, 'sendInput', { taskId: 't1', data: 'rm -rf ~\n' });
     expect(res.status).toBe(403);
+  });
+
+  it('never lets the browser purge a deleted card', async () => {
+    const res = await rpc(h, 'deleteTask', { id: 't1', purge: true });
+    expect(res.status).toBe(200);
+    expect(h.services.taskLifecycle.deleteTask).toHaveBeenCalledWith('t1', { purge: false });
   });
 
   it('requires the token', async () => {
