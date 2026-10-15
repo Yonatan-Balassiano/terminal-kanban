@@ -2,7 +2,7 @@
 // AgentBoard — read a session's own transcript as ground truth
 // ============================================================
 
-import { closeSync, globSync, openSync, readSync, statSync } from 'fs';
+import { closeSync, globSync, openSync, readFileSync, readSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -221,4 +221,86 @@ export function transcriptHasUserMessage(
     }
   }
   return false;
+}
+
+/** The record Claude Code appends to a conversation when it forks it. */
+const CONTINUED_IN_MARKER = '"type":"continued-in"';
+
+/** How many forks to follow before giving up — a guard, not an expected depth. */
+const MAX_CONTINUATION_HOPS = 16;
+
+/**
+ * The id a conversation's latest fork continued under, read from the
+ * `continued-in` record Claude Code writes into the original when it reopens
+ * it as a fork. Null when it was never forked or the file is unreadable.
+ */
+function readContinuedIn(path: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  const at = text.lastIndexOf(CONTINUED_IN_MARKER);
+  if (at === -1) {
+    return null;
+  }
+  const start = text.lastIndexOf('\n', at) + 1;
+  const end = text.indexOf('\n', at);
+  try {
+    const record = JSON.parse(text.slice(start, end === -1 ? undefined : end)) as {
+      continuedInSessionId?: unknown;
+    };
+    return typeof record.continuedInSessionId === 'string' && record.continuedInSessionId
+      ? record.continuedInSessionId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The conversation a card should resume, following Claude Code's own forks.
+ *
+ * Claude Code can reopen a conversation under a new id — observed when it
+ * relaunched itself in a live pane after an update — leaving only a
+ * `continued-in` pointer behind in the original. Everything said after that
+ * goes to the fork, so resuming the id AgentBoard pinned at creation brings
+ * back a conversation that stops where the fork began.
+ *
+ * A pointer is followed only when the fork was written at least as recently
+ * as the conversation it left: if the original has been resumed and worked in
+ * since, it is the newer of the two and is kept. Returns the given id
+ * unchanged whenever anything is missing or unreadable.
+ */
+export function resolveContinuedSessionId(
+  agentSessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  let current = agentSessionId;
+  const seen = new Set([current]);
+  for (let hop = 0; hop < MAX_CONTINUATION_HOPS; hop++) {
+    const path = findTranscriptPath(current, env);
+    if (!path) {
+      return current;
+    }
+    const next = readContinuedIn(path);
+    if (!next || seen.has(next)) {
+      return current;
+    }
+    const nextPath = findTranscriptPath(next, env);
+    if (!nextPath) {
+      return current;
+    }
+    try {
+      if (statSync(nextPath).mtimeMs < statSync(path).mtimeMs) {
+        return current;
+      }
+    } catch {
+      return current;
+    }
+    seen.add(next);
+    current = next;
+  }
+  return current;
 }
