@@ -35,7 +35,11 @@ import { resolveTaskBranchName } from './branch-name.js';
 import { extractLastOsc7Cwd } from './session-cwd.js';
 import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
 import type { SessionWorkspaceEntry } from './session-bootstrap.js';
-import { readTranscriptActivity, transcriptHasUserMessage } from './session-transcript.js';
+import {
+  readTranscriptActivity,
+  resolveContinuedSessionId,
+  transcriptHasUserMessage,
+} from './session-transcript.js';
 import { composeResumeNotice, PendingMessageService } from './pending-messages.js';
 import { localResumeNoticePath } from './session-brief.js';
 import {
@@ -774,6 +778,11 @@ export class SessionManager {
    * deliberately not filtered: the rows worth inheriting from are exactly the
    * dead ones. A slot that has never been opened gets a fresh id, which the
    * bootstrap script starts the conversation under.
+   *
+   * The stored id is followed through any fork Claude Code made of it (see
+   * resolveContinuedSessionId): a conversation it reopened under a new id
+   * mid-pane would otherwise be resumed from where the fork began, and the
+   * new session row records the followed id so the next open starts there.
    */
   private resolveAgentSessionId(taskId: string, slot: SessionSlot): string {
     const previous = this.db
@@ -789,7 +798,7 @@ export class SessionManager {
 
     // A uuid, not generateId(): it is the agent CLI's identifier, and claude
     // rejects --session-id values that are not one.
-    return previous?.agent_session_id ?? randomUUID();
+    return previous ? resolveContinuedSessionId(previous.agent_session_id) : randomUUID();
   }
 
   // ---- adoption --------------------------------------------

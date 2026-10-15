@@ -6,6 +6,7 @@ import {
   findTranscriptPath,
   forgetTranscriptPath,
   readTranscriptActivity,
+  resolveContinuedSessionId,
   transcriptHasUserMessage,
 } from '../src/services/session-transcript.js';
 
@@ -138,5 +139,86 @@ describe('session transcript', () => {
     // as not-yet-confirmed and fall back to the stored flag for, rather than
     // reporting an unsubmitted brief.
     expect(transcriptHasUserMessage(SESSION_ID, env)).toBe(false);
+  });
+
+  describe('resolveContinuedSessionId', () => {
+    const FORK_ID = '0c7e2b19-4d3a-4f6e-9b81-6a2d5c4e8f07';
+    const SECOND_FORK_ID = '7a1d9e40-2b6c-4e8f-a3d5-1f0b8c6e2d94';
+
+    function age(path: string, secondsAgo: number): void {
+      const at = new Date(Date.now() - secondsAgo * 1000);
+      utimesSync(path, at, at);
+    }
+
+    it('follows the pointer Claude Code leaves when it reopens a conversation as a fork', () => {
+      // Arrange — the original stops where the fork began; the fork carries on.
+      const original = writeTranscript([
+        { type: 'user', message: { content: 'Fix the flaky test.' } },
+        { type: 'continued-in', sessionId: SESSION_ID, continuedInSessionId: FORK_ID },
+      ]);
+      writeTranscript([{ type: 'user', message: { content: 'fix conflicts' } }], FORK_ID);
+      age(original, 60);
+
+      // Act + Assert
+      expect(resolveContinuedSessionId(SESSION_ID, env)).toBe(FORK_ID);
+    });
+
+    it('follows a chain of forks to the newest', () => {
+      // Arrange
+      const original = writeTranscript([
+        { type: 'continued-in', sessionId: SESSION_ID, continuedInSessionId: FORK_ID },
+      ]);
+      const fork = writeTranscript(
+        [{ type: 'continued-in', sessionId: FORK_ID, continuedInSessionId: SECOND_FORK_ID }],
+        FORK_ID,
+      );
+      writeTranscript([{ type: 'user', message: { content: 'hi' } }], SECOND_FORK_ID);
+      age(original, 120);
+      age(fork, 60);
+
+      // Act + Assert
+      expect(resolveContinuedSessionId(SESSION_ID, env)).toBe(SECOND_FORK_ID);
+    });
+
+    it('keeps the original when it was resumed and worked in after the fork', () => {
+      // Arrange — the fork is older than the original's latest turn, so the
+      // original is the conversation someone chose to continue.
+      writeTranscript([
+        { type: 'continued-in', sessionId: SESSION_ID, continuedInSessionId: FORK_ID },
+        { type: 'user', message: { content: 'what is next?' } },
+      ]);
+      const fork = writeTranscript([{ type: 'user', message: { content: 'hi' } }], FORK_ID);
+      age(fork, 60);
+
+      // Act + Assert
+      expect(resolveContinuedSessionId(SESSION_ID, env)).toBe(SESSION_ID);
+    });
+
+    it('keeps the id when there is no fork, no transcript, or the fork is missing', () => {
+      // Act + Assert — never forked, nothing on disk yet.
+      expect(resolveContinuedSessionId(SESSION_ID, env)).toBe(SESSION_ID);
+      writeTranscript([{ type: 'user', message: { content: 'hi' } }]);
+      expect(resolveContinuedSessionId(SESSION_ID, env)).toBe(SESSION_ID);
+
+      // A pointer to a conversation that is not on this machine.
+      writeTranscript([
+        { type: 'continued-in', sessionId: SESSION_ID, continuedInSessionId: FORK_ID },
+      ]);
+      expect(resolveContinuedSessionId(SESSION_ID, env)).toBe(SESSION_ID);
+    });
+
+    it('stops on a cycle instead of looping', () => {
+      // Arrange
+      writeTranscript([
+        { type: 'continued-in', sessionId: SESSION_ID, continuedInSessionId: FORK_ID },
+      ]);
+      writeTranscript(
+        [{ type: 'continued-in', sessionId: FORK_ID, continuedInSessionId: SESSION_ID }],
+        FORK_ID,
+      );
+
+      // Act + Assert — either end is acceptable; terminating is the point.
+      expect([SESSION_ID, FORK_ID]).toContain(resolveContinuedSessionId(SESSION_ID, env));
+    });
   });
 });
