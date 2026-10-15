@@ -87,7 +87,7 @@ In web mode the tmux layout window has no board pane. It is found by its `@agent
 
 `WEB_RPC_METHODS` now includes card actions (create, rename, delete, restart, PR create/merge/comment, sync) and `notifyTaskSession` for the message box under the conversation — the TUI's own surface, not more: no `sendInput` (raw keystrokes), no repo/config edits, no remote-host methods. From the browser, `deleteTask` always has `purge` forced to `false` and `notifyTaskSession` has `fromTaskId` removed, so a message can never claim to come from another card. The details pane's conversation preview is `getConversation` → `SessionManager.getConversation` → `readTranscriptTail` (`session-transcript.ts`), which reads only the last 768 KB of the primary slot's transcript and keeps user/assistant text plus one-line tool summaries (tool results, thinking, sidechains, `isMeta` and slash-command records are dropped; a compaction summary becomes a one-line marker).
 
-The web board deliberately has no columns and no "done": a card is New / Working / Idle / Needs you / Stopped (from `getFleetStatus`), and progress is per pull request, with merged PRs advanced by `getReleaseStatus` (`web/src/model.ts`).
+The web board deliberately has no columns and no "done": a card is New / Working / Idle / Needs you / Stopped (from `getFleetStatus`), and progress is per pull request, with merged PRs advanced by `getReleaseStatus` (`web/src/model.ts`). Cards keep a fixed order so they do not jump while agents work (`compareNodes`): not-started cards last, the rest by creation date, oldest first, at every level. Live state is shown on the card, never used to move it.
 
 ## Key Constraints
 
