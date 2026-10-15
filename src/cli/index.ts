@@ -600,7 +600,9 @@ export function buildCli(): Command {
           console.log('PTY sessions can only be shown by the TUI; set "sessionBackend": "tmux".');
           return;
         }
-        launchWebLayout(config);
+        if (launchWebLayout(config) === 'here') {
+          await runWebHome(webBoardUrl(config.web.port));
+        }
         return;
       }
       launchGoTUI(paths.socketPath, config);

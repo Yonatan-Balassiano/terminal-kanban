@@ -2,15 +2,16 @@
 // AgentBoard CLI — the web board (`ui: "web"`)
 // ============================================================
 //
-// The browser shows the board; the tmux layout session shows only the
-// selected card's session. This file opens the browser and builds that layout:
-// one window, marked with `@agentboard_web_layout`, whose first pane is a
-// placeholder until the first card is clicked. The daemon does the pane moves
-// from then on (`focusTask`, src/daemon/web-layout.ts).
+// The browser shows the board; one tmux window shows only the selected card's
+// session. This file opens the browser and marks that window with
+// `@agentboard_web_layout`; its first pane is a placeholder until the first
+// card is clicked. Run inside tmux, it is the window you ran it in (like the
+// TUI); outside tmux, it is a new `layoutSessionName` session. The daemon does
+// the pane moves from then on (`focusTask`, src/daemon/web-layout.ts).
 
 import { spawn, spawnSync } from 'child_process';
 import type { AppConfig } from '../types/index.js';
-import { WEB_LAYOUT_WINDOW_OPTION } from '../daemon/web-layout.js';
+import { WEB_LAYOUT_WINDOW_OPTION, WEB_PLACEHOLDER_PANE_OPTION } from '../daemon/web-layout.js';
 import { loadOrCreateWebToken, webBoardUrl } from '../daemon/web-token.js';
 
 export function webBoardUrlWithToken(config: AppConfig, stateDir: string): string {
@@ -64,12 +65,34 @@ function isWebLayoutSession(sessionName: string): boolean {
   return result.status === 0 && String(result.stdout).split('\n').some((line) => line.trim() === '1');
 }
 
+/** Moves the layout marker to `target`, so only one window is ever the layout. */
+function markLayoutWindow(target: string): void {
+  const windows = tmux(['list-windows', '-a', '-F', `#{window_id}\t#{${WEB_LAYOUT_WINDOW_OPTION}}`]);
+  for (const line of String(windows.stdout ?? '').split('\n')) {
+    const [windowId, marker] = line.split('\t');
+    if (windowId && marker?.trim() === '1') {
+      tmux(['set-option', '-w', '-u', '-t', windowId.trim(), WEB_LAYOUT_WINDOW_OPTION]);
+    }
+  }
+  tmux(['set-option', '-w', '-t', target, WEB_LAYOUT_WINDOW_OPTION, '1']);
+  tmux(['set-option', '-p', '-t', target, WEB_PLACEHOLDER_PANE_OPTION, '1']);
+}
+
 /**
- * Creates the web layout session if needed, then attaches to it (or switches
- * to it when already inside tmux). Refuses to replace a TUI layout session of
- * the same name: killing it would kill the card session showing in it.
+ * Sets up the web layout window. Inside tmux it takes over the current window
+ * and returns 'here': the caller's own process is the placeholder pane.
+ * Outside tmux it creates (or reuses) the layout session and attaches to it.
+ * Refuses to replace a TUI layout session of the same name: killing it would
+ * kill the card session showing in it.
  */
-export function launchWebLayout(config: AppConfig): void {
+export function launchWebLayout(config: AppConfig): 'here' | 'attached' {
+  const currentPane = process.env['TMUX'] ? process.env['TMUX_PANE'] : undefined;
+  if (currentPane) {
+    tmux(['has-session']); // surfaces a missing tmux binary
+    markLayoutWindow(currentPane);
+    return 'here';
+  }
+
   const sessionName = config.tmux.layoutSessionName;
   const exists = tmux(['has-session', '-t', exact(sessionName)]).status === 0;
 
@@ -85,16 +108,14 @@ export function launchWebLayout(config: AppConfig): void {
     if (created.status !== 0) {
       throw new Error(`Failed to create tmux session "${sessionName}": ${String(created.stderr).trim()}`);
     }
-    tmux(['set-option', '-w', '-t', `${exact(sessionName)}:`, WEB_LAYOUT_WINDOW_OPTION, '1']);
+    markLayoutWindow(`${exact(sessionName)}:`);
   }
 
-  const insideTmux = Boolean(process.env['TMUX']);
-  const result = spawnSync('tmux', insideTmux ? ['switch-client', '-t', exact(sessionName)] : ['attach-session', '-t', exact(sessionName)], {
-    stdio: 'inherit',
-  });
+  const result = spawnSync('tmux', ['attach-session', '-t', exact(sessionName)], { stdio: 'inherit' });
   if (typeof result.status === 'number' && result.status !== 0) {
     process.exit(result.status);
   }
+  return 'attached';
 }
 
 /** What the placeholder pane shows until a card is clicked. Never returns. */

@@ -696,9 +696,9 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     logError: (message, error) => appendErrorLog(opts.logFile, `[daemon] ${message}`, error),
     webLayout: {
       isRunning: async () =>
-        (await findWebLayoutWindow(execTmuxRunner, cfg.tmux.layoutSessionName)) !== null,
+        (await findWebLayoutWindow(execTmuxRunner)) !== null,
       focus: (backendSessionId) =>
-        focusSessionInWebLayout(execTmuxRunner, cfg.tmux.layoutSessionName, backendSessionId),
+        focusSessionInWebLayout(execTmuxRunner, backendSessionId),
     },
     board,
     workspace,

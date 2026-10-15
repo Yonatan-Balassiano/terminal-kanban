@@ -311,9 +311,10 @@ Applied filters are summarized in the filter bar under the header.
 ## Web Board
 
 `agentboard --ui web` (or `"ui": "web"` in the config) moves the board into the
-browser. The tmux layout session then holds only the selected card's Claude
-session; clicking a card in the browser opens its details and shows its session
-in the terminal. The TUI stays the default.
+browser. Run inside tmux, the window you ran it in becomes the layout (like the
+TUI); outside tmux, it opens a `agentboard` tmux session. That window then holds
+only the selected card's Claude session; clicking a card in the browser opens
+its details and shows its session there. The TUI stays the default.
 
 - **Cards are grouped by parent and subtask**, not by column. A card's own
   state is only *New*, *Working*, *Idle*, *Needs you* or *Stopped*; progress
