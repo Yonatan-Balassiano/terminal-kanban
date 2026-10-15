@@ -14,6 +14,7 @@ import {
   type BoardSnapshot,
   type CardNode,
   type CardState,
+  type DoctorCheck,
   type FleetSessionStatus,
   type PRReleaseStatus,
   type TaskBranchRecord,
@@ -21,7 +22,7 @@ import {
 } from './model';
 import { useBoard } from './useBoard';
 import { Conversation } from './Conversation';
-import { ConfirmDialog, HelpDialog, NewCardDialog, TextDialog, type NewCardInput } from './Dialogs';
+import { ConfirmDialog, HelpDialog, NewCardDialog, TeleportDialog, TextDialog, type NewCardInput } from './Dialogs';
 import { commandForKey, navigate, openTarget, primaryPR, visibleCards, type Command } from './keys';
 
 type FocusStatus = { taskId: string; kind: 'pending' | 'ok' | 'error'; message: string };
@@ -31,6 +32,7 @@ type Dialog =
   | { kind: 'rename'; task: TaskRecord }
   | { kind: 'delete'; task: TaskRecord }
   | { kind: 'restart'; task: TaskRecord }
+  | { kind: 'teleport'; task: TaskRecord; checks: DoctorCheck[] | null; checkError: string | null }
   | { kind: 'merge'; task: TaskRecord }
   | { kind: 'comment'; task: TaskRecord }
   | { kind: 'help' };
@@ -139,6 +141,35 @@ export function App() {
     setDialogBusy(false);
     setDialogError(null);
   }, []);
+
+  /** Opens the teleport confirm and loads its preflight checks into it. */
+  const openTeleport = useCallback((task: TaskRecord) => {
+    if (task.kind === 'general') {
+      setToast({ kind: 'error', text: 'General tasks have no repo to teleport' });
+      return;
+    }
+    const direction = task.location === 'remote' ? 'remote-to-local' : 'local-to-remote';
+    setDialog({ kind: 'teleport', task, checks: null, checkError: null });
+    const settle = (checks: DoctorCheck[] | null, checkError: string | null) =>
+      setDialog((current) =>
+        current?.kind === 'teleport' && current.task.id === task.id ? { ...current, checks, checkError } : current,
+      );
+    rpc<DoctorCheck[]>('teleportTaskPreflight', { taskId: task.id, direction }).then(
+      (checks) => settle(checks, null),
+      (err) => settle(null, errorText(err)),
+    );
+  }, []);
+
+  // A teleport has landed once the board says the card moved, whatever became
+  // of the request that started it (a slow or dropped response, or a teleport
+  // run from the TUI while this dialog sat open): close the now-stale dialog.
+  useEffect(() => {
+    if (dialog?.kind !== 'teleport') return;
+    const live = board?.tasks.find((task) => task.id === dialog.task.id);
+    if (!live || live.location === dialog.task.location) return;
+    closeDialog();
+    setToast({ kind: 'ok', text: live.location === 'remote' ? 'Teleported to remote' : 'Teleported to local' });
+  }, [board, dialog, closeDialog]);
 
   /** Runs a dialog's action: the dialog stays open, showing the error, if it fails. */
   const runDialog = useCallback(
@@ -288,6 +319,9 @@ export function App() {
         case 'restart':
           setDialog({ kind: 'restart', task });
           return;
+        case 'teleport':
+          openTeleport(task);
+          return;
         case 'merge-pr':
           setDialog({ kind: 'merge', task });
           return;
@@ -312,7 +346,7 @@ export function App() {
         }
       }
     },
-    [board, collapsed, filter, fleet, releases, runQuick, selected, selectedId, showInTerminal, toggleCollapsed, visible],
+    [board, collapsed, filter, fleet, openTeleport, releases, runQuick, selected, selectedId, showInTerminal, toggleCollapsed, visible],
   );
 
   useEffect(() => {
@@ -432,6 +466,7 @@ export function App() {
                 focus={focus}
                 onSelect={selectCard}
                 onToggle={toggleCollapsed}
+                onTeleport={openTeleport}
               />
             ))}
           </ul>
@@ -570,6 +605,26 @@ export function App() {
           onClose={closeDialog}
         />
       )}
+      {dialog?.kind === 'teleport' && (
+        <TeleportDialog
+          task={dialog.task}
+          checks={dialog.checks}
+          checkError={dialog.checkError}
+          busy={dialogBusy}
+          error={dialogError}
+          onConfirm={() =>
+            void runDialog(async () => {
+              const task = dialog.task;
+              const toRemote = task.location !== 'remote';
+              await rpc('teleportTask', { taskId: task.id, direction: toRemote ? 'local-to-remote' : 'remote-to-local' });
+              // The pane the terminal showed died with the old session: show the new one if it was on screen.
+              if (focus?.taskId === task.id) void showInTerminal(task);
+              return toRemote ? 'Teleported to remote' : 'Teleported to local';
+            })
+          }
+          onClose={closeDialog}
+        />
+      )}
       {dialog?.kind === 'merge' && (
         <ConfirmDialog
           title="Merge pull request"
@@ -608,10 +663,11 @@ interface CardBranchProps {
   focus: FocusStatus | null;
   onSelect: (task: TaskRecord) => void;
   onToggle: (id: string) => void;
+  onTeleport: (task: TaskRecord) => void;
 }
 
 function CardBranch(props: CardBranchProps) {
-  const { node, depth, board, releases, selectedId, collapsed, focus, onSelect, onToggle } = props;
+  const { node, depth, board, releases, selectedId, collapsed, focus, onSelect, onToggle, onTeleport } = props;
   const { task } = node;
   const isCollapsed = collapsed.has(task.id);
   const hasChildren = node.children.length > 0;
@@ -628,6 +684,7 @@ function CardBranch(props: CardBranchProps) {
           `state-${node.state}`,
           selectedId === task.id ? 'selected' : '',
           task.isOrchestrator ? 'orchestrator' : '',
+          task.location === 'remote' ? 'remote' : '',
           node.shipped ? 'shipped' : '',
           depth === 0 ? 'root' : 'child',
         ].join(' ')}
@@ -647,6 +704,7 @@ function CardBranch(props: CardBranchProps) {
           <span className="card-line1">
             <StateChip state={node.state} />
             <span className="card-title">{task.title}</span>
+            {task.location === 'remote' && <RemoteTag />}
             {task.isOrchestrator && <span className="tag">orchestrator</span>}
             {task.childPrAlertTaskId && <span className="tag tag-alert">subtask PR</span>}
             {pending && <span className="spinner" aria-label="Opening session" />}
@@ -665,6 +723,16 @@ function CardBranch(props: CardBranchProps) {
             <span className="muted push">{relativeTime(task.updatedAt)}</span>
           </span>
         </button>
+        {task.kind !== 'general' && (
+          <button
+            className="card-teleport"
+            onClick={() => onTeleport(task)}
+            title={task.location === 'remote' ? 'Teleport to local (T)' : 'Teleport to remote (T)'}
+            aria-label={task.location === 'remote' ? 'Teleport to local' : 'Teleport to remote'}
+          >
+            ⇄
+          </button>
+        )}
       </div>
       {hasChildren && !isCollapsed && (
         <ul className="tree-list nested" role="group">
@@ -674,6 +742,14 @@ function CardBranch(props: CardBranchProps) {
         </ul>
       )}
     </li>
+  );
+}
+
+function RemoteTag() {
+  return (
+    <span className="tag tag-remote" title="Runs on the remote host">
+      ☁ remote
+    </span>
   );
 }
 
@@ -733,6 +809,7 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onC
       <h1 className="detail-title">{task.title}</h1>
       <div className="detail-chips">
         <StateChip state={state} />
+        {task.location === 'remote' && <RemoteTag />}
         {task.isOrchestrator && <span className="tag">orchestrator</span>}
         {labels.map((label) => (
           <span key={label} className="tag">
@@ -750,6 +827,12 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onC
       <div className="toolbar">
         <ToolButton label="Rename" shortcut="r" onClick={() => onCommand('rename')} />
         <ToolButton label="Restart" shortcut="R" onClick={() => onCommand('restart')} />
+        <ToolButton
+          label={task.location === 'remote' ? 'Teleport to local' : 'Teleport to remote'}
+          shortcut="T"
+          onClick={() => onCommand('teleport')}
+          disabled={task.kind === 'general'}
+        />
         <ToolButton label="Delete" shortcut="d" onClick={() => onCommand('delete')} danger />
         <span className="toolbar-gap" />
         <ToolButton label="Open PR" shortcut="o" onClick={() => onCommand('open-pr')} disabled={!pr} />
@@ -775,6 +858,8 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onC
             <dd className="mono">{task.sessionName}</dd>
           </>
         )}
+        <dt>Runs on</dt>
+        <dd>{task.location === 'remote' ? 'Remote host' : 'This machine'}</dd>
         <dt>Agent</dt>
         <dd>
           {task.agentCli}

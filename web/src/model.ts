@@ -3,6 +3,7 @@
 
 import type {
   BoardSnapshot,
+  DoctorCheck,
   FleetSessionStatus,
   PRReleaseStatus,
   ReleaseStage,
@@ -10,7 +11,7 @@ import type {
   TaskRecord,
 } from '../../src/types/index.js';
 
-export type { BoardSnapshot, FleetSessionStatus, PRReleaseStatus, TaskBranchRecord, TaskRecord };
+export type { BoardSnapshot, DoctorCheck, FleetSessionStatus, PRReleaseStatus, TaskBranchRecord, TaskRecord };
 
 /**
  * A card's own state. Deliberately not the board's track (backlog / PR /

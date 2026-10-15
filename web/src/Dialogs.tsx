@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { SHORTCUTS } from './keys';
-import type { BoardSnapshot, TaskRecord } from './model';
+import type { BoardSnapshot, DoctorCheck, TaskRecord } from './model';
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
@@ -210,6 +210,76 @@ export function ConfirmDialog(props: {
             onClick={props.onConfirm}
           >
             {props.busy ? 'Working…' : props.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Confirms a teleport after showing the daemon's preflight checks — the same
+ * ones `teleportTask` gates on, so a failing check disables the button rather
+ * than letting the move fail halfway. Advisory, not a lease: the daemon checks
+ * again when it runs.
+ */
+export function TeleportDialog(props: {
+  task: TaskRecord;
+  checks: DoctorCheck[] | null;
+  checkError: string | null;
+  busy: boolean;
+  error: string | null;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const { task, checks, checkError } = props;
+  const toRemote = task.location !== 'remote';
+  const blocked = Boolean(checks?.some((check) => check.status === 'fail'));
+  const ready = checks !== null && !checkError && !blocked;
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (ready) ref.current?.focus();
+  }, [ready]);
+  return (
+    <Modal title={toRemote ? 'Teleport to remote' : 'Teleport to local'} onClose={props.onClose}>
+      <div className="form">
+        <div>
+          <p>
+            Move <strong>{task.title}</strong> {toRemote ? 'from this machine to the remote host' : 'from the remote host to this machine'}?
+            Its working tree and conversation go with it, and the session restarts there.
+          </p>
+          {checkError ? (
+            <p className="error small">{checkError}</p>
+          ) : checks === null ? (
+            <p className="muted small">
+              <span className="spinner" /> Checking…
+            </p>
+          ) : checks.length === 0 ? (
+            <p className="muted small">No blockers found.</p>
+          ) : (
+            <ul className="checks">
+              {checks.map((check) => (
+                <li key={check.name} className={`check-${check.status}`}>
+                  <span className="check-mark">{check.status === 'pass' ? '✓' : check.status === 'warn' ? '!' : '✗'}</span>
+                  <span>
+                    {check.message ?? check.name}
+                    {check.status !== 'pass' && check.remediation && (
+                      <span className="muted small"> → {check.remediation}</span>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        {props.error && <p className="error small">{props.error}</p>}
+        <div className="form-actions">
+          {blocked && <span className="error small">Blocked — fix the failing check</span>}
+          <button type="button" className="secondary" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button ref={ref} type="button" className="primary" disabled={!ready || props.busy} onClick={props.onConfirm}>
+            {props.busy ? 'Teleporting…' : 'Teleport'}
           </button>
         </div>
       </div>

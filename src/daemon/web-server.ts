@@ -30,9 +30,10 @@ export { loadOrCreateWebToken, webBoardUrl } from './web-token.js';
  * Everything the browser can call. This list is the web board's whole write
  * surface: widen it deliberately. Messages go through `notifyTaskSession`
  * (one verified, submitted turn, or queued) — never `sendInput`, which types raw
- * keystrokes. Also left out: repo and config edits, teleport/reconnect (remote
- * hosts), `deleteTask`'s `purge` and `notifyTaskSession`'s `fromTaskId`
- * (both stripped below).
+ * keystrokes. Teleport is in (preflight first, the same checks the TUI's
+ * Ctrl+T shows); reconnect is not. Also left out: repo and config edits,
+ * `deleteTask`'s `purge` and `notifyTaskSession`'s `fromTaskId` (both
+ * stripped below).
  */
 export const WEB_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
   // read
@@ -47,6 +48,8 @@ export const WEB_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
   'notifyTaskSession',
   'openSession',
   'recreateSession',
+  'teleportTaskPreflight',
+  'teleportTask',
   // cards
   'createTask',
   'renameTask',
