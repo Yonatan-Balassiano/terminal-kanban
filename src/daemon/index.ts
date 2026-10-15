@@ -41,6 +41,13 @@ export interface ServiceContainer {
   ollama?: import('../services/ollama.js').ManagedOllamaService;
   db: import('../db/index.js').Db;
   dbPath: string;
+  /** The tmux layout the web board drives. Undefined outside the daemon. */
+  webLayout?: {
+    /** Whether `agentboard --ui web` has a layout window up to show sessions in. */
+    isRunning: () => Promise<boolean>;
+    /** Puts a session's tmux pane into the layout window; returns its pane id. */
+    focus: (backendSessionId: string) => Promise<string>;
+  };
   logError?: (message: string, error?: unknown) => void;
 }
 
@@ -514,6 +521,12 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const { ManagedOllamaService } = await import('../services/ollama.js');
   const { serverEvents, startServer } = await import('./server.js');
   const { shouldEmitSessionUpdate } = await import('./session-update-watch.js');
+  const { startWebServer, loadOrCreateWebToken, resolveWebStaticDir } = await import(
+    './web-server.js'
+  );
+  const { focusSessionInWebLayout, findWebLayoutWindow, execTmuxRunner } = await import(
+    './web-layout.js'
+  );
   const { loadConfig, defaultConfig } = await import('../config/index.js');
 
   let cfg = defaultConfig();
@@ -681,6 +694,12 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     db,
     dbPath: opts.dbPath,
     logError: (message, error) => appendErrorLog(opts.logFile, `[daemon] ${message}`, error),
+    webLayout: {
+      isRunning: async () =>
+        (await findWebLayoutWindow(execTmuxRunner)) !== null,
+      focus: (backendSessionId) =>
+        focusSessionInWebLayout(execTmuxRunner, backendSessionId),
+    },
     board,
     workspace,
     worktrees,
@@ -748,6 +767,14 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   };
 
   const server = startServer(opts.socketPath, services);
+  const webServer = startWebServer({
+    services,
+    socketPath: opts.socketPath,
+    port: cfg.web.port,
+    token: loadOrCreateWebToken(opts.stateDir),
+    staticDir: resolveWebStaticDir(),
+  });
+  appendLog(opts.logFile, `[daemon] web board on http://127.0.0.1:${cfg.web.port}/`);
   warmOllamaOnStartup(ollama, opts.logFile);
 
   // Graceful shutdown handler.
@@ -758,6 +785,8 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
 
     appendLog(opts.logFile, `[daemon] received ${signal}, shutting down`);
 
+    webServer.close();
+    webServer.closeAllConnections();
     server.close(() => {
       void (async () => {
         try {

@@ -178,6 +178,8 @@ gh pr merge <pr-number> -s
 
 ```bash
 agentboard                 # launch the TUI
+agentboard --ui web        # web board in the browser; the terminal shows only the selected card's session
+agentboard web [--print]   # open (or print the sign-in URL of) the web board
 agentboard init            # initialize config/state directories
 agentboard doctor          # run environment checks
 agentboard ls              # list tasks
@@ -227,7 +229,9 @@ agentboard daemon status --json
 
 ```bash
 npm run build
+npm run build:web          # build only the web board (web/ → dist/web)
 npm run dev
+npm run dev:web            # web board with hot reload, proxied to the running daemon
 npm run test
 npm run lint
 npm run typecheck
@@ -303,6 +307,34 @@ Current behavior:
 - no checks means “all”
 
 Applied filters are summarized in the filter bar under the header.
+
+## Web Board
+
+`agentboard --ui web` (or `"ui": "web"` in the config) moves the board into the
+browser. Run inside tmux, the window you ran it in becomes the layout (like the
+TUI); outside tmux, it opens a `agentboard` tmux session. That window then holds
+only the selected card's Claude session; clicking a card in the browser opens
+its details and shows its session there. The TUI stays the default.
+
+- **Cards are grouped by parent and subtask**, not by column. A card's own
+  state is only *New*, *Working*, *Idle*, *Needs you* or *Stopped*; progress
+  lives on each pull request: *Draft*, *Open*, *Merged*, *RC built*,
+  *Rolling out*, *GA'd* or *Closed*.
+- **Shipped families are hidden by default** — no live session and every PR
+  GA'd, closed, or merged with nothing to deploy. Tick *Show shipped* to see them.
+- **The conversation, in the details pane.** The last turns of the selected
+  card's Claude conversation, read from its transcript and refreshed every few
+  seconds. The box below it sends a message to the session, the same way as
+  `agentboard task notify`: typed in and submitted, or queued until the
+  session next starts.
+- **Actions and the TUI's keys.** `n` new card (optionally a subtask, started
+  right away), `r` rename, `d` delete (uncommitted work is archived; the browser
+  can never purge), `R` restart, `c`/`m`/`j` create, merge and comment on the
+  PR, `o`/`v` open the PR or its checks, `s` sync. Arrows (and `k`, `h`, `l`)
+  move through the tree; Enter shows the card in the terminal. `?` lists them all.
+- The daemon serves it on `http://127.0.0.1:4317` (`"web": { "port": … }` to
+  change). API calls need a token from the state dir, which `agentboard web`
+  hands to the browser once as a cookie. tmux backend only.
 
 ## Layout Modes
 

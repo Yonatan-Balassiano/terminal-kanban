@@ -50,6 +50,9 @@ import type {
   SetTaskBranchParams,
   TaskBranchRecord,
   TaskRecord,
+  FocusTaskParams,
+  GetConversationParams,
+  FocusTaskResult,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
 import { trackWatchedSessionTask } from './session-update-watch.js';
@@ -1025,6 +1028,34 @@ export async function dispatch(
         const branch = requireTaskBranch(services, params.taskId, params.branchId);
         await commentBranchPR(services, branch, params.body);
         return { id: req.id, result: { commented: true } };
+      }
+
+      case 'focusTask': {
+        const params = p as unknown as FocusTaskParams;
+        // Checked before opening anything: opening starts the agent, and a
+        // session nobody can see is one the user did not ask for.
+        if (!services.webLayout || !(await services.webLayout.isRunning())) {
+          throw new Error(
+            'The web terminal layout is not running. Start it with `agentboard --ui web`.'
+          );
+        }
+        const session = await services.session.openSession(params.taskId, 'primary');
+        emitBoardPatchAsync(services);
+        if (session.backendType === 'pty') {
+          throw new Error('This card runs in an embedded PTY session, which only the TUI can show.');
+        }
+        if (!session.backendSessionId) {
+          throw new Error('The session has no tmux session to show yet.');
+        }
+        const paneId = await services.webLayout.focus(session.backendSessionId);
+        const result: FocusTaskResult = { session, paneId };
+        return { id: req.id, result };
+      }
+
+      case 'getConversation': {
+        const params = p as unknown as GetConversationParams;
+        const limit = Math.min(Math.max(Number(params.limit) || 30, 1), 200);
+        return { id: req.id, result: services.session.getConversation(params.taskId, limit) };
       }
 
       case 'subscribe':

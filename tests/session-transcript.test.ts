@@ -6,6 +6,7 @@ import {
   findTranscriptPath,
   forgetTranscriptPath,
   readTranscriptActivity,
+  readTranscriptTail,
   resolveContinuedSessionId,
   transcriptHasUserMessage,
 } from '../src/services/session-transcript.js';
@@ -139,6 +140,59 @@ describe('session transcript', () => {
     // as not-yet-confirmed and fall back to the stored flag for, rather than
     // reporting an unsubmitted brief.
     expect(transcriptHasUserMessage(SESSION_ID, env)).toBe(false);
+  });
+
+  describe('readTranscriptTail', () => {
+    it('keeps what a person reads and drops the plumbing', () => {
+      writeTranscript([
+        { type: 'user', message: { content: 'Fix the flaky test.' }, timestamp: '2026-10-15T08:00:00Z' },
+        { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'hmm' }] } },
+        { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test\nmore' } }] } },
+        { type: 'user', message: { content: [{ type: 'tool_result', content: 'big output' }] } },
+        { type: 'user', isMeta: true, message: { content: 'caveat' } },
+        { type: 'user', message: { content: '<command-name>/clear</command-name>' } },
+        { type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent chatter' }] } },
+        { type: 'last-prompt', lastPrompt: 'x' },
+        { type: 'user', isCompactSummary: true, message: { content: 'This session is being continued…' } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'Fixed it.' }] } },
+      ]);
+
+      const tail = readTranscriptTail(SESSION_ID, 30, env);
+
+      expect(tail?.messages).toEqual([
+        { role: 'user', text: 'Fix the flaky test.', at: Date.parse('2026-10-15T08:00:00Z') },
+        { role: 'tool', text: 'Bash: npm test', at: undefined },
+        { role: 'tool', text: 'Conversation compacted — earlier turns summarized', at: undefined },
+        { role: 'assistant', text: 'Fixed it.', at: undefined },
+      ]);
+      expect(tail?.updatedAt).toBeGreaterThan(0);
+    });
+
+    it('returns only the last messages, and skips a record cut by the read window', () => {
+      const records = Array.from({ length: 50 }, (_, i) => ({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: `turn ${i}` }] },
+      }));
+      writeTranscript(records);
+      expect(readTranscriptTail(SESSION_ID, 3, env)?.messages.map((m) => m.text)).toEqual([
+        'turn 47',
+        'turn 48',
+        'turn 49',
+      ]);
+
+      // Bigger than the read window: the cut first line must not break parsing.
+      writeTranscript([
+        { type: 'user', message: { content: 'x'.repeat(900 * 1024) } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'still here' }] } },
+      ]);
+      forgetTranscriptPath();
+      expect(readTranscriptTail(SESSION_ID, 30, env)?.messages.map((m) => m.text)).toEqual(['still here']);
+    });
+
+    it('is null when there is no conversation', () => {
+      expect(readTranscriptTail(SESSION_ID, 30, env)).toBeNull();
+      expect(readTranscriptTail(undefined, 30, env)).toBeNull();
+    });
   });
 
   describe('resolveContinuedSessionId', () => {

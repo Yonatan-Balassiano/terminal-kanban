@@ -14,6 +14,7 @@ import type {
   RepoOverlayConfig,
   SessionBackendType,
   TmuxConfig,
+  WebConfig,
 } from '../types/index.js';
 
 // ============================================================
@@ -122,6 +123,10 @@ const TmuxConfigSchema = z.object({
   layoutSessionName: z.string().min(1).optional(),
 });
 
+const WebConfigSchema = z.object({
+  port: z.number().int().min(1).max(65535).optional(),
+});
+
 /**
  * Full AppConfig schema — used when reading from disk.
  * Fields are individually optional so partial configs on disk are tolerated;
@@ -152,6 +157,8 @@ export const AppConfigSchema = z
     agentMacros: z.array(AgentMacroSchema),
     theme: ThemeModeSchema.optional(),
     iconMode: z.enum(['unicode', 'ascii'] as const).optional(),
+    ui: z.enum(['tui', 'web'] as const).optional(),
+    web: WebConfigSchema,
   })
   .strict();
 
@@ -207,6 +214,8 @@ function defaultAIChatConfig(): AIChatConfig {
   };
 }
 
+export const DEFAULT_WEB_PORT = 4317;
+
 export function defaultConfig(): AppConfig {
   return {
     sessionBackend: 'tmux' as SessionBackendType,
@@ -231,6 +240,8 @@ export function defaultConfig(): AppConfig {
     agentMacros: [],
     theme: undefined,
     iconMode: 'unicode',
+    ui: 'tui',
+    web: { port: DEFAULT_WEB_PORT },
   };
 }
 
@@ -579,13 +590,20 @@ function mergePartial(base: AppConfig, ...partials: (Partial<AppConfig> | undefi
     if (!partial) continue;
     const cleaned = removeUndefined(partial) as Partial<AppConfig> & {
       tmux?: Partial<TmuxConfig>;
+      web?: Partial<WebConfig>;
     };
-    const { tmux, ...rest } = cleaned;
+    const { tmux, web, ...rest } = cleaned;
     result = { ...result, ...rest };
     if (tmux !== undefined) {
       result.tmux = {
         ...result.tmux,
         ...removeUndefined(tmux),
+      };
+    }
+    if (web !== undefined) {
+      result.web = {
+        ...result.web,
+        ...removeUndefined(web),
       };
     }
   }

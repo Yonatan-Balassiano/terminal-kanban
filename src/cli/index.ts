@@ -16,6 +16,8 @@ import {
 } from '../config/index.js';
 import { ensureRunning, isDaemonRunning, stopDaemon } from '../daemon/index.js';
 import { createRPCClient } from './rpc.js';
+import { launchWebLayout, openInBrowser, runWebHome, webBoardUrlWithToken } from './web.js';
+import { webBoardUrl } from '../daemon/web-token.js';
 import { DEFAULT_DELIVERY_BUDGET_MS } from '../services/session-backends/pane-idle.js';
 import type {
   AppConfig,
@@ -579,17 +581,67 @@ export function buildCli(): Command {
   // ----------------------------------------------------------
   // Default action — launch TUI
   // ----------------------------------------------------------
-  program.action(async () => {
+  program.option('--ui <mode>', 'Board to show: "tui" (default) or "web"');
+
+  program.action(async (opts: { ui?: string }) => {
     try {
       const paths = configPaths();
       const config = loadConfig();
+      const ui = opts.ui ?? config.ui ?? 'tui';
+      if (ui !== 'tui' && ui !== 'web') {
+        throw new Error(`Unknown --ui "${ui}". Use "tui" or "web".`);
+      }
       await ensureRunning(daemonOpts(paths));
+      if (ui === 'web') {
+        const url = webBoardUrlWithToken(config, paths.stateDir);
+        openInBrowser(url);
+        if (config.sessionBackend === 'pty') {
+          console.log(`Web board: ${url}`);
+          console.log('PTY sessions can only be shown by the TUI; set "sessionBackend": "tmux".');
+          return;
+        }
+        if (launchWebLayout(config) === 'here') {
+          await runWebHome(webBoardUrl(config.web.port));
+        }
+        return;
+      }
       launchGoTUI(paths.socketPath, config);
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
       process.exit(1);
     }
   });
+
+  // ----------------------------------------------------------
+  // web
+  // ----------------------------------------------------------
+  program
+    .command('web')
+    .description(
+      'Open the web board in the browser (clicking a card shows its session in the web tmux layout)'
+    )
+    .option('--print', 'Print the sign-in URL instead of opening the browser')
+    .option('--home', 'Run the placeholder pane of the web tmux layout (internal)')
+    .action(async (opts: { print?: boolean; home?: boolean }) => {
+      try {
+        const paths = configPaths();
+        const config = loadConfig();
+        if (opts.home) {
+          await runWebHome(webBoardUrl(config.web.port));
+          return;
+        }
+        await ensureRunning(daemonOpts(paths));
+        const url = webBoardUrlWithToken(config, paths.stateDir);
+        if (opts.print || !openInBrowser(url)) {
+          console.log(url);
+          return;
+        }
+        console.log(`Opened ${webBoardUrl(config.web.port)}`);
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
 
   // ----------------------------------------------------------
   // init
