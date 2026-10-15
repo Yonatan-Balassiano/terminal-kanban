@@ -28,9 +28,11 @@ export { loadOrCreateWebToken, webBoardUrl } from './web-token.js';
 
 /**
  * Everything the browser can call. This list is the web board's whole write
- * surface: widen it deliberately. Left out on purpose — `sendInput` (typing
- * into a pane), repo and config edits, teleport/reconnect (remote hosts), and
- * `deleteTask`'s `purge` (stripped below: the web board always keeps the archive).
+ * surface: widen it deliberately. Messages go through `notifyTaskSession`
+ * (one verified, submitted turn, or queued) — never `sendInput`, which types raw
+ * keystrokes. Also left out: repo and config edits, teleport/reconnect (remote
+ * hosts), `deleteTask`'s `purge` and `notifyTaskSession`'s `fromTaskId`
+ * (both stripped below).
  */
 export const WEB_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
   // read
@@ -42,6 +44,7 @@ export const WEB_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
   'getConversation',
   // sessions
   'focusTask',
+  'notifyTaskSession',
   'openSession',
   'recreateSession',
   // cards
@@ -169,6 +172,10 @@ export function createWebServer(opts: WebServerOptions): http.Server {
     let params = body.params;
     if (method === 'deleteTask' && params && typeof params === 'object') {
       params = { ...(params as Record<string, unknown>), purge: false };
+    }
+    if (method === 'notifyTaskSession' && params && typeof params === 'object') {
+      // A message from the browser is from the user, never "from" another card.
+      params = { ...(params as Record<string, unknown>), fromTaskId: undefined };
     }
     const rpcReq: RPCRequest = {
       id: crypto.randomUUID(),

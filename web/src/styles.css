@@ -335,3 +335,28 @@ kbd {
 .md table { border-collapse: collapse; font-size: 12px; }
 .md th, .md td { border: 1px solid var(--term-line); padding: 3px 8px; text-align: left; vertical-align: top; }
 .md th { color: #fff; background: var(--term-code); }
+
+/* ---------- composer */
+.composer { margin-top: 8px; }
+.composer-box {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 6px; align-items: start;
+  background: #0d1117; border: 1px solid #232a33; border-radius: 8px; padding: 8px 8px 8px 14px;
+  font: 12.5px/1.55 var(--mono); color-scheme: dark;
+}
+.composer-box:focus-within { border-color: #d97757; }
+.composer-box .msg-mark { color: #8fb8ff; padding-top: 1px; }
+.composer textarea {
+  font: inherit; color: #d6dbe3; background: transparent; border: none; outline: none; resize: none; padding: 0;
+  min-height: 20px;
+}
+.composer textarea::placeholder { color: #7d8590; }
+.composer-send {
+  border: 1px solid #232a33; background: #161b22; color: #d6dbe3; border-radius: 6px; width: 28px; height: 24px;
+  cursor: pointer; font: inherit;
+}
+.composer-send:disabled { opacity: .4; cursor: default; }
+.composer-status { margin: 6px 0 0; font-size: 12px; }
+.composer-ok { color: var(--s-idle); }
+.composer-warn { color: var(--s-needs); }
+.composer-error { color: var(--pr-closed); }
+.composer-pending { color: var(--muted); }

@@ -324,7 +324,9 @@ its details and shows its session there. The TUI stays the default.
   GA'd, closed, or merged with nothing to deploy. Tick *Show shipped* to see them.
 - **The conversation, in the details pane.** The last turns of the selected
   card's Claude conversation, read from its transcript and refreshed every few
-  seconds.
+  seconds. The box below it sends a message to the session, the same way as
+  `agentboard task notify`: typed in and submitted, or queued until the
+  session next starts.
 - **Actions and the TUI's keys.** `n` new card (optionally a subtask, started
   right away), `r` rename, `d` delete (uncommitted work is archived; the browser
   can never purge), `R` restart, `c`/`m`/`j` create, merge and comment on the

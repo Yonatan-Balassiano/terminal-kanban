@@ -47,6 +47,7 @@ export function Conversation({ taskId }: { taskId: string }) {
   const [error, setError] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  const reload = useRef<() => Promise<void>>(async () => undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,6 +66,7 @@ export function Conversation({ taskId }: { taskId: string }) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       }
     };
+    reload.current = load;
     void load();
     const timer = window.setInterval(() => void load(), POLL_MS);
     return () => {
@@ -117,6 +119,101 @@ export function Conversation({ taskId }: { taskId: string }) {
           )}
         </div>
       )}
+      <Composer
+        taskId={taskId}
+        onSent={() => {
+          stickToBottom.current = true;
+          // The agent writes the turn to its transcript a moment after it is submitted.
+          window.setTimeout(() => void reload.current(), 800);
+        }}
+      />
     </section>
+  );
+}
+
+interface NotifyOutcome {
+  delivered: boolean;
+  queued: boolean;
+  landedUnsubmitted?: boolean;
+}
+
+type SendStatus = { kind: 'pending' | 'ok' | 'warn' | 'error'; text: string };
+
+/**
+ * Sends a message into the card's session through `notifyTaskSession` — the
+ * same path as `agentboard task notify`: typed into the live pane and verified,
+ * or queued for the session's next start when there is no live pane.
+ */
+function Composer({ taskId, onSent }: { taskId: string; onSent: () => void }) {
+  const [text, setText] = useState('');
+  const [status, setStatus] = useState<SendStatus | null>(null);
+  const sending = status?.kind === 'pending';
+
+  useEffect(() => {
+    setText('');
+    setStatus(null);
+  }, [taskId]);
+
+  const send = async () => {
+    const message = text.trim();
+    if (!message || sending) return;
+    setStatus({ kind: 'pending', text: 'Sending…' });
+    try {
+      const outcome = await rpc<NotifyOutcome>('notifyTaskSession', { taskId, message });
+      if (outcome.delivered) {
+        setText('');
+        setStatus({ kind: 'ok', text: 'Sent' });
+        onSent();
+      } else if (outcome.queued) {
+        setText('');
+        setStatus({ kind: 'warn', text: 'No live session — queued. It is delivered when the session next starts.' });
+      } else if (outcome.landedUnsubmitted) {
+        setText('');
+        setStatus({
+          kind: 'warn',
+          text: 'Typed into the session but not submitted. Open it in the terminal and press Enter, or restart it (R).',
+        });
+      } else {
+        setStatus({ kind: 'error', text: 'Not delivered.' });
+      }
+    } catch (err) {
+      setStatus({ kind: 'error', text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  return (
+    <form
+      className="composer"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void send();
+      }}
+    >
+      <div className="composer-box">
+        <span className="msg-mark" aria-hidden="true">
+          &gt;
+        </span>
+        <textarea
+          rows={Math.min(8, Math.max(1, text.split('\n').length))}
+          value={text}
+          placeholder="Message the session…  (Enter to send, Shift+Enter for a new line)"
+          aria-label="Message the session"
+          disabled={sending}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void send();
+            } else if (event.key === 'Escape') {
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        <button type="submit" className="composer-send" disabled={!text.trim() || sending} title="Send (Enter)">
+          {sending ? '…' : '↵'}
+        </button>
+      </div>
+      {status && <p className={`composer-status composer-${status.kind}`}>{status.text}</p>}
+    </form>
   );
 }

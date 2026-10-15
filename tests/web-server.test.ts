@@ -27,6 +27,7 @@ async function startHarness(): Promise<Harness> {
     session: {
       openSession: vi.fn(async () => ({ id: 's1', backendType: 'tmux', backendSessionId: 'ab_t1' })),
       getFleetStatus: vi.fn(async () => []),
+      notifyTaskSession: vi.fn(async () => ({ delivered: true, queued: false })),
     },
     webLayout: { isRunning: vi.fn(async () => true), focus: vi.fn(async () => '%7') },
     board: { deleteTask: vi.fn() },
@@ -80,6 +81,12 @@ describe('web server', () => {
   it('refuses methods outside the allowlist', async () => {
     const res = await rpc(h, 'sendInput', { taskId: 't1', data: 'rm -rf ~\n' });
     expect(res.status).toBe(403);
+  });
+
+  it('sends a message as the user, never as another card', async () => {
+    const res = await rpc(h, 'notifyTaskSession', { taskId: 't1', message: 'hi', fromTaskId: 'other' });
+    expect(res.status).toBe(200);
+    expect(h.services.session.notifyTaskSession).toHaveBeenCalledWith('t1', 'hi', undefined, { fromTaskId: undefined });
   });
 
   it('never lets the browser purge a deleted card', async () => {
