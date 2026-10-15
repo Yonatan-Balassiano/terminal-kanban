@@ -45,6 +45,7 @@ describe('commandForKey', () => {
   it('maps the TUI keys and leaves modified keys to the browser', () => {
     expect(commandForKey({ key: 'n' })).toBe('new');
     expect(commandForKey({ key: 'R' })).toBe('restart');
+    expect(commandForKey({ key: 'T' })).toBe('teleport');
     expect(commandForKey({ key: 'Enter' })).toBe('show');
     expect(commandForKey({ key: '3' })).toEqual({ repoIndex: 2 });
     expect(commandForKey({ key: 'r', metaKey: true })).toBeNull();

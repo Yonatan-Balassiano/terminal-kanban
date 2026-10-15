@@ -34,6 +34,7 @@ export type Command =
   | 'rename'
   | 'delete'
   | 'restart'
+  | 'teleport'
   | 'create-pr'
   | 'merge-pr'
   | 'comment-pr'
@@ -70,6 +71,7 @@ const KEYMAP: Record<string, Command> = {
   r: 'rename',
   d: 'delete',
   R: 'restart',
+  T: 'teleport',
   c: 'create-pr',
   m: 'merge-pr',
   j: 'comment-pr',
@@ -177,6 +179,7 @@ export const SHORTCUTS: Array<{ section: string; items: Shortcut[] }> = [
       { keys: 'r', label: 'Rename' },
       { keys: 'd', label: 'Delete (uncommitted work is archived)' },
       { keys: 'R', label: 'Restart the session (keeps the conversation)' },
+      { keys: 'T', label: 'Teleport to the other host (local ⇄ remote)' },
     ],
   },
   {

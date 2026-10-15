@@ -32,6 +32,10 @@ async function startHarness(): Promise<Harness> {
     webLayout: { isRunning: vi.fn(async () => true), focus: vi.fn(async () => '%7') },
     board: { deleteTask: vi.fn() },
     taskLifecycle: { deleteTask: vi.fn(async () => ({ archivedShas: [], archiveRef: 'refs/agentboard/archive/t1' })) },
+    teleport: {
+      preflight: vi.fn(async () => [{ name: 'remote-host', status: 'pass' }]),
+      run: vi.fn(async () => ({ checks: [], session: { id: 's2' }, wipCommitted: false, transcriptCopied: true })),
+    },
   } as unknown as ServiceContainer;
 
   // The port is only known after listening, and the Host check needs it, so
@@ -87,6 +91,15 @@ describe('web server', () => {
     const res = await rpc(h, 'notifyTaskSession', { taskId: 't1', message: 'hi', fromTaskId: 'other' });
     expect(res.status).toBe(200);
     expect(h.services.session.notifyTaskSession).toHaveBeenCalledWith('t1', 'hi', undefined, { fromTaskId: undefined });
+  });
+
+  it('lets the browser check and run a teleport', async () => {
+    const checks = await rpc(h, 'teleportTaskPreflight', { taskId: 't1', direction: 'local-to-remote' });
+    expect(checks.status).toBe(200);
+    expect(h.services.teleport.preflight).toHaveBeenCalledWith('t1', 'local-to-remote');
+    const run = await rpc(h, 'teleportTask', { taskId: 't1', direction: 'local-to-remote' });
+    expect(run.status).toBe(200);
+    expect(h.services.teleport.run).toHaveBeenCalledWith('t1', 'local-to-remote');
   });
 
   it('never lets the browser purge a deleted card', async () => {

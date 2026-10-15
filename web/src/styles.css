@@ -10,6 +10,8 @@
   --accent-soft: #e5ecfb;
   --orch: #7b5bd6;
   --orch-soft: #efe9fc;
+  --remote: #0e7f8c;
+  --remote-soft: #dcf2f4;
 
   --s-new: #7d8494;
   --s-needs: #c26a00;
@@ -45,6 +47,8 @@
     --accent-soft: #1d2a44;
     --orch: #a68bf0;
     --orch-soft: #251f3b;
+    --remote: #4cc3cf;
+    --remote-soft: #123236;
     --s-new: #8d95a5;
     --s-needs: #f0a24a;
     --s-needs-soft: #3a2a14;
@@ -146,6 +150,26 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 }
 .card.orchestrator .tag:first-of-type, .detail-chips .tag:first-of-type { color: var(--orch); }
 .tag-alert { background: var(--s-needs-soft); color: var(--s-needs) !important; }
+.tag-remote { background: var(--remote-soft); color: var(--remote) !important; font-weight: 600; }
+.card.remote { box-shadow: inset 3px 0 0 var(--remote); }
+.card.remote.selected { box-shadow: inset 3px 0 0 var(--remote), 0 0 0 1px var(--accent); }
+
+/* Teleport: on the card row, shown on hover or when the card is selected. */
+.card-teleport {
+  flex: none; align-self: center; margin-right: 6px; width: 26px; height: 26px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer;
+  opacity: 0; transition: opacity .1s;
+}
+.card:hover .card-teleport, .card.selected .card-teleport, .card-teleport:focus-visible { opacity: 1; }
+.card-teleport:hover { color: var(--remote); border-color: var(--remote); }
+@media (hover: none) { .card-teleport { opacity: 1; } }
+
+.checks { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; font-size: 13px; }
+.checks li { display: flex; gap: 8px; }
+.check-mark { width: 14px; flex: none; font-weight: 700; text-align: center; }
+.check-pass .check-mark { color: var(--s-idle); }
+.check-warn .check-mark { color: var(--s-needs); }
+.check-fail .check-mark { color: var(--pr-closed); }
 
 /* ---------- chips */
 .chip {
