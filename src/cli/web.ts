@@ -51,8 +51,16 @@ function tmux(args: string[]): ReturnType<typeof spawnSync> {
   return result;
 }
 
+/**
+ * An exact-match tmux target. A bare name also matches by prefix, so
+ * `-t agentboard` finds `agentboard-task-panes` when no `agentboard` exists.
+ */
+function exact(sessionName: string): string {
+  return `=${sessionName}`;
+}
+
 function isWebLayoutSession(sessionName: string): boolean {
-  const result = tmux(['list-windows', '-t', sessionName, '-F', `#{${WEB_LAYOUT_WINDOW_OPTION}}`]);
+  const result = tmux(['list-windows', '-t', exact(sessionName), '-F', `#{${WEB_LAYOUT_WINDOW_OPTION}}`]);
   return result.status === 0 && String(result.stdout).split('\n').some((line) => line.trim() === '1');
 }
 
@@ -63,12 +71,12 @@ function isWebLayoutSession(sessionName: string): boolean {
  */
 export function launchWebLayout(config: AppConfig): void {
   const sessionName = config.tmux.layoutSessionName;
-  const exists = tmux(['has-session', '-t', sessionName]).status === 0;
+  const exists = tmux(['has-session', '-t', exact(sessionName)]).status === 0;
 
   if (exists && !isWebLayoutSession(sessionName)) {
     throw new Error(
       `tmux session "${sessionName}" is running the TUI board. Quit it first (q), ` +
-        `or run \`tmux kill-session -t ${sessionName}\`.`,
+        `or run \`tmux kill-session -t '=${sessionName}'\`.`,
     );
   }
 
@@ -77,11 +85,11 @@ export function launchWebLayout(config: AppConfig): void {
     if (created.status !== 0) {
       throw new Error(`Failed to create tmux session "${sessionName}": ${String(created.stderr).trim()}`);
     }
-    tmux(['set-option', '-w', '-t', `${sessionName}:`, WEB_LAYOUT_WINDOW_OPTION, '1']);
+    tmux(['set-option', '-w', '-t', `${exact(sessionName)}:`, WEB_LAYOUT_WINDOW_OPTION, '1']);
   }
 
   const insideTmux = Boolean(process.env['TMUX']);
-  const result = spawnSync('tmux', insideTmux ? ['switch-client', '-t', sessionName] : ['attach-session', '-t', sessionName], {
+  const result = spawnSync('tmux', insideTmux ? ['switch-client', '-t', exact(sessionName)] : ['attach-session', '-t', exact(sessionName)], {
     stdio: 'inherit',
   });
   if (typeof result.status === 'number' && result.status !== 0) {

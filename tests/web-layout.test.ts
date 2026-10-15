@@ -65,7 +65,7 @@ describe('focusSessionInWebLayout', () => {
     });
     await focusSessionInWebLayout(runner, 'agentboard', 'ab_new');
     const log = commands(calls);
-    expect(log).toContain('break-pane -d -s %3 -t agentboard-task-panes:');
+    expect(log).toContain('break-pane -d -s %3 -t =agentboard-task-panes:');
     expect(log).not.toContain('kill-pane -t %3');
     expect(log).toContain('new-session -d -s agentboard-task-panes sh -lc \'while :; do sleep 3600; done\'');
   });

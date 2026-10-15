@@ -59,7 +59,7 @@ export async function findWebLayoutWindow(
     output = await runner.run([
       'list-windows',
       '-t',
-      layoutSessionName,
+      `=${layoutSessionName}`,
       '-F',
       `#{window_id}\t#{${WEB_LAYOUT_WINDOW_OPTION}}`,
     ]);
@@ -101,7 +101,7 @@ async function findBackendPanes(runner: TmuxRunner, backendSessionId: string): P
 
 async function ensureHoldingSession(runner: TmuxRunner): Promise<void> {
   try {
-    await runner.run(['has-session', '-t', HOLDING_SESSION_NAME]);
+    await runner.run(['has-session', '-t', `=${HOLDING_SESSION_NAME}`]);
     return;
   } catch {
     // Not there yet.
@@ -113,7 +113,7 @@ async function ensureHoldingSession(runner: TmuxRunner): Promise<void> {
     HOLDING_SESSION_NAME,
     "sh -lc 'while :; do sleep 3600; done'",
   ]);
-  await runner.run(['set-option', '-q', '-t', HOLDING_SESSION_NAME, 'destroy-unattached', 'off']);
+  await runner.run(['set-option', '-q', '-t', `=${HOLDING_SESSION_NAME}`, 'destroy-unattached', 'off']);
 }
 
 /**
@@ -184,7 +184,7 @@ export async function focusSessionInWebLayout(
     if (toPark.length > 0) {
       await ensureHoldingSession(runner);
       for (const paneId of toPark) {
-        await runner.run(['break-pane', '-d', '-s', paneId, '-t', `${HOLDING_SESSION_NAME}:`]);
+        await runner.run(['break-pane', '-d', '-s', paneId, '-t', `=${HOLDING_SESSION_NAME}:`]);
       }
     }
 
