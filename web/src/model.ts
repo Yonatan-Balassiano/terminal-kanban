@@ -128,24 +128,17 @@ export interface BoardFilter {
   showShipped: boolean;
 }
 
-const STATE_RANK: Record<CardState, number> = {
-  'needs-you': 0,
-  working: 1,
-  idle: 2,
-  new: 3,
-  stopped: 4,
-};
-
+/**
+ * A stable order, so cards do not jump while agents work: cards whose work has
+ * not started go last, everything else by creation date, oldest first. Live
+ * state (working, idle, needs you) is shown on the card, never used to move it.
+ */
 function compareNodes(a: CardNode, b: CardNode): number {
-  const orchestrator = Number(Boolean(b.task.isOrchestrator)) - Number(Boolean(a.task.isOrchestrator));
-  if (orchestrator !== 0) {
-    return orchestrator;
+  const notStarted = Number(a.state === 'new') - Number(b.state === 'new');
+  if (notStarted !== 0) {
+    return notStarted;
   }
-  const rank = STATE_RANK[a.state] - STATE_RANK[b.state];
-  if (rank !== 0) {
-    return rank;
-  }
-  return b.task.updatedAt - a.task.updatedAt;
+  return a.task.createdAt - b.task.createdAt || a.task.id.localeCompare(b.task.id);
 }
 
 function nodeMatches(node: CardNode, filter: BoardFilter, repoLabel: (id?: string) => string): boolean {
