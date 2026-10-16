@@ -20,6 +20,7 @@ import {
   writeLocalResumeNotice,
 } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
+import { keepWebLayoutAlive } from '../../daemon/web-layout.js';
 import { DeliveryGuard } from './delivery-guard.js';
 import {
   autoTrustIfPrompted,
@@ -470,6 +471,13 @@ export class TmuxBackend implements SessionBackend {
 
   async terminate(backendSessionId: string): Promise<void> {
     const taggedPanes = await this.findTaggedPanes(backendSessionId);
+    const ownPane = await this.resolveSessionPaneId(backendSessionId);
+    // A card shown on the web board can be the only pane in the layout window;
+    // killing it would close the window, and the terminal looking at it.
+    await keepWebLayoutAlive(
+      { run: async (args) => (await this.runner(args)).stdout },
+      ownPane && !taggedPanes.includes(ownPane) ? [...taggedPanes, ownPane] : taggedPanes,
+    );
     try {
       await this.runner(buildTmuxKillSessionArgs(backendSessionId));
     } catch {

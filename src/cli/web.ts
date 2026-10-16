@@ -11,7 +11,11 @@
 
 import { spawn, spawnSync } from 'child_process';
 import type { AppConfig } from '../types/index.js';
-import { WEB_LAYOUT_WINDOW_OPTION, WEB_PLACEHOLDER_PANE_OPTION } from '../daemon/web-layout.js';
+import {
+  WEB_LAYOUT_WINDOW_OPTION,
+  WEB_PLACEHOLDER_PANE_OPTION,
+  webPlaceholderCommand,
+} from '../daemon/web-layout.js';
 import { loadOrCreateWebToken, webBoardUrl } from '../daemon/web-token.js';
 
 export function webBoardUrlWithToken(config: AppConfig, stateDir: string): string {
@@ -29,19 +33,6 @@ export function openInBrowser(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_/:=.,+-]+$/.test(value)) {
-    return value;
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/** The command the placeholder pane runs: this same CLI, `web --home`. */
-function placeholderCommand(): string {
-  const argv = [process.execPath, ...process.execArgv, process.argv[1] ?? '', 'web', '--home'];
-  return argv.map(shellQuote).join(' ');
 }
 
 function tmux(args: string[]): ReturnType<typeof spawnSync> {
@@ -104,7 +95,7 @@ export function launchWebLayout(config: AppConfig): 'here' | 'attached' {
   }
 
   if (!exists) {
-    const created = tmux(['new-session', '-d', '-s', sessionName, placeholderCommand()]);
+    const created = tmux(['new-session', '-d', '-s', sessionName, webPlaceholderCommand()]);
     if (created.status !== 0) {
       throw new Error(`Failed to create tmux session "${sessionName}": ${String(created.stderr).trim()}`);
     }

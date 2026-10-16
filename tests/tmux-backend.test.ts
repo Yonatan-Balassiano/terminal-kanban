@@ -236,8 +236,7 @@ describe('TmuxBackend', () => {
 
     await backend.terminate('ab_friday_thing_2e30_p');
 
-    expect(calls).toEqual([
-      ['list-panes', '-a', '-F', '#{pane_id}\t#{@agentboard_backend_session_id}'],
+    expect(calls.filter((args) => args[0]?.startsWith('kill-'))).toEqual([
       ['kill-session', '-t', 'ab_friday_thing_2e30_p'],
       ['kill-pane', '-t', '%42'],
       ['kill-pane', '-t', '%43'],

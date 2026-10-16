@@ -18,7 +18,7 @@ const execFileAsync = promisify(execFile);
 
 /** Window option marking the one window the web layout owns. */
 export const WEB_LAYOUT_WINDOW_OPTION = '@agentboard_web_layout';
-/** Pane option marking the web layout's placeholder, the only untagged pane it may kill. */
+/** Pane option marking the web layout's placeholder, the only untagged pane it may move. */
 export const WEB_PLACEHOLDER_PANE_OPTION = '@agentboard_web_placeholder';
 const BACKEND_SESSION_PANE_OPTION = '@agentboard_backend_session_id';
 const HOLDING_SESSION_NAME = 'agentboard-task-panes';
@@ -123,7 +123,7 @@ async function ensureHoldingSession(runner: TmuxRunner): Promise<void> {
  *
  * The new panes are joined in before the old ones leave: a window with no
  * panes is destroyed, and with it the layout session the terminal is attached
- * to.
+ * to. The placeholder is parked along with the old card panes.
  */
 export async function focusSessionInWebLayout(runner: TmuxRunner, backendSessionId: string): Promise<string> {
   const windowId = await findWebLayoutWindow(runner);
@@ -172,10 +172,11 @@ export async function focusSessionInWebLayout(runner: TmuxRunner, backendSession
       if (pane.backendSessionId === backendSessionId) {
         continue;
       }
-      if (pane.backendSessionId) {
+      if (pane.backendSessionId || pane.placeholder) {
+        // The placeholder is parked, not killed: run inside tmux it is the
+        // user's own `agentboard --ui web` process, and it is what
+        // `keepWebLayoutAlive` puts back when the card's pane goes away.
         toPark.push(pane.id);
-      } else if (pane.placeholder) {
-        await runner.run(['kill-pane', '-t', pane.id]);
       }
       // Any other pane is the user's own (a shell next to the layout): left alone.
     }
@@ -191,6 +192,72 @@ export async function focusSessionInWebLayout(runner: TmuxRunner, backendSession
     await runner.run(['select-window', '-t', windowId]);
     await runner.run(['select-pane', '-t', selected]);
     return selected;
+  } finally {
+    await runner.run(['wait-for', '-U', LAYOUT_LOCK_NAME]).catch(() => undefined);
+  }
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_/:=.,+-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The command a new placeholder pane runs: this same CLI, `web --home`. Works
+ * from the CLI and from the daemon, which run the same entry script.
+ */
+export function webPlaceholderCommand(): string {
+  const argv = [process.execPath, ...process.execArgv, process.argv[1] ?? '', 'web', '--home'];
+  return argv.map(shellQuote).join(' ');
+}
+
+/**
+ * Called before `dyingPanes` are killed. If they are everything the web layout
+ * window holds, the placeholder goes back in first — the parked one, or a new
+ * one — because tmux destroys a window when its last pane dies, and with it
+ * the terminal's view (and the whole session, if it was the only window).
+ * Best-effort: a failure here must never stop the kill.
+ */
+export async function keepWebLayoutAlive(
+  runner: TmuxRunner,
+  dyingPanes: readonly string[],
+  placeholderCommand: string = webPlaceholderCommand(),
+): Promise<void> {
+  if (dyingPanes.length === 0) {
+    return;
+  }
+  const windowId = await findWebLayoutWindow(runner);
+  if (!windowId) {
+    return;
+  }
+  try {
+    await runner.run(['wait-for', '-L', LAYOUT_LOCK_NAME]);
+  } catch {
+    return;
+  }
+  try {
+    const visible = parsePanes(await runner.run(['list-panes', '-t', windowId, '-F', PANE_FORMAT]));
+    const anchor = visible[0]?.id;
+    if (!anchor || visible.some((pane) => !dyingPanes.includes(pane.id))) {
+      return; // Something else stays, so the window does too.
+    }
+    const parked = parsePanes(await runner.run(['list-panes', '-a', '-F', PANE_FORMAT])).find(
+      (pane) => pane.placeholder && !visible.some((shown) => shown.id === pane.id),
+    );
+    if (parked) {
+      await runner.run(['join-pane', '-h', '-s', parked.id, '-t', anchor]);
+      return;
+    }
+    const created = (
+      await runner.run(['split-window', '-h', '-t', anchor, '-P', '-F', '#{pane_id}', placeholderCommand])
+    ).trim();
+    if (created) {
+      await runner.run(['set-option', '-p', '-t', created, WEB_PLACEHOLDER_PANE_OPTION, '1']);
+    }
+  } catch {
+    // Best-effort, see above.
   } finally {
     await runner.run(['wait-for', '-U', LAYOUT_LOCK_NAME]).catch(() => undefined);
   }
