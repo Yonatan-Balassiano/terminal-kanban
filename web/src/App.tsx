@@ -21,7 +21,7 @@ import {
   type TaskRecord,
 } from './model';
 import { useBoard } from './useBoard';
-import { Conversation } from './Conversation';
+import { Conversation, MarkdownText } from './Conversation';
 import { ConfirmDialog, HelpDialog, NewCardDialog, TeleportDialog, TextDialog, type NewCardInput } from './Dialogs';
 import { commandForKey, navigate, openTarget, primaryPR, visibleCards, type Command } from './keys';
 
@@ -920,7 +920,7 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onC
       {task.description && (
         <section>
           <h2>Description</h2>
-          <pre className="description">{task.description}</pre>
+          <MarkdownText className="description term" text={task.description} />
         </section>
       )}
     </article>

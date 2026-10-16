@@ -20,10 +20,13 @@ const MARKDOWN_COMPONENTS: Components = {
   ),
 };
 
-/** Memoised: the poll re-renders every 3s, and re-parsing unchanged messages is wasted work. */
-const MessageText = memo(function MessageText({ text }: { text: string }) {
+/**
+ * Markdown, rendered for the dark terminal panels (conversation, description).
+ * Memoised: the poll re-renders every 3s, and re-parsing unchanged text is wasted work.
+ */
+export const MarkdownText = memo(function MarkdownText({ text, className = '' }: { text: string; className?: string }) {
   return (
-    <div className="msg-text md">
+    <div className={`md ${className}`.trim()}>
       <Markdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
         {text}
       </Markdown>
@@ -113,7 +116,7 @@ export function Conversation({ taskId }: { taskId: string }) {
                 <span className="msg-mark" aria-label={message.role === 'user' ? 'You' : 'Claude'}>
                   {message.role === 'user' ? '>' : '●'}
                 </span>
-                <MessageText text={message.text} />
+                <MarkdownText className="msg-text" text={message.text} />
               </div>
             ),
           )}
