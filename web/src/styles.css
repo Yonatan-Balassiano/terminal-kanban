@@ -249,10 +249,9 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .link { border: none; background: none; padding: 2px 0; cursor: pointer; display: flex; align-items: center; gap: 8px; text-align: left; }
 .link:hover { color: var(--accent); }
 
-.description {
-  white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: 13px/1.5 var(--sans);
-  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; max-height: 420px; overflow: auto;
-}
+.description { max-height: 420px; overflow: auto; padding: 12px 14px; }
+/* A brief is written line by line: keep its single line breaks, which Markdown would join. */
+.description p, .description li { white-space: pre-line; }
 
 .empty-screen { max-width: 480px; margin: 15vh auto; padding: 0 16px; }
 .empty-screen h1 { font-size: 20px; }
@@ -322,14 +321,15 @@ kbd {
 
 /* ---------- conversation */
 .h2-note { margin-left: 8px; text-transform: none; letter-spacing: 0; font-weight: 400; }
-.convo {
+/* the dark terminal panel: the conversation and the description */
+.convo, .term {
   --term-bg: #0d1117; --term-fg: #d6dbe3; --term-dim: #7d8590; --term-line: #232a33;
   --term-accent: #d97757; --term-user: #8fb8ff; --term-code: #161b22;
-  display: flex; flex-direction: column; gap: 10px; max-height: 52vh; overflow: auto;
-  border: 1px solid var(--term-line); border-radius: 8px; padding: 12px 14px;
+  border: 1px solid var(--term-line); border-radius: 8px;
   background: var(--term-bg); color: var(--term-fg); font: 12.5px/1.55 var(--mono);
   color-scheme: dark;
 }
+.convo { display: flex; flex-direction: column; gap: 10px; max-height: 52vh; overflow: auto; padding: 12px 14px; }
 .msg { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 0 6px; }
 .msg-mark { color: var(--term-dim); user-select: none; }
 .msg-assistant .msg-mark { color: var(--term-accent); }
