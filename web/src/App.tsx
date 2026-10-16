@@ -566,19 +566,21 @@ export function App() {
           }
           busy={dialogBusy}
           error={dialogError}
-          onConfirm={() =>
-            void runDialog(async () => {
-              const index = visible.findIndex((card) => card.node.task.id === dialog.task.id);
-              const outcome = await rpc<{ archivedShas: string[]; archiveRef: string }>('deleteTask', {
-                id: dialog.task.id,
-              });
-              const next = visible[index + 1] ?? visible[index - 1];
-              setSelectedId(next && next.node.task.id !== dialog.task.id ? next.node.task.id : null);
+          onConfirm={() => {
+            // Closed at once: archiving and removing a big worktree can take a
+            // while, and a dialog that sits on "Working…" reads as a hang.
+            const task = dialog.task;
+            const index = visible.findIndex((card) => card.node.task.id === task.id);
+            const next = visible[index + 1] ?? visible[index - 1];
+            setSelectedId(next && next.node.task.id !== task.id ? next.node.task.id : null);
+            closeDialog();
+            void runQuick(`Deleting “${task.title}”…`, async () => {
+              const outcome = await rpc<{ archivedShas: string[]; archiveRef: string }>('deleteTask', { id: task.id });
               return outcome.archivedShas.length > 0
-                ? `Deleted. Uncommitted work saved at ${outcome.archiveRef}`
-                : 'Deleted';
-            })
-          }
+                ? `Deleted “${task.title}”. Uncommitted work saved at ${outcome.archiveRef}`
+                : `Deleted “${task.title}”`;
+            });
+          }}
           onClose={closeDialog}
         />
       )}
