@@ -152,22 +152,38 @@ describe('buildCardTree', () => {
     expect(tree.map((n) => n.task.id)).toEqual(['c']);
   });
 
-  it('orders by creation date, oldest first, with not-started cards last', () => {
+  it('orders by state, not-started last, alphabetically within a state at every level', () => {
     const tree = buildCardTree(
       board([
-        task('new', { createdAt: 1 }),
-        task('b', { createdAt: 3, updatedAt: 9, sessionId: 's' }),
-        task('a', { createdAt: 2, updatedAt: 1, sessionId: 's' }),
-        task('c1', { createdAt: 6, parentTaskId: 'a' }),
-        task('c2', { createdAt: 5, parentTaskId: 'a', sessionId: 's' }),
-        task('c3', { createdAt: 4, parentTaskId: 'a', sessionId: 's' }),
+        task('new', { title: 'A new', createdAt: 1 }),
+        task('b', { title: 'B', createdAt: 3, updatedAt: 9, sessionId: 's' }),
+        task('a', { title: 'A', createdAt: 2, updatedAt: 1, sessionId: 's' }),
+        task('c1', { title: 'C1', createdAt: 6, parentTaskId: 'a', sessionId: 's' }),
+        task('c2', { title: 'C2', createdAt: 5, parentTaskId: 'a', sessionId: 's' }),
+        task('c3', { title: 'C3', createdAt: 4, parentTaskId: 'a' }),
       ]),
-      [fleetRow('b', { attentionNeeded: true })],
+      [fleetRow('b', { attentionNeeded: true }), fleetRow('c2', { isBusy: true })],
       new Map(),
       noFilter,
     );
-    expect(tree.map((n) => n.task.id)).toEqual(['a', 'b', 'new']);
-    expect(tree[0]?.children.map((n) => n.task.id)).toEqual(['c3', 'c2', 'c1']);
+    expect(tree.map((n) => n.task.id)).toEqual(['b', 'a', 'new']);
+    expect(tree[0]?.children.length).toBe(0);
+    expect(tree[1]?.children.map((n) => n.task.id)).toEqual(['c2', 'c1', 'c3']);
+  });
+
+  it('puts working cards above idle ones, alphabetically within each, ignoring recency', () => {
+    const tree = buildCardTree(
+      board([
+        task('i2', { title: 'Zeta idle', updatedAt: 9 }),
+        task('w2', { title: 'beta working', updatedAt: 1 }),
+        task('i1', { title: 'Alpha idle', updatedAt: 1 }),
+        task('w1', { title: 'Alpha working', updatedAt: 9 }),
+      ]),
+      [fleetRow('i2'), fleetRow('w2', { isBusy: true }), fleetRow('i1'), fleetRow('w1', { isBusy: true })],
+      new Map(),
+      noFilter,
+    );
+    expect(tree.map((n) => n.task.id)).toEqual(['w1', 'w2', 'i1', 'i2']);
   });
 
   it('hides a shipped family only when every member is shipped', () => {

@@ -57,4 +57,18 @@ describe('BoardService branch persistence', () => {
 
     expect(board.getTask(task.id)?.branchName).toBe(task.branchName);
   });
+  it('leaves updated_at alone when a sync pass changes nothing but sync bookkeeping', () => {
+    const task = board.createTask({ title: 'Friday thing', repoId: 'repo-1' });
+    const [branch] = board.getTaskBranches(task.id);
+    board.updateTaskBranchSync(branch!.id, { prNumber: 7, prState: 'open' });
+    db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(1, task.id);
+
+    board.updateTaskBranchSync(branch!.id, { githubSyncStatus: 'syncing' });
+    board.updateTaskBranchSync(branch!.id, { githubSyncStatus: 'ok', githubLastSyncedAt: Date.now() });
+    expect(board.getTask(task.id)?.updatedAt).toBe(1);
+    expect(board.getTask(task.id)?.githubSyncStatus).toBe('ok');
+
+    board.updateTaskBranchSync(branch!.id, { ciState: 'failed' });
+    expect(board.getTask(task.id)?.updatedAt).toBeGreaterThan(1);
+  });
 });
