@@ -152,38 +152,46 @@ describe('buildCardTree', () => {
     expect(tree.map((n) => n.task.id)).toEqual(['c']);
   });
 
-  it('orders by state, not-started last, alphabetically within a state at every level', () => {
+  it('orders by last activity, newest first, a parent by the newest card in its family', () => {
     const tree = buildCardTree(
       board([
-        task('new', { title: 'A new', createdAt: 1 }),
-        task('b', { title: 'B', createdAt: 3, updatedAt: 9, sessionId: 's' }),
-        task('a', { title: 'A', createdAt: 2, updatedAt: 1, sessionId: 's' }),
-        task('c1', { title: 'C1', createdAt: 6, parentTaskId: 'a', sessionId: 's' }),
-        task('c2', { title: 'C2', createdAt: 5, parentTaskId: 'a', sessionId: 's' }),
-        task('c3', { title: 'C3', createdAt: 4, parentTaskId: 'a' }),
+        task('old', { title: 'Old', updatedAt: 100 }),
+        task('p', { title: 'Parent', updatedAt: 50, sessionId: 's' }),
+        task('c1', { title: 'C1', updatedAt: 60, parentTaskId: 'p' }),
+        task('c2', { title: 'C2', updatedAt: 70, parentTaskId: 'p', sessionId: 's' }),
+        task('g', { title: 'G', updatedAt: 10, parentTaskId: 'c1', sessionId: 's' }),
+        task('mid', { title: 'Mid', updatedAt: 150 }),
       ]),
-      [fleetRow('b', { attentionNeeded: true }), fleetRow('c2', { isBusy: true })],
+      // The grandchild's agent was active most recently of all, which lifts
+      // its whole family above cards that changed later than the parent did.
+      [fleetRow('g', { lastActivityAt: 200 })],
       new Map(),
       noFilter,
     );
-    expect(tree.map((n) => n.task.id)).toEqual(['b', 'a', 'new']);
-    expect(tree[0]?.children.length).toBe(0);
-    expect(tree[1]?.children.map((n) => n.task.id)).toEqual(['c2', 'c1', 'c3']);
+    expect(tree.map((n) => n.task.id)).toEqual(['p', 'mid', 'old']);
+    expect(tree[0]?.children.map((n) => n.task.id)).toEqual(['c1', 'c2']);
+    expect(tree[0]?.children[0]?.lastActiveAt).toBe(60);
+    expect(tree[0]?.children[0]?.children[0]?.lastActiveAt).toBe(200);
   });
 
-  it('puts working cards above idle ones, alphabetically within each, ignoring recency', () => {
-    const tree = buildCardTree(
-      board([
-        task('i2', { title: 'Zeta idle', updatedAt: 9 }),
-        task('w2', { title: 'beta working', updatedAt: 1 }),
-        task('i1', { title: 'Alpha idle', updatedAt: 1 }),
-        task('w1', { title: 'Alpha working', updatedAt: 9 }),
-      ]),
-      [fleetRow('i2'), fleetRow('w2', { isBusy: true }), fleetRow('i1'), fleetRow('w1', { isBusy: true })],
-      new Map(),
-      noFilter,
-    );
-    expect(tree.map((n) => n.task.id)).toEqual(['w1', 'w2', 'i1', 'i2']);
+  it('keeps working cards on top in a fixed order, however their activity times move', () => {
+    const order = (activity: Record<string, number>) =>
+      buildCardTree(
+        board([
+          task('idle', { title: 'Idle', updatedAt: 500 }),
+          task('w2', { title: 'Beta', updatedAt: 1 }),
+          task('w1', { title: 'Alpha', updatedAt: 1 }),
+        ]),
+        [
+          fleetRow('idle', { lastActivityAt: activity.idle }),
+          fleetRow('w1', { isBusy: true, lastActivityAt: activity.w1 }),
+          fleetRow('w2', { isBusy: true, lastActivityAt: activity.w2 }),
+        ],
+        new Map(),
+        noFilter,
+      ).map((n) => n.task.id);
+    expect(order({ idle: 900, w1: 10, w2: 20 })).toEqual(['w1', 'w2', 'idle']);
+    expect(order({ idle: 900, w1: 20, w2: 10 })).toEqual(['w1', 'w2', 'idle']);
   });
 
   it('hides a shipped family only when every member is shipped', () => {

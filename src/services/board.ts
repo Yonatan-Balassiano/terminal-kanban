@@ -715,7 +715,10 @@ export class BoardService {
     // Card state, as opposed to sync bookkeeping. The sync loop rewrites every
     // card on every poll (`syncing`, then the result, then a fresh
     // github_last_synced_at), so stamping updated_at unconditionally made every
-    // card read "just now" and reshuffled anything sorted by it.
+    // card read "just now" and reshuffled anything sorted by it. The sync error
+    // is bookkeeping too: `syncing` clears it and a failing lookup writes it
+    // back, so a card whose sync keeps failing (a rate-limited `gh`) would
+    // otherwise look freshly updated every cycle.
     const content: Record<string, string | number | null> = {
       pr_number: rollup.prNumber ?? null,
       pr_url: rollup.prUrl ?? null,
@@ -736,7 +739,6 @@ export class BoardService {
       git_behind_count: rollup.gitBehindCount,
       has_untracked: rollup.hasUntracked ? 1 : 0,
       has_conflicts: rollup.hasConflicts ? 1 : 0,
-      github_sync_error: rollup.githubSyncError ?? null,
       pr_count: rollup.prCount,
       pr_open_count: rollup.prOpenCount,
       pr_merged_count: rollup.prMergedCount,
@@ -749,6 +751,7 @@ export class BoardService {
         `UPDATE tasks SET
            ${columns.map((column) => `${column} = @${column}`).join(', ')},
            github_sync_status = @github_sync_status,
+           github_sync_error = @github_sync_error,
            github_last_synced_at = @github_last_synced_at,
            updated_at = CASE
              WHEN ${columns.map((column) => `${column} IS @${column}`).join(' AND ')}
@@ -758,6 +761,7 @@ export class BoardService {
       .run({
         ...content,
         github_sync_status: rollup.githubSyncStatus,
+        github_sync_error: rollup.githubSyncError ?? null,
         github_last_synced_at: rollup.githubLastSyncedAt ?? null,
         now: Date.now(),
         taskId,

@@ -57,7 +57,7 @@ describe('BoardService branch persistence', () => {
 
     expect(board.getTask(task.id)?.branchName).toBe(task.branchName);
   });
-  it('leaves updated_at alone when a sync pass changes nothing but sync bookkeeping', () => {
+  it('leaves updated_at alone when a sync pass changes nothing but sync bookkeeping, failing or not', () => {
     const task = board.createTask({ title: 'Friday thing', repoId: 'repo-1' });
     const [branch] = board.getTaskBranches(task.id);
     board.updateTaskBranchSync(branch!.id, { prNumber: 7, prState: 'open' });
@@ -67,6 +67,13 @@ describe('BoardService branch persistence', () => {
     board.updateTaskBranchSync(branch!.id, { githubSyncStatus: 'ok', githubLastSyncedAt: Date.now() });
     expect(board.getTask(task.id)?.updatedAt).toBe(1);
     expect(board.getTask(task.id)?.githubSyncStatus).toBe('ok');
+
+    // A sync that keeps failing clears its error on `syncing` and writes it back.
+    board.updateTaskBranchSync(branch!.id, { githubSyncStatus: 'error', githubSyncError: 'rate limit' });
+    board.updateTaskBranchSync(branch!.id, { githubSyncStatus: 'syncing', githubSyncError: null });
+    board.updateTaskBranchSync(branch!.id, { githubSyncStatus: 'error', githubSyncError: 'rate limit' });
+    expect(board.getTask(task.id)?.updatedAt).toBe(1);
+    expect(board.getTask(task.id)?.githubSyncError).toContain('rate limit');
 
     board.updateTaskBranchSync(branch!.id, { ciState: 'failed' });
     expect(board.getTask(task.id)?.updatedAt).toBeGreaterThan(1);
