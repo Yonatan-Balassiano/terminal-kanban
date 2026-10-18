@@ -57,8 +57,10 @@ export function Conversation({ taskId }: { taskId: string }) {
     setData(null);
     setError(null);
     stickToBottom.current = true;
+    let inFlight = false;
     const load = async () => {
-      if (document.hidden) return;
+      if (document.hidden || inFlight) return;
+      inFlight = true;
       try {
         const result = await rpc<GetConversationResult>('getConversation', { taskId, limit: 40 });
         if (!cancelled) {
@@ -67,6 +69,8 @@ export function Conversation({ taskId }: { taskId: string }) {
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        inFlight = false;
       }
     };
     reload.current = load;

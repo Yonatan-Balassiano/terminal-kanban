@@ -32,12 +32,24 @@ export function useBoard(): BoardData {
     setError(err instanceof Error ? err.message : String(err));
   }, []);
 
+  const fleetInFlight = useRef(false);
+
+  // One request at a time, and none while the tab is hidden: a fleet pass can
+  // take seconds, and the browser allows only six connections to the daemon,
+  // shared by every open tab. Polls stacked behind a slow one used to take all
+  // of them, leaving the conversation and every action stuck behind the queue.
   const loadFleet = useCallback(async () => {
+    if (fleetInFlight.current || document.hidden) {
+      return;
+    }
+    fleetInFlight.current = true;
     try {
       const result = await rpc<{ sessions: FleetSessionStatus[] }>('getFleetStatus');
       setFleet(result.sessions);
     } catch (err) {
       handleError(err);
+    } finally {
+      fleetInFlight.current = false;
     }
   }, [handleError]);
 
@@ -67,10 +79,15 @@ export function useBoard(): BoardData {
       setConnection,
     );
     const timer = window.setInterval(() => void loadFleet(), FLEET_POLL_MS);
+    const onVisible = () => {
+      if (!document.hidden) void loadFleet();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       unsubscribe();
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [handleError, loadFleet]);
 
