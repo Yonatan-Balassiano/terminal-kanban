@@ -712,50 +712,56 @@ export class BoardService {
 
     const rollup = rollupBranches(branches);
 
+    // Card state, as opposed to sync bookkeeping. The sync loop rewrites every
+    // card on every poll (`syncing`, then the result, then a fresh
+    // github_last_synced_at), so stamping updated_at unconditionally made every
+    // card read "just now" and reshuffled anything sorted by it.
+    const content: Record<string, string | number | null> = {
+      pr_number: rollup.prNumber ?? null,
+      pr_url: rollup.prUrl ?? null,
+      pr_state: rollup.prState,
+      pr_draft: rollup.prDraft ? 1 : 0,
+      ci_state: rollup.ciState,
+      ci_summary: rollup.ciSummary ?? null,
+      failing_check_name: rollup.failingCheckName ?? null,
+      ci_required_total: rollup.ciRequiredTotal,
+      ci_required_passed: rollup.ciRequiredPassed,
+      ci_required_failed: rollup.ciRequiredFailed,
+      ci_required_pending: rollup.ciRequiredPending,
+      review_state: rollup.reviewState,
+      review_summary: rollup.reviewSummary ?? null,
+      unresolved_thread_count: rollup.unresolvedThreadCount,
+      git_state: rollup.gitState,
+      git_ahead_count: rollup.gitAheadCount,
+      git_behind_count: rollup.gitBehindCount,
+      has_untracked: rollup.hasUntracked ? 1 : 0,
+      has_conflicts: rollup.hasConflicts ? 1 : 0,
+      github_sync_error: rollup.githubSyncError ?? null,
+      pr_count: rollup.prCount,
+      pr_open_count: rollup.prOpenCount,
+      pr_merged_count: rollup.prMergedCount,
+    };
+    const columns = Object.keys(content);
+
+    // SET expressions all read the row as it was, so the CASE compares old to new.
     this.db
-      .prepare<unknown[], void>(
+      .prepare(
         `UPDATE tasks SET
-           pr_number = ?, pr_url = ?, pr_state = ?, pr_draft = ?,
-           ci_state = ?, ci_summary = ?, failing_check_name = ?,
-           ci_required_total = ?, ci_required_passed = ?,
-           ci_required_failed = ?, ci_required_pending = ?,
-           review_state = ?, review_summary = ?, unresolved_thread_count = ?,
-           git_state = ?, git_ahead_count = ?, git_behind_count = ?,
-           has_untracked = ?, has_conflicts = ?,
-           github_sync_status = ?, github_sync_error = ?, github_last_synced_at = ?,
-           pr_count = ?, pr_open_count = ?, pr_merged_count = ?,
-           updated_at = ?
-         WHERE id = ?`,
+           ${columns.map((column) => `${column} = @${column}`).join(', ')},
+           github_sync_status = @github_sync_status,
+           github_last_synced_at = @github_last_synced_at,
+           updated_at = CASE
+             WHEN ${columns.map((column) => `${column} IS @${column}`).join(' AND ')}
+             THEN updated_at ELSE @now END
+         WHERE id = @taskId`,
       )
-      .run(
-        rollup.prNumber ?? null,
-        rollup.prUrl ?? null,
-        rollup.prState,
-        rollup.prDraft ? 1 : 0,
-        rollup.ciState,
-        rollup.ciSummary ?? null,
-        rollup.failingCheckName ?? null,
-        rollup.ciRequiredTotal,
-        rollup.ciRequiredPassed,
-        rollup.ciRequiredFailed,
-        rollup.ciRequiredPending,
-        rollup.reviewState,
-        rollup.reviewSummary ?? null,
-        rollup.unresolvedThreadCount,
-        rollup.gitState,
-        rollup.gitAheadCount,
-        rollup.gitBehindCount,
-        rollup.hasUntracked ? 1 : 0,
-        rollup.hasConflicts ? 1 : 0,
-        rollup.githubSyncStatus,
-        rollup.githubSyncError ?? null,
-        rollup.githubLastSyncedAt ?? null,
-        rollup.prCount,
-        rollup.prOpenCount,
-        rollup.prMergedCount,
-        Date.now(),
+      .run({
+        ...content,
+        github_sync_status: rollup.githubSyncStatus,
+        github_last_synced_at: rollup.githubLastSyncedAt ?? null,
+        now: Date.now(),
         taskId,
-      );
+      });
   }
 
   linkSession(
