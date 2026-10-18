@@ -270,7 +270,6 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .primary.danger, .tool.danger:hover:not(:disabled) { background: var(--pr-closed); color: #fff; border-color: var(--pr-closed); }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.toolbar-gap { width: 8px; }
 .tool {
   border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 3px 8px;
   font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;

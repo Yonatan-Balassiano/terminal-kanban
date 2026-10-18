@@ -23,7 +23,7 @@ import {
 import { useBoard } from './useBoard';
 import { Conversation, MarkdownText } from './Conversation';
 import { ConfirmDialog, HelpDialog, NewCardDialog, TeleportDialog, TextDialog, type NewCardInput } from './Dialogs';
-import { commandForKey, navigate, openTarget, primaryPR, visibleCards, type Command } from './keys';
+import { commandForKey, navigate, primaryPR, visibleCards, type Command } from './keys';
 
 type FocusStatus = { taskId: string; kind: 'pending' | 'ok' | 'error'; message: string };
 
@@ -33,8 +33,6 @@ type Dialog =
   | { kind: 'delete'; task: TaskRecord }
   | { kind: 'restart'; task: TaskRecord }
   | { kind: 'teleport'; task: TaskRecord; checks: DoctorCheck[] | null; checkError: string | null }
-  | { kind: 'merge'; task: TaskRecord }
-  | { kind: 'comment'; task: TaskRecord }
   | { kind: 'help' };
 
 type Toast = { kind: 'ok' | 'error'; text: string };
@@ -322,26 +320,13 @@ export function App() {
         case 'teleport':
           openTeleport(task);
           return;
-        case 'merge-pr':
-          setDialog({ kind: 'merge', task });
-          return;
-        case 'comment-pr':
-          setDialog({ kind: 'comment', task });
-          return;
-        case 'create-pr':
-          void runQuick('Creating the pull request…', async () => {
-            const pr = await rpc<{ number?: number; url?: string } | null>('createTaskPR', { taskId: task.id });
-            return pr?.number ? `PR #${pr.number} is open` : 'Pull request requested';
-          });
-          return;
-        case 'open-pr':
         case 'open-checks': {
-          const url = command === 'open-pr' ? openTarget(task, releases.get(task.id)) : primaryPR(task)?.prUrl;
+          const url = primaryPR(task)?.prUrl;
           if (!url) {
             setToast({ kind: 'error', text: 'This card has no pull request yet' });
             return;
           }
-          window.open(command === 'open-checks' ? `${url}/checks` : url, '_blank', 'noopener');
+          window.open(`${url}/checks`, '_blank', 'noopener');
           return;
         }
       }
@@ -481,7 +466,6 @@ export function App() {
                 fleet={fleet}
                 releases={releases.get(selected.id)}
                 focus={focus?.taskId === selected.id ? focus : null}
-                onShow={() => void showInTerminal(selected)}
                 onSelect={(task) => setSelectedId(task.id)}
                 onCommand={runCommand}
               />
@@ -526,23 +510,6 @@ export function App() {
           onSubmit={(title) =>
             void runDialog(async () => {
               await rpc('renameTask', { id: dialog.task.id, title });
-            })
-          }
-          onClose={closeDialog}
-        />
-      )}
-      {dialog?.kind === 'comment' && (
-        <TextDialog
-          title={`Comment on PR #${primaryPR(dialog.task)?.prNumber ?? ''}`}
-          label="Comment (Markdown)"
-          multiline
-          submitLabel="Post comment"
-          busy={dialogBusy}
-          error={dialogError}
-          onSubmit={(body) =>
-            void runDialog(async () => {
-              await rpc('commentTaskPR', { taskId: dialog.task.id, body });
-              return 'Comment posted';
             })
           }
           onClose={closeDialog}
@@ -622,27 +589,6 @@ export function App() {
               // The pane the terminal showed died with the old session: show the new one if it was on screen.
               if (focus?.taskId === task.id) void showInTerminal(task);
               return toRemote ? 'Teleported to remote' : 'Teleported to local';
-            })
-          }
-          onClose={closeDialog}
-        />
-      )}
-      {dialog?.kind === 'merge' && (
-        <ConfirmDialog
-          title="Merge pull request"
-          confirmLabel="Merge"
-          body={
-            <p>
-              Squash-merge PR <strong>#{primaryPR(dialog.task)?.prNumber}</strong> of{' '}
-              <strong>{dialog.task.title}</strong>?
-            </p>
-          }
-          busy={dialogBusy}
-          error={dialogError}
-          onConfirm={() =>
-            void runDialog(async () => {
-              await rpc('mergeTaskPR', { taskId: dialog.task.id });
-              return 'Merged';
             })
           }
           onClose={closeDialog}
@@ -784,12 +730,11 @@ interface CardDetailProps {
   fleet: FleetSessionStatus[];
   releases?: PRReleaseStatus[];
   focus: FocusStatus | null;
-  onShow: () => void;
   onSelect: (task: TaskRecord) => void;
   onCommand: (command: Command) => void;
 }
 
-function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onCommand }: CardDetailProps) {
+function CardDetail({ task, board, fleet, releases, focus, onSelect, onCommand }: CardDetailProps) {
   const state = cardState(task, fleet);
   const repo = board.repos.find((r) => r.id === task.repoId);
   const parent = task.parentTaskId ? board.tasks.find((t) => t.id === task.parentTaskId) : undefined;
@@ -799,7 +744,6 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onC
     .map((id) => board.labels.find((label) => label.id === id)?.label)
     .filter((label): label is string => Boolean(label));
   const branches = [...task.branches].sort((a, b) => a.sortKey - b.sortKey);
-  const pr = primaryPR(task);
 
   return (
     <article className="detail-body">
@@ -820,12 +764,11 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onC
         ))}
       </div>
 
-      <div className="actions">
-        <button className="primary" onClick={onShow} disabled={focus?.kind === 'pending'} title="Enter">
-          Show in terminal
-        </button>
-        {focus && <span className={`focus-msg focus-${focus.kind}`}>{focus.message}</span>}
-      </div>
+      {focus && (
+        <div className="actions">
+          <span className={`focus-msg focus-${focus.kind}`}>{focus.message}</span>
+        </div>
+      )}
       <div className="toolbar">
         <ToolButton label="Rename" shortcut="r" onClick={() => onCommand('rename')} />
         <ToolButton label="Restart" shortcut="R" onClick={() => onCommand('restart')} />
@@ -836,11 +779,6 @@ function CardDetail({ task, board, fleet, releases, focus, onShow, onSelect, onC
           disabled={task.kind === 'general'}
         />
         <ToolButton label="Delete" shortcut="d" onClick={() => onCommand('delete')} danger />
-        <span className="toolbar-gap" />
-        <ToolButton label="Open PR" shortcut="o" onClick={() => onCommand('open-pr')} disabled={!pr} />
-        <ToolButton label="Create PR" shortcut="c" onClick={() => onCommand('create-pr')} disabled={task.kind === 'general' || Boolean(pr && pr.prState !== 'closed')} />
-        <ToolButton label="Comment" shortcut="j" onClick={() => onCommand('comment-pr')} disabled={!pr || (pr.prState !== 'open' && pr.prState !== 'draft')} />
-        <ToolButton label="Merge" shortcut="m" onClick={() => onCommand('merge-pr')} disabled={!pr || pr.prState !== 'open'} />
       </div>
 
       <Conversation taskId={task.id} />

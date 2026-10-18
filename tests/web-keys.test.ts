@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { commandForKey, navigate, openTarget, visibleCards } from '../web/src/keys.js';
-import type { CardNode, PRReleaseStatus, TaskBranchRecord, TaskRecord } from '../web/src/model.js';
+import { commandForKey, navigate, visibleCards } from '../web/src/keys.js';
+import type { CardNode, TaskRecord } from '../web/src/model.js';
 
 function node(id: string, children: CardNode[] = []): CardNode {
   return { task: { id } as TaskRecord, state: 'idle', shipped: false, children };
@@ -47,29 +47,9 @@ describe('commandForKey', () => {
     expect(commandForKey({ key: 'R' })).toBe('restart');
     expect(commandForKey({ key: 'T' })).toBe('teleport');
     expect(commandForKey({ key: 'Enter' })).toBe('show');
+    expect(commandForKey({ key: 'm' })).toBeNull();
     expect(commandForKey({ key: '3' })).toEqual({ repoIndex: 2 });
     expect(commandForKey({ key: 'r', metaKey: true })).toBeNull();
     expect(commandForKey({ key: 'z' })).toBeNull();
-  });
-});
-
-describe('openTarget', () => {
-  const branch = (patch: Partial<TaskBranchRecord>) =>
-    ({ id: 'b', prNumber: 7, prUrl: 'https://github.com/o/r/pull/7', prState: 'open', ...patch }) as TaskBranchRecord;
-  const task = (b: TaskBranchRecord) => ({ id: 't', branches: [b] }) as unknown as TaskRecord;
-  const release = (stage: PRReleaseStatus['stage']): PRReleaseStatus => ({
-    repoSlug: 'o/r',
-    prNumber: 7,
-    stage,
-    confidence: 'confirmed',
-    checkedAt: 0,
-    artifacts: [{ artifactName: 'com.wixpress.thing', shortName: 'thing', stage: 'rc-built', gates: true } as never],
-  });
-
-  it('opens the PR, or the dev portal while a merged change is built but not in production', () => {
-    expect(openTarget(task(branch({})), undefined)).toBe('https://github.com/o/r/pull/7');
-    const merged = task(branch({ prState: 'merged' }));
-    expect(openTarget(merged, [release('rc-built')])).toBe('https://wix-bo.com/dev/project/com.wixpress.thing');
-    expect(openTarget(merged, [release('ga')])).toBe('https://github.com/o/r/pull/7');
   });
 });
