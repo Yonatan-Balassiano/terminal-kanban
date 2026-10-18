@@ -2938,6 +2938,24 @@ describe('SessionManager.getFleetStatus', () => {
     expect(fleet[0]?.trustPromptShowing).toBe(false);
   });
 
+  it('shares one pass between overlapping callers, and starts a fresh one after', async () => {
+    // Arrange — every web tab, the TUI and the CLI poll this, and a pass runs
+    // several tmux commands per session. Overlapping calls used to each run
+    // their own pass and queue up behind one another.
+    const peekPane = vi.fn<[string], Promise<string>>(async () => '');
+    const task = board.createTask({ title: 'Polled card', repoId: 'repo-1' });
+    const { manager } = makeManager({ peekPane });
+    await manager.openSession(task.id);
+
+    // Act
+    const [first, second] = await Promise.all([manager.getFleetStatus(), manager.getFleetStatus()]);
+    await manager.getFleetStatus();
+
+    // Assert
+    expect(second).toBe(first);
+    expect(peekPane).toHaveBeenCalledTimes(2);
+  });
+
   it('returns an empty list when nothing is live', async () => {
     // Arrange
     board.createTask({ title: 'Never opened', repoId: 'repo-1' });

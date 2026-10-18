@@ -42,6 +42,7 @@ import {
   resolveContinuedSessionId,
   transcriptHasUserMessage,
 } from './session-transcript.js';
+import { mapWithLimit } from './concurrency.js';
 import { composeResumeNotice, PendingMessageService } from './pending-messages.js';
 import { localResumeNoticePath } from './session-brief.js';
 import {
@@ -171,6 +172,8 @@ export type RedeliverOutcome =
   | { delivered: false; reason: RedeliverFailureReason };
 
 const processTableCacheWindowMs = 2000;
+/** How many sessions `getFleetStatus` inspects at once. */
+const FLEET_INSPECT_CONCURRENCY = 8;
 
 // --------------- Helpers -------------------------------------
 
@@ -206,6 +209,7 @@ export class SessionManager {
   private lastOutputAtBySessionKey = new Map<string, number>();
   private lastBusyBySessionKey = new Map<string, boolean>();
   private openSessionInFlight = new Map<string, Promise<SessionRecord>>();
+  private fleetStatusInFlight: Promise<FleetSessionStatus[]> | null = null;
   private processTableCache = new Map<string, { rows: ProcessRow[]; loadedAt: number }>();
   private processTableLoadInFlight = new Map<string, Promise<ProcessRow[] | null>>();
   private remoteStartInFlight = false;
@@ -1696,16 +1700,35 @@ export class SessionManager {
     return tail;
   }
 
-  async getFleetStatus(): Promise<FleetSessionStatus[]> {
+  /**
+   * One row per live session. Concurrent callers share a single pass: every
+   * web tab, the TUI and `agentboard fleet` poll this, and each pass runs
+   * several tmux commands per session — run back to back for 19 sessions that
+   * took longer than the web board's poll interval, so calls stacked up behind
+   * each other and starved every other request.
+   */
+  getFleetStatus(): Promise<FleetSessionStatus[]> {
+    if (!this.fleetStatusInFlight) {
+      this.fleetStatusInFlight = this.computeFleetStatus().finally(() => {
+        this.fleetStatusInFlight = null;
+      });
+    }
+    return this.fleetStatusInFlight;
+  }
+
+  private async computeFleetStatus(): Promise<FleetSessionStatus[]> {
     const rows = this.db
       .prepare<[], SessionRow>(`SELECT * FROM sessions WHERE status IN ('active','idle')`)
       .all();
+    const sessions = rows
+      .map(rowToRecord)
+      .flatMap((session) =>
+        session.backendSessionId ? [{ ...session, backendSessionId: session.backendSessionId }] : [],
+      );
 
-    const results: FleetSessionStatus[] = [];
-    for (const row of rows) {
-      const session = rowToRecord(row);
-      if (!session.backendSessionId) continue;
-
+    // Sessions are independent, so inspect them side by side; the cap keeps a
+    // big fleet from forking dozens of tmux processes at once.
+    return mapWithLimit(sessions, FLEET_INSPECT_CONCURRENCY, async (session): Promise<FleetSessionStatus> => {
       const task = this.board.getTask(session.taskId);
       const { activity } = await this.inspectSessionState(session.taskId, session.slot);
 
@@ -1732,7 +1755,7 @@ export class SessionManager {
         }
       }
 
-      results.push({
+      return {
         taskId: session.taskId,
         taskTitle: task?.title ?? session.taskId,
         slot: session.slot,
@@ -1745,10 +1768,8 @@ export class SessionManager {
         paneId,
         delivered: this.resolveDelivered(session),
         createdAt: session.createdAt,
-      });
-    }
-
-    return results;
+      };
+    });
   }
 
   /**
