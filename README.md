@@ -329,9 +329,9 @@ its details and shows its session there. The TUI stays the default.
   session next starts.
 - **Actions and the TUI's keys.** `n` new card (optionally a subtask, started
   right away), `r` rename, `d` delete (uncommitted work is archived; the browser
-  can never purge), `R` restart, `c`/`m`/`j` create, merge and comment on the
-  PR, `o`/`v` open the PR or its checks, `s` sync. Arrows (and `k`, `h`, `l`)
-  move through the tree; Enter shows the card in the terminal. `?` lists them all.
+  can never purge), `R` restart, `v` open the PR checks, `s` sync. Arrows (and
+  `k`, `h`, `l`) move through the tree; Enter (or a click) shows the card in
+  the terminal. `?` lists them all.
 - The daemon serves it on `http://127.0.0.1:4317` (`"web": { "port": … }` to
   change). API calls need a token from the state dir, which `agentboard web`
   hands to the browser once as a cookie. tmux backend only.

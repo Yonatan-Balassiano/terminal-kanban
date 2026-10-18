@@ -2,7 +2,7 @@
 // command a key press means. Pure, so tests can import it. The keys are the
 // TUI's (internal/tui/model.go), minus the ones about columns and panes.
 
-import { findPRRelease, prBranches, type CardNode, type PRReleaseStatus, type TaskBranchRecord, type TaskRecord } from './model';
+import { prBranches, type CardNode, type TaskBranchRecord, type TaskRecord } from './model';
 
 export interface VisibleCard {
   node: CardNode;
@@ -35,10 +35,6 @@ export type Command =
   | 'delete'
   | 'restart'
   | 'teleport'
-  | 'create-pr'
-  | 'merge-pr'
-  | 'comment-pr'
-  | 'open-pr'
   | 'open-checks'
   | 'sync'
   | 'toggle-detail'
@@ -66,16 +62,11 @@ const KEYMAP: Record<string, Command> = {
   ArrowRight: 'expand',
   l: 'expand',
   Enter: 'show',
-  t: 'show',
   n: 'new',
   r: 'rename',
   d: 'delete',
   R: 'restart',
   T: 'teleport',
-  c: 'create-pr',
-  m: 'merge-pr',
-  j: 'comment-pr',
-  o: 'open-pr',
   v: 'open-checks',
   s: 'sync',
   e: 'toggle-detail',
@@ -127,7 +118,7 @@ export function navigate(
   }
 }
 
-/** The pull request `o`, `v`, `m` and `j` act on: the first open one, else the newest merged one. */
+/** The pull request `v` acts on: the first open one, else the newest merged one. */
 export function primaryPR(task: TaskRecord): TaskBranchRecord | undefined {
   const prs = prBranches(task);
   return (
@@ -135,22 +126,6 @@ export function primaryPR(task: TaskRecord): TaskBranchRecord | undefined {
     [...prs].reverse().find((branch) => branch.prState === 'merged') ??
     prs[0]
   );
-}
-
-/**
- * What `o` opens: the PR — or, once it has merged and a release candidate is
- * built but not yet in production, the dev portal page of the artifact holding
- * it back, as the TUI does (`getTaskDevPortalURL`).
- */
-export function openTarget(task: TaskRecord, releases: readonly PRReleaseStatus[] | undefined): string | undefined {
-  const branch = primaryPR(task);
-  if (!branch) return undefined;
-  const release = findPRRelease(branch, releases);
-  if (branch.prState === 'merged' && release && (release.stage === 'rc-built' || release.stage === 'rolling-out')) {
-    const blocking = release.artifacts.find((artifact) => artifact.gates && artifact.stage !== 'ga');
-    if (blocking) return `https://wix-bo.com/dev/project/${blocking.artifactName}`;
-  }
-  return branch.prUrl;
 }
 
 export interface Shortcut {
@@ -164,7 +139,7 @@ export const SHORTCUTS: Array<{ section: string; items: Shortcut[] }> = [
     items: [
       { keys: '↑  k  ↓', label: 'Previous / next card' },
       { keys: '←  h  →  l', label: 'Collapse / expand, or go to parent / first subtask' },
-      { keys: 'Enter  t', label: 'Show the card’s session in the terminal' },
+      { keys: 'Enter', label: 'Show the card’s session in the terminal' },
       { keys: '!', label: 'Jump to a card that needs you' },
       { keys: '/', label: 'Search' },
       { keys: 'Esc', label: 'Clear search, close a dialog' },
@@ -185,11 +160,7 @@ export const SHORTCUTS: Array<{ section: string; items: Shortcut[] }> = [
   {
     section: 'Pull request',
     items: [
-      { keys: 'o', label: 'Open the PR, or the dev portal once built' },
       { keys: 'v', label: 'Open PR checks' },
-      { keys: 'c', label: 'Create the PR now' },
-      { keys: 'm', label: 'Merge the PR' },
-      { keys: 'j', label: 'Comment on the PR' },
       { keys: 's', label: 'Sync with GitHub now' },
     ],
   },
