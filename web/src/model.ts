@@ -119,13 +119,6 @@ export interface CardNode {
   task: TaskRecord;
   state: CardState;
   shipped: boolean;
-  /** When this card was last active: its agent's last activity, or its own last change. */
-  lastActiveAt: number;
-  /**
-   * What the card sorts by: the most recent `lastActiveAt` in its family (the
-   * card and every card under it), with a working card counting as now.
-   */
-  sortActiveAt: number;
   children: CardNode[];
 }
 
@@ -135,31 +128,24 @@ export interface BoardFilter {
   showShipped: boolean;
 }
 
-/**
- * When a card was last active. A live session's own activity (its agent
- * writing to the conversation) is the real signal; `updatedAt` covers what the
- * card itself did — a PR, CI, a session opening or closing — and is the only
- * signal for a card with no live session. Sync polls do not move it.
- */
-export function lastActiveAt(task: TaskRecord, fleet: readonly FleetSessionStatus[]): number {
-  let latest = task.updatedAt;
-  for (const row of fleet) {
-    if (row.taskId === task.id && row.lastActivityAt !== undefined && row.lastActivityAt > latest) {
-      latest = row.lastActivityAt;
-    }
-  }
-  return latest;
-}
+const STATE_RANK: Record<CardState, number> = {
+  'needs-you': 0,
+  working: 1,
+  idle: 2,
+  stopped: 3,
+  new: 4,
+};
 
 /**
- * Most recently active first, at every level, a parent ranked by the most
- * recent card in its family. A working card counts as active now, so several
- * working cards hold their places (alphabetically) on top instead of trading
- * them on every poll as each writes to its conversation in turn.
+ * Live work first, so it can be found at a glance: needs you, then working,
+ * idle, stopped, and not-started cards last. Within a state, alphabetical by
+ * title, so a card moves only when its own state changes — never because
+ * something else was touched or polled.
  */
 function compareNodes(a: CardNode, b: CardNode): number {
-  if (a.sortActiveAt !== b.sortActiveAt) {
-    return b.sortActiveAt - a.sortActiveAt;
+  const rank = STATE_RANK[a.state] - STATE_RANK[b.state];
+  if (rank !== 0) {
+    return rank;
   }
   return (
     a.task.title.localeCompare(b.task.title, undefined, { numeric: true, sensitivity: 'base' }) ||
@@ -207,13 +193,10 @@ export function buildCardTree(
   const nodes = new Map<string, CardNode>();
   for (const task of board.tasks) {
     const state = cardState(task, fleet);
-    const active = lastActiveAt(task, fleet);
     nodes.set(task.id, {
       task,
       state,
       shipped: isShipped(task, state, releases.get(task.id)),
-      lastActiveAt: active,
-      sortActiveAt: state === 'working' ? Number.POSITIVE_INFINITY : active,
       children: [],
     });
   }
@@ -227,15 +210,6 @@ export function buildCardTree(
       roots.push(node);
     }
   }
-
-  // A family is as recent as its most recent member.
-  const rollUp = (node: CardNode): number => {
-    for (const child of node.children) {
-      node.sortActiveAt = Math.max(node.sortActiveAt, rollUp(child));
-    }
-    return node.sortActiveAt;
-  };
-  roots.forEach(rollUp);
 
   const sortDeep = (list: CardNode[]) => {
     list.sort(compareNodes);

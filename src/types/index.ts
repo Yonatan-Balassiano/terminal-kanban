@@ -534,12 +534,6 @@ export interface FleetSessionStatus {
    * is the fix.
    */
   delivered: boolean | null;
-  /**
-   * When the agent last did anything: the conversation file's mtime (or, for a
-   * PTY session, its last output). What the web board orders cards by. Absent
-   * for remote sessions, whose transcript is on the far host.
-   */
-  lastActivityAt?: number;
   createdAt: number;
 }
 

@@ -720,7 +720,7 @@ function CardBranch(props: CardBranchProps) {
                 {countFamily(node) - 1} subtask{countFamily(node) - 1 === 1 ? '' : 's'}
               </span>
             )}
-            <span className="muted push">{relativeTime(node.lastActiveAt)}</span>
+            <span className="muted push">{relativeTime(task.updatedAt)}</span>
           </span>
         </button>
         {task.kind !== 'general' && (

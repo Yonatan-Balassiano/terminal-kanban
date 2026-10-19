@@ -1767,7 +1767,6 @@ export class SessionManager {
         backendSessionId: session.backendSessionId,
         paneId,
         delivered: this.resolveDelivered(session),
-        lastActivityAt: this.resolveLastOutputAt(this.sessionKey(session.taskId, session.slot), session),
         createdAt: session.createdAt,
       };
     });
