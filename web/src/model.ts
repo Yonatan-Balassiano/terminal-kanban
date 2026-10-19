@@ -128,29 +128,13 @@ export interface BoardFilter {
   showShipped: boolean;
 }
 
-const STATE_RANK: Record<CardState, number> = {
-  'needs-you': 0,
-  working: 1,
-  idle: 2,
-  stopped: 3,
-  new: 4,
-};
-
 /**
- * Live work first, so it can be found at a glance: needs you, then working,
- * idle, stopped, and not-started cards last. Within a state, alphabetical by
- * title, so a card moves only when its own state changes — never because
- * something else was touched or polled.
+ * Newest card first, at every level. Creation time never changes, so a card
+ * stays put while it works, idles or gets polled — it moves only when a newer
+ * card is created above it.
  */
 function compareNodes(a: CardNode, b: CardNode): number {
-  const rank = STATE_RANK[a.state] - STATE_RANK[b.state];
-  if (rank !== 0) {
-    return rank;
-  }
-  return (
-    a.task.title.localeCompare(b.task.title, undefined, { numeric: true, sensitivity: 'base' }) ||
-    a.task.id.localeCompare(b.task.id)
-  );
+  return b.task.createdAt - a.task.createdAt || a.task.id.localeCompare(b.task.id);
 }
 
 function nodeMatches(node: CardNode, filter: BoardFilter, repoLabel: (id?: string) => string): boolean {
