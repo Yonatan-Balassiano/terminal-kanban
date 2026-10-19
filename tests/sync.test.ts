@@ -426,6 +426,53 @@ describe('SyncService', () => {
     expect(board.clearChildPrAlert).toHaveBeenCalledWith('parent-1');
   });
 
+  it('never marks a finished pull request syncing, and releases one left marked', async () => {
+    // Arrange — a merged branch is not looked up, so a "syncing" mark set
+    // before that check was never cleared and the card showed syncing forever.
+    const { board } = makeBoard({ trackId: 'shipping' });
+    board.updateTaskBranchSync('branch-0', {
+      prNumber: 42,
+      prState: 'merged',
+      mergeCommitSha: 'abc123',
+      githubSyncStatus: 'syncing',
+    });
+    board.updateTaskBranchSync.mockClear();
+    const github = {
+      findBranchPR: vi.fn(),
+      getPR: vi.fn(),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn(),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue(null),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(github.findBranchPR).not.toHaveBeenCalled();
+    expect(board.updateTaskBranchSync).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ githubSyncStatus: 'syncing' }),
+    );
+    expect(board.updateTaskBranchSync).toHaveBeenCalledWith(
+      'branch-0',
+      expect.objectContaining({ githubSyncStatus: 'ok' }),
+    );
+  });
+
   it('uses the stored repo default base branch without overwriting it during sync', async () => {
     const { board } = makeBoard();
     const prInfo = makePrInfo();
@@ -1434,6 +1481,56 @@ describe('SyncService', () => {
       expect.objectContaining({ prNumber: 42, githubSyncStatus: 'ok' }),
     );
   });
+  it('pauses pull-request lookups after GitHub rate-limits one, and keeps reading git state', async () => {
+    // Arrange — every branch is looked up every cycle; once GitHub's limit
+    // trips, carrying on only keeps it tripped, and each cycle rewrote every
+    // card to "syncing" then "error", which read as fresh activity.
+    const { board } = makeBoard({ trackId: 'pr' });
+    const github = {
+      findBranchPR: vi.fn().mockRejectedValue(new Error('GraphQL: API rate limit already exceeded for user ID 1.')),
+      getPR: vi.fn(),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([{ id: 'repo-1', github_owner: 'org', github_repo: 'proj' }]),
+        run: vi.fn(),
+      }),
+    };
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+    await sync.trigger();
+    const lookups = github.findBranchPR.mock.calls.length;
+    const gitReads = git.getWorkspaceStatus.mock.calls.length;
+    board.updateTaskBranchSync.mockClear();
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(lookups).toBeGreaterThan(0);
+    expect(github.findBranchPR).toHaveBeenCalledTimes(lookups);
+    expect(git.getWorkspaceStatus.mock.calls.length).toBeGreaterThan(gitReads);
+    expect(board.updateTaskBranchSync).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ githubSyncStatus: 'syncing' }),
+    );
+  });
+
   it('pulls a shipping card back into review when new work opens on it', async () => {
     // Arrange — a card waiting on a rollout that gains another pull request is
     // no longer "everything has merged", so it belongs back in review.

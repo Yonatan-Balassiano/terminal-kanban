@@ -24,6 +24,7 @@ import { useBoard } from './useBoard';
 import { Conversation, MarkdownText } from './Conversation';
 import { ConfirmDialog, HelpDialog, NewCardDialog, TeleportDialog, TextDialog, type NewCardInput } from './Dialogs';
 import { commandForKey, navigate, primaryPR, visibleCards, type Command } from './keys';
+import { cardFromHash, pushVisit, replaceVisit, visitFrom } from './history';
 
 type FocusStatus = { taskId: string; kind: 'pending' | 'ok' | 'error'; message: string };
 
@@ -73,7 +74,10 @@ export function App() {
   const [filter, setFilter] = useState<BoardFilter>(() =>
     readStored('agentboard.filter', { query: '', repoId: '', showShipped: false }),
   );
-  const [selectedId, setSelectedId] = useState<string | null>(() => readStored('agentboard.selected', null));
+  // A #card/<id> link wins over the remembered selection: it is where the user asked to go.
+  const [selectedId, setSelectedId] = useState<string | null>(
+    () => cardFromHash(location.hash) ?? readStored('agentboard.selected', null),
+  );
   const [collapsed, setCollapsed] = useState<Set<string>>(
     () => new Set(readStored<string[]>('agentboard.collapsed', [])),
   );
@@ -133,6 +137,62 @@ export function App() {
       setFocus({ taskId: task.id, kind: 'error', message: errorText(err) });
     }
   }, []);
+
+  /** Unfolds a card's ancestors, so selecting it puts it on screen. */
+  const revealCard = useCallback(
+    (taskId: string) => {
+      if (!board) return;
+      setCollapsed((previous) => {
+        const next = new Set(previous);
+        for (let t = board.tasks.find((x) => x.id === taskId); t?.parentTaskId; ) {
+          next.delete(t.parentTaskId);
+          t = board.tasks.find((x) => x.id === t?.parentTaskId);
+        }
+        return next.size === previous.size ? previous : next;
+      });
+    },
+    [board],
+  );
+
+  /** Goes to a card as a new history entry, optionally showing it in the terminal. */
+  const visitCard = useCallback(
+    (task: TaskRecord, terminal: boolean) => {
+      pushVisit({ taskId: task.id, terminal });
+      revealCard(task.id);
+      setSelectedId(task.id);
+      if (terminal) void showInTerminal(task);
+    },
+    [revealCard, showInTerminal],
+  );
+
+  // Any other selection change (arrow keys, a deleted card's neighbour) moves
+  // the current entry instead of adding one, so back skips over keyboard
+  // scrolling and lands on the card that was actually visited before.
+  useEffect(() => {
+    if (visitFrom(history.state, location.hash).taskId !== selectedId) {
+      replaceVisit({ taskId: selectedId, terminal: false });
+    }
+  }, [selectedId]);
+
+  const boardRef = useRef(board);
+  boardRef.current = board;
+
+  useEffect(() => {
+    const onPop = (event: PopStateEvent) => {
+      const visit = visitFrom(event.state, location.hash);
+      setSelectedId(visit.taskId);
+      if (!visit.taskId) return;
+      revealCard(visit.taskId);
+      const task = boardRef.current?.tasks.find((t) => t.id === visit.taskId);
+      if (!task) {
+        setToast({ kind: 'error', text: 'That card no longer exists' });
+      } else if (visit.terminal) {
+        void showInTerminal(task);
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [revealCard, showInTerminal]);
 
   const closeDialog = useCallback(() => {
     setDialog(null);
@@ -209,6 +269,7 @@ export function App() {
           description: input.description || undefined,
           initialPrompt: input.description || undefined,
         });
+        pushVisit({ taskId: created.id, terminal: input.start });
         setSelectedId(created.id);
         if (input.parentTaskId) {
           setCollapsed((previous) => {
@@ -259,6 +320,12 @@ export function App() {
         case 'help':
           setDialog({ kind: 'help' });
           return;
+        case 'back':
+          history.back();
+          return;
+        case 'forward':
+          history.forward();
+          return;
         case 'new':
           setDialog({ kind: 'new' });
           return;
@@ -286,16 +353,7 @@ export function App() {
             setToast({ kind: 'ok', text: 'No card needs you right now' });
             return;
           }
-          // Unfold its ancestors so the selection is on screen.
-          setCollapsed((previous) => {
-            const next = new Set(previous);
-            for (let t = board.tasks.find((x) => x.id === target.node.task.id); t?.parentTaskId; ) {
-              next.delete(t.parentTaskId);
-              t = board.tasks.find((x) => x.id === t?.parentTaskId);
-            }
-            return next;
-          });
-          setSelectedId(target.node.task.id);
+          visitCard(target.node.task, false);
           return;
         }
       }
@@ -306,7 +364,7 @@ export function App() {
       }
       switch (command) {
         case 'show':
-          void showInTerminal(task);
+          visitCard(task, true);
           return;
         case 'rename':
           setDialog({ kind: 'rename', task });
@@ -331,7 +389,7 @@ export function App() {
         }
       }
     },
-    [board, collapsed, filter, fleet, openTeleport, releases, runQuick, selected, selectedId, showInTerminal, toggleCollapsed, visible],
+    [board, collapsed, filter, fleet, openTeleport, releases, runQuick, selected, selectedId, toggleCollapsed, visible, visitCard],
   );
 
   useEffect(() => {
@@ -358,13 +416,7 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [dialog, runCommand, visible]);
 
-  const selectCard = useCallback(
-    (task: TaskRecord) => {
-      setSelectedId(task.id);
-      void showInTerminal(task);
-    },
-    [showInTerminal],
-  );
+  const selectCard = useCallback((task: TaskRecord) => visitCard(task, true), [visitCard]);
 
 
   if (!signedIn) {
@@ -466,7 +518,7 @@ export function App() {
                 fleet={fleet}
                 releases={releases.get(selected.id)}
                 focus={focus?.taskId === selected.id ? focus : null}
-                onSelect={(task) => setSelectedId(task.id)}
+                onSelect={(task) => visitCard(task, false)}
                 onCommand={runCommand}
               />
             ) : (

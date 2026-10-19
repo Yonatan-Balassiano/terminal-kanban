@@ -41,6 +41,8 @@ export type Command =
   | 'search'
   | 'clear'
   | 'needs-you'
+  | 'back'
+  | 'forward'
   | 'repo-prev'
   | 'repo-next'
   | 'help'
@@ -73,6 +75,8 @@ const KEYMAP: Record<string, Command> = {
   '/': 'search',
   Escape: 'clear',
   '!': 'needs-you',
+  '[': 'back',
+  ']': 'forward',
   ',': 'repo-prev',
   '.': 'repo-next',
   '?': 'help',
@@ -141,6 +145,7 @@ export const SHORTCUTS: Array<{ section: string; items: Shortcut[] }> = [
       { keys: '←  h  →  l', label: 'Collapse / expand, or go to parent / first subtask' },
       { keys: 'Enter', label: 'Show the card’s session in the terminal' },
       { keys: '!', label: 'Jump to a card that needs you' },
+      { keys: '[  ]', label: 'Back / forward through the cards you visited' },
       { keys: '/', label: 'Search' },
       { keys: 'Esc', label: 'Clear search, close a dialog' },
       { keys: ',  .  1–9', label: 'Previous / next repo, pick a repo (again to clear)' },

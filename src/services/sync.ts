@@ -25,6 +25,14 @@ const REMOTE_BRANCH_RETRY_ATTEMPTS = 8;
 const REMOTE_BRANCH_RETRY_DELAY_MS = 400;
 const DELAYED_REMOTE_BRANCH_RETRY_ATTEMPTS = 12;
 const DELAYED_REMOTE_BRANCH_RETRY_INTERVAL_MS = 5000;
+/**
+ * How long pull-request lookups pause after GitHub rate-limits one. Every
+ * branch is looked up on every cycle, so once the limit trips, carrying on
+ * only keeps it tripped — and rewrote every card to "syncing" then "error"
+ * each cycle, which read as fresh activity on the board.
+ */
+const GITHUB_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
+const RATE_LIMIT_PATTERN = /rate limit/i;
 
 type SyncCause = 'startup' | 'periodic' | 'manual' | 'push' | 'ensure_pr' | 'merge';
 
@@ -121,6 +129,8 @@ export class SyncService {
   private readonly delayedRetryBudgetByTaskId = new Map<string, number>();
   private activeJobCount = 0;
   private remoteGit: GitService | null = null;
+  /** Pull-request lookups are skipped until this time; see GITHUB_RATE_LIMIT_BACKOFF_MS. */
+  private githubPausedUntil = 0;
   readonly syncEvent = new EventEmitter();
 
   /**
@@ -784,7 +794,11 @@ export class SyncService {
       return result;
     }
 
-    if (branch.githubSyncStatus !== 'syncing') {
+    // A finished pull request cannot change, and while GitHub is rate-limiting
+    // us nothing is asked of it either: neither is marked syncing, or the mark
+    // would never be cleared.
+    const skipGitHub = isBranchSettled(branch) || Date.now() < this.githubPausedUntil;
+    if (!skipGitHub && branch.githubSyncStatus !== 'syncing') {
       this.board.updateTaskBranchSync(branch.id, { githubSyncStatus: 'syncing' });
     }
 
@@ -827,9 +841,18 @@ export class SyncService {
     // A finished pull request cannot change, so the three GraphQL calls below
     // would return exactly what is already stored. The git state is still read:
     // it is local and the worktree can still move underneath a merged branch.
-    if (isBranchSettled(branch)) {
-      if (gitPatch) {
-        this.board.updateTaskBranchSync(branch.id, gitPatch);
+    //
+    // The same holds while GitHub is rate-limiting us: the card keeps what it
+    // last knew, and only the local git state moves.
+    if (skipGitHub) {
+      // Settled branches used to be marked syncing before this check and
+      // were never cleared; release any still carrying that mark.
+      const patch: TaskBranchSyncPatch = {
+        ...(gitPatch ?? {}),
+        ...(isBranchSettled(branch) && branch.githubSyncStatus === 'syncing' ? { githubSyncStatus: 'ok' as const } : {}),
+      };
+      if (Object.keys(patch).length > 0) {
+        this.board.updateTaskBranchSync(branch.id, patch);
         result.tasksUpdated += 1;
       }
       return result;
@@ -905,6 +928,9 @@ export class SyncService {
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
+      if (RATE_LIMIT_PATTERN.test(message)) {
+        this.githubPausedUntil = Date.now() + GITHUB_RATE_LIMIT_BACKOFF_MS;
+      }
       this.board.updateTaskBranchSync(branch.id, {
         ...(gitPatch ?? {}),
         githubSyncStatus: 'error',
