@@ -53,6 +53,7 @@ export const WEB_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
   // cards
   'createTask',
   'renameTask',
+  'setTaskPinned',
   'updateTaskDescription',
   'deleteTask',
   // pull requests

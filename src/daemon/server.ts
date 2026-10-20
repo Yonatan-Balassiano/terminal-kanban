@@ -34,6 +34,7 @@ import type {
   AcknowledgeSessionAttentionParams,
   AcknowledgeChildPrAlertParams,
   SetTaskOrchestratorParams,
+  SetTaskPinnedParams,
   OpenSessionParams,
   ReconnectSessionParams,
   TeleportTaskParams,
@@ -631,6 +632,18 @@ export async function dispatch(
       case 'setTaskOrchestrator': {
         const params = p as unknown as SetTaskOrchestratorParams;
         if (!services.board.setTaskOrchestrator(params.taskId, params.orchestrator === true)) {
+          throw new Error(`Unknown task "${params.taskId}"`);
+        }
+        serverEvents.emit('event', {
+          type: 'board_patch',
+          payload: services.view.getBoardSnapshot(),
+        });
+        return { id: req.id, result: null };
+      }
+
+      case 'setTaskPinned': {
+        const params = p as unknown as SetTaskPinnedParams;
+        if (!services.board.setTaskPinned(params.taskId, params.pinned === true)) {
           throw new Error(`Unknown task "${params.taskId}"`);
         }
         serverEvents.emit('event', {

@@ -133,8 +133,13 @@ export interface BoardFilter {
  * stays put while it works, idles or gets polled — it moves only when a newer
  * card is created above it.
  */
+/** Pinned cards first (latest pin on top), then newest first. */
+function comparePinned(a: CardNode, b: CardNode): number {
+  return (b.task.pinnedAt ?? 0) - (a.task.pinnedAt ?? 0);
+}
+
 function compareNodes(a: CardNode, b: CardNode): number {
-  return b.task.createdAt - a.task.createdAt || a.task.id.localeCompare(b.task.id);
+  return comparePinned(a, b) || b.task.createdAt - a.task.createdAt || a.task.id.localeCompare(b.task.id);
 }
 
 function nodeMatches(node: CardNode, filter: BoardFilter, repoLabel: (id?: string) => string): boolean {
@@ -200,8 +205,8 @@ export function buildCardTree(
     list.forEach((node) => sortDeep(node.children));
   };
   sortDeep(roots);
-  // Shipped families go last, so "Show shipped" adds history below the live work.
-  roots.sort((a, b) => Number(!familyActive(a)) - Number(!familyActive(b)));
+  // Shipped families go last, so "Show shipped" adds history below the live work — unless pinned.
+  roots.sort((a, b) => comparePinned(a, b) || Number(!familyActive(a)) - Number(!familyActive(b)));
 
   const anyMatches = (node: CardNode): boolean =>
     nodeMatches(node, filter, repoLabel) || node.children.some(anyMatches);
