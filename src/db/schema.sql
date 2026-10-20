@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- Purely presentational: the TUI pins it to the top of its column and gives
   -- it a distinct background. Set via `agentboard task orchestrator`.
   is_orchestrator INTEGER NOT NULL DEFAULT 0,
+  -- When the card was pinned to the top of its list on the web board (among
+  -- its siblings, for a subtask). NULL when not pinned. Set via `setTaskPinned`.
+  pinned_at INTEGER,
   -- The agent CLI's own --name, so this card's session is addressable by a
   -- readable name (SendMessage/ListAgents) rather than only its task id.
   -- Assigned once at creation, same as branch_name; carries the parent's own

@@ -250,6 +250,7 @@ function applyAdditiveMigrations(db: Db): void {
   ensureColumn(db, 'tasks', 'child_pr_alert_task_id', 'TEXT');
   ensureColumn(db, 'tasks', 'session_name', 'TEXT');
   ensureColumn(db, 'tasks', 'is_orchestrator', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'tasks', 'pinned_at', 'INTEGER');
   // Tri-state: NULL = no delivery attempt yet, 1 = verified and submitted,
   // 0 = pasted but never verified (see pane-idle.ts's pasteAndVerify).
   ensureColumn(db, 'sessions', 'initial_prompt_delivered', 'INTEGER');

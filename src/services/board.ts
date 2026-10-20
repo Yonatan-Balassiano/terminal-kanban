@@ -113,6 +113,7 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     parentTaskId: (row['parent_task_id'] as string | null) ?? undefined,
     childPrAlertTaskId: (row['child_pr_alert_task_id'] as string | null) ?? undefined,
     isOrchestrator: row['is_orchestrator'] === 1 || row['is_orchestrator'] === true,
+    pinnedAt: (row['pinned_at'] as number | null) ?? undefined,
     sessionName: (row['session_name'] as string | null) ?? undefined,
     repoId: (row['repo_id'] as string | null) ?? undefined,
     agentCli: (row['agent_cli'] as 'claude' | 'codex' | null) ?? 'claude',
@@ -876,6 +877,15 @@ export class BoardService {
         'UPDATE tasks SET is_orchestrator = ?, updated_at = ? WHERE id = ?',
       )
       .run(orchestrator ? 1 : 0, Date.now(), taskId);
+    return result.changes > 0;
+  }
+
+  /** Pins or unpins `taskId`'s card on the web board. False if no such card. */
+  setTaskPinned(taskId: string, pinned: boolean): boolean {
+    const now = Date.now();
+    const result = this.db
+      .prepare<[number | null, number, string]>('UPDATE tasks SET pinned_at = ?, updated_at = ? WHERE id = ?')
+      .run(pinned ? now : null, now, taskId);
     return result.changes > 0;
   }
 

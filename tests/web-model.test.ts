@@ -170,6 +170,38 @@ describe('buildCardTree', () => {
     expect(tree[1]?.children.map((n) => n.task.id)).toEqual(['c2', 'c3', 'c1']);
   });
 
+  it('puts pinned cards first within their own list, latest pin on top', () => {
+    const tree = buildCardTree(
+      board([
+        task('a', { createdAt: 1, pinnedAt: 10 }),
+        task('b', { createdAt: 2 }),
+        task('c', { createdAt: 3, pinnedAt: 20 }),
+        task('c1', { createdAt: 4, parentTaskId: 'b' }),
+        task('c2', { createdAt: 5, parentTaskId: 'b' }),
+        task('c3', { createdAt: 1, parentTaskId: 'b', pinnedAt: 30 }),
+      ]),
+      [],
+      new Map(),
+      noFilter,
+    );
+    expect(tree.map((n) => n.task.id)).toEqual(['c', 'a', 'b']);
+    expect(tree[2]?.children.map((n) => n.task.id)).toEqual(['c3', 'c2', 'c1']);
+  });
+
+  it('keeps a pinned shipped family above active ones', () => {
+    const shipped = task('s', {
+      createdAt: 1,
+      pinnedAt: 5,
+      sessionId: 's',
+      branches: [branch({ taskId: 's', prState: 'closed', prNumber: 1 })],
+    });
+    const tree = buildCardTree(board([shipped, task('live', { createdAt: 2 })]), [fleetRow('live')], new Map(), {
+      ...noFilter,
+      showShipped: true,
+    });
+    expect(tree.map((n) => n.task.id)).toEqual(['s', 'live']);
+  });
+
   it('hides a shipped family only when every member is shipped', () => {
     const shipped = (id: string, patch: Partial<TaskRecord> = {}) =>
       task(id, { sessionId: 's', branches: [branch({ taskId: id, prState: 'merged', prNumber: 1 })], ...patch });

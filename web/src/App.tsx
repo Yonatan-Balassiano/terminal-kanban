@@ -292,6 +292,14 @@ export function App() {
     [board, runDialog],
   );
 
+  const togglePin = useCallback(async (task: TaskRecord) => {
+    try {
+      await rpc('setTaskPinned', { taskId: task.id, pinned: !task.pinnedAt });
+    } catch (err) {
+      setToast({ kind: 'error', text: errorText(err) });
+    }
+  }, []);
+
   const runCommand = useCallback(
     (command: Command) => {
       const task = selected;
@@ -378,6 +386,9 @@ export function App() {
         case 'teleport':
           openTeleport(task);
           return;
+        case 'pin':
+          void togglePin(task);
+          return;
         case 'open-checks': {
           const url = primaryPR(task)?.prUrl;
           if (!url) {
@@ -389,7 +400,7 @@ export function App() {
         }
       }
     },
-    [board, collapsed, filter, fleet, openTeleport, releases, runQuick, selected, selectedId, toggleCollapsed, visible, visitCard],
+    [board, collapsed, filter, fleet, openTeleport, releases, runQuick, selected, selectedId, toggleCollapsed, togglePin, visible, visitCard],
   );
 
   useEffect(() => {
@@ -504,6 +515,7 @@ export function App() {
                 onSelect={selectCard}
                 onToggle={toggleCollapsed}
                 onTeleport={openTeleport}
+                onPin={togglePin}
               />
             ))}
           </ul>
@@ -664,10 +676,11 @@ interface CardBranchProps {
   onSelect: (task: TaskRecord) => void;
   onToggle: (id: string) => void;
   onTeleport: (task: TaskRecord) => void;
+  onPin: (task: TaskRecord) => void;
 }
 
 function CardBranch(props: CardBranchProps) {
-  const { node, depth, board, releases, selectedId, collapsed, focus, onSelect, onToggle, onTeleport } = props;
+  const { node, depth, board, releases, selectedId, collapsed, focus, onSelect, onToggle, onTeleport, onPin } = props;
   const { task } = node;
   const isCollapsed = collapsed.has(task.id);
   const hasChildren = node.children.length > 0;
@@ -684,6 +697,7 @@ function CardBranch(props: CardBranchProps) {
           `state-${node.state}`,
           selectedId === task.id ? 'selected' : '',
           task.isOrchestrator ? 'orchestrator' : '',
+          task.pinnedAt ? 'pinned' : '',
           task.location === 'remote' ? 'remote' : '',
           node.shipped ? 'shipped' : '',
           depth === 0 ? 'root' : 'child',
@@ -723,9 +737,18 @@ function CardBranch(props: CardBranchProps) {
             <span className="muted push">{relativeTime(task.updatedAt)}</span>
           </span>
         </button>
+        <button
+          className="card-action card-pin"
+          onClick={() => onPin(task)}
+          title={task.pinnedAt ? 'Unpin (p)' : 'Pin to the top (p)'}
+          aria-label={task.pinnedAt ? 'Unpin' : 'Pin to the top'}
+          aria-pressed={Boolean(task.pinnedAt)}
+        >
+          📌
+        </button>
         {task.kind !== 'general' && (
           <button
-            className="card-teleport"
+            className="card-action card-teleport"
             onClick={() => onTeleport(task)}
             title={task.location === 'remote' ? 'Teleport to local (T)' : 'Teleport to remote (T)'}
             aria-label={task.location === 'remote' ? 'Teleport to local' : 'Teleport to remote'}
@@ -822,6 +845,7 @@ function CardDetail({ task, board, fleet, releases, focus, onSelect, onCommand }
         </div>
       )}
       <div className="toolbar">
+        <ToolButton label={task.pinnedAt ? 'Unpin' : 'Pin'} shortcut="p" onClick={() => onCommand('pin')} />
         <ToolButton label="Rename" shortcut="r" onClick={() => onCommand('rename')} />
         <ToolButton label="Restart" shortcut="R" onClick={() => onCommand('restart')} />
         <ToolButton

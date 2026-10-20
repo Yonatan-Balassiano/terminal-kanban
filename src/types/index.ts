@@ -162,6 +162,8 @@ export interface TaskRecord {
    * its column and paints it with a distinct background.
    */
   isOrchestrator?: boolean;
+  /** When the card was pinned to the top of its list on the web board; unset when not pinned. */
+  pinnedAt?: number;
   /**
    * This card's session's `--name` — how other Claude Code sessions address
    * it via SendMessage/ListAgents. Assigned once at creation; for a subtask,
@@ -608,6 +610,7 @@ export type RPCMethod =
   | 'acknowledgeSessionAttention'
   | 'acknowledgeChildPrAlert'
   | 'setTaskOrchestrator'
+  | 'setTaskPinned'
   | 'sendInput'
   | 'notifyTaskSession'
   | 'redeliverInitialPrompt'
@@ -830,6 +833,11 @@ export interface AcknowledgeChildPrAlertParams {
 export interface SetTaskOrchestratorParams {
   taskId: string;
   orchestrator: boolean;
+}
+
+export interface SetTaskPinnedParams {
+  taskId: string;
+  pinned: boolean;
 }
 
 export interface SendInputParams {

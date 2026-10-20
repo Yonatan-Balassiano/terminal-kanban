@@ -155,14 +155,18 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .card.remote.selected { box-shadow: inset 3px 0 0 var(--remote), 0 0 0 1px var(--accent); }
 
 /* Teleport: on the card row, shown on hover or when the card is selected. */
-.card-teleport {
+.card-action {
   flex: none; align-self: center; margin-right: 6px; width: 26px; height: 26px; border-radius: 6px;
   border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer;
   opacity: 0; transition: opacity .1s;
 }
-.card:hover .card-teleport, .card.selected .card-teleport, .card-teleport:focus-visible { opacity: 1; }
+.card:hover .card-action, .card.selected .card-action, .card-action:focus-visible { opacity: 1; }
 .card-teleport:hover { color: var(--remote); border-color: var(--remote); }
-@media (hover: none) { .card-teleport { opacity: 1; } }
+.card-pin { font-size: 12px; filter: grayscale(1); }
+.card-pin:hover { border-color: var(--accent); }
+/* A pinned card always shows its pin, in colour. */
+.card.pinned .card-pin { opacity: 1; filter: none; }
+@media (hover: none) { .card-action { opacity: 1; } }
 
 .checks { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; font-size: 13px; }
 .checks li { display: flex; gap: 8px; }

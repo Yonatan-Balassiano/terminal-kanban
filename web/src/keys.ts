@@ -35,6 +35,7 @@ export type Command =
   | 'delete'
   | 'restart'
   | 'teleport'
+  | 'pin'
   | 'open-checks'
   | 'sync'
   | 'toggle-detail'
@@ -69,6 +70,7 @@ const KEYMAP: Record<string, Command> = {
   d: 'delete',
   R: 'restart',
   T: 'teleport',
+  p: 'pin',
   v: 'open-checks',
   s: 'sync',
   e: 'toggle-detail',
@@ -156,6 +158,7 @@ export const SHORTCUTS: Array<{ section: string; items: Shortcut[] }> = [
     section: 'Card',
     items: [
       { keys: 'n', label: 'New card (optionally a subtask of the selected one)' },
+      { keys: 'p', label: 'Pin / unpin to the top of its list' },
       { keys: 'r', label: 'Rename' },
       { keys: 'd', label: 'Delete (uncommitted work is archived)' },
       { keys: 'R', label: 'Restart the session (keeps the conversation)' },
