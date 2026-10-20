@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { focusSessionInWebLayout, keepWebLayoutAlive, type TmuxRunner } from '../src/daemon/web-layout.js';
+import {
+  findWebLayoutTerminalApp,
+  focusSessionInWebLayout,
+  keepWebLayoutAlive,
+  type ProcessParentLookup,
+  type TmuxRunner,
+} from '../src/daemon/web-layout.js';
 
 /**
  * A scripted tmux: answers the queries this module makes and records every
@@ -177,5 +183,36 @@ describe('keepWebLayoutAlive', () => {
     const { runner, calls } = fakeTmux({ webWindow: false, visible: [['%9', 'ab_task']], all: [] });
     await keepWebLayoutAlive(runner, ['%9'], 'placeholder');
     expect(commands(calls).some((line) => line.startsWith('wait-for'))).toBe(false);
+  });
+});
+
+describe('findWebLayoutTerminalApp', () => {
+  const tmux = (clients: string): TmuxRunner => ({
+    async run([cmd]) {
+      if (cmd === 'list-windows') return '@1\t\n@2\t1\n';
+      if (cmd === 'display-message') return '$3\n';
+      if (cmd === 'list-clients') return clients;
+      return '';
+    },
+  });
+  const processes: Record<number, { ppid: number; command: string }> = {
+    500: { ppid: 400, command: 'tmux' },
+    400: { ppid: 300, command: '-/bin/zsh' },
+    300: { ppid: 200, command: '/usr/bin/login' },
+    200: { ppid: 1, command: '/Applications/Ghostty.app/Contents/MacOS/ghostty' },
+    600: { ppid: 1, command: 'tmux' },
+  };
+  const parentOf: ProcessParentLookup = async (pid) => processes[pid] ?? null;
+
+  it("walks up from the layout session's tmux client to the terminal's app bundle", async () => {
+    expect(await findWebLayoutTerminalApp(tmux('500\n'), parentOf)).toBe('/Applications/Ghostty.app');
+  });
+
+  it('skips a client with no app above it (e.g. over ssh) and tries the next', async () => {
+    expect(await findWebLayoutTerminalApp(tmux('600\n500\n'), parentOf)).toBe('/Applications/Ghostty.app');
+  });
+
+  it('returns null when no client is attached', async () => {
+    expect(await findWebLayoutTerminalApp(tmux(''), parentOf)).toBeNull();
   });
 });
