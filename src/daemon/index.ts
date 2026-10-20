@@ -45,7 +45,7 @@ export interface ServiceContainer {
   webLayout?: {
     /** Whether `agentboard --ui web` has a layout window up to show sessions in. */
     isRunning: () => Promise<boolean>;
-    /** Puts a session's tmux pane into the layout window; returns its pane id. */
+    /** Puts a session's tmux pane into the layout window and brings its terminal app forward; returns its pane id. */
     focus: (backendSessionId: string) => Promise<string>;
   };
   logError?: (message: string, error?: unknown) => void;
@@ -524,7 +524,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const { startWebServer, loadOrCreateWebToken, resolveWebStaticDir } = await import(
     './web-server.js'
   );
-  const { focusSessionInWebLayout, findWebLayoutWindow, execTmuxRunner } = await import(
+  const { focusSessionInWebLayout, findWebLayoutWindow, activateWebLayoutTerminal, execTmuxRunner } = await import(
     './web-layout.js'
   );
   const { loadConfig, defaultConfig } = await import('../config/index.js');
@@ -697,8 +697,11 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
     webLayout: {
       isRunning: async () =>
         (await findWebLayoutWindow(execTmuxRunner)) !== null,
-      focus: (backendSessionId) =>
-        focusSessionInWebLayout(execTmuxRunner, backendSessionId),
+      focus: async (backendSessionId) => {
+        const paneId = await focusSessionInWebLayout(execTmuxRunner, backendSessionId);
+        await activateWebLayoutTerminal(execTmuxRunner);
+        return paneId;
+      },
     },
     board,
     workspace,

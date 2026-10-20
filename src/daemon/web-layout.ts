@@ -262,3 +262,70 @@ export async function keepWebLayoutAlive(
     await runner.run(['wait-for', '-U', LAYOUT_LOCK_NAME]).catch(() => undefined);
   }
 }
+
+/** Reads a process's parent pid and executable path; injectable for tests. */
+export type ProcessParentLookup = (pid: number) => Promise<{ ppid: number; command: string } | null>;
+
+const execProcessParent: ProcessParentLookup = async (pid) => {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], { encoding: 'utf8' });
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(stdout);
+    return match ? { ppid: Number(match[1]), command: match[2] as string } : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The macOS app bundle of the terminal showing the web layout window: the tmux
+ * client attached to the window's session is a descendant of the terminal
+ * app's process (Ghostty → login → shell → tmux), so walk up from it to the
+ * first executable inside a `.app` bundle.
+ */
+export async function findWebLayoutTerminalApp(
+  runner: TmuxRunner,
+  parentOf: ProcessParentLookup = execProcessParent,
+): Promise<string | null> {
+  const windowId = await findWebLayoutWindow(runner);
+  if (!windowId) {
+    return null;
+  }
+  let clientPids: number[];
+  try {
+    const sessionId = (await runner.run(['display-message', '-p', '-t', windowId, '#{session_id}'])).trim();
+    clientPids = (await runner.run(['list-clients', '-t', sessionId, '-F', '#{client_pid}']))
+      .split('\n')
+      .map((line) => Number(line.trim()))
+      .filter((pid) => pid > 1);
+  } catch {
+    return null;
+  }
+  for (const clientPid of clientPids) {
+    let pid = clientPid;
+    for (let depth = 0; depth < 16 && pid > 1; depth += 1) {
+      const proc = await parentOf(pid);
+      if (!proc) break;
+      const bundle = /^(.*?\.app)\/Contents\/MacOS\//.exec(proc.command);
+      if (bundle) {
+        return bundle[1] as string;
+      }
+      pid = proc.ppid;
+    }
+  }
+  return null;
+}
+
+/**
+ * Brings the terminal showing the web layout to the front, so a card clicked
+ * in the browser is in front of the user without a trip to the dock.
+ * macOS only, and best-effort: a terminal it cannot find is left where it is.
+ */
+export async function activateWebLayoutTerminal(runner: TmuxRunner): Promise<void> {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+  const app = await findWebLayoutTerminalApp(runner);
+  if (app) {
+    await execFileAsync('open', [app]).catch(() => undefined);
+  }
+}
