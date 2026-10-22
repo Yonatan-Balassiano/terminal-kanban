@@ -71,6 +71,82 @@ describe('GitService.createWorktreeAsync', () => {
   });
 });
 
+describe('GitService new branches start from the latest origin base', () => {
+  let root: string;
+  let bare: string;
+  let upstream: string;
+  let local: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'agentboard-git-base-'));
+    bare = join(root, 'origin.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', bare]);
+
+    upstream = join(root, 'upstream');
+    execFileSync('git', ['clone', bare, upstream]);
+    writeFileSync(join(upstream, 'README.md'), 'hello\n');
+    git(upstream, 'add', '-A');
+    commit(upstream, 'init');
+    git(upstream, 'push', 'origin', 'main');
+
+    local = join(root, 'local');
+    execFileSync('git', ['clone', bare, local]);
+
+    // Someone else lands work on main after this clone last pulled.
+    writeFileSync(join(upstream, 'later.txt'), 'later\n');
+    git(upstream, 'add', '-A');
+    commit(upstream, 'landed later');
+    git(upstream, 'push', 'origin', 'main');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('fetches the base and branches a new worktree from origin, not the stale local base', async () => {
+    const worktreePath = join(root, 'wt');
+
+    await new GitService().createWorktreeAsync(local, worktreePath, 'feature/new', 'main');
+
+    expect(git(worktreePath, 'log', '--oneline', '-1')).toContain('landed later');
+    // The user's own local main is not moved.
+    expect(git(local, 'log', '--oneline', '-1', 'main')).toContain('init');
+  });
+
+  it('does not make the new branch track the base', async () => {
+    const worktreePath = join(root, 'wt');
+
+    await new GitService().createWorktreeAsync(local, worktreePath, 'feature/new', 'main');
+
+    expect(() => git(worktreePath, 'rev-parse', '--abbrev-ref', '@{upstream}')).toThrow();
+  });
+
+  it('falls back to the last fetched origin base when the remote is unreachable', async () => {
+    git(local, 'remote', 'set-url', 'origin', join(root, 'missing.git'));
+    const worktreePath = join(root, 'wt');
+
+    await new GitService().createWorktreeAsync(local, worktreePath, 'feature/new', 'main');
+
+    expect(git(worktreePath, 'log', '--oneline', '-1')).toContain('init');
+  });
+
+  it('leaves an existing branch where it is', async () => {
+    git(local, 'branch', 'feature/old', 'main');
+    const worktreePath = join(root, 'wt');
+
+    await new GitService().createWorktreeAsync(local, worktreePath, 'feature/old', 'main');
+
+    expect(git(worktreePath, 'log', '--oneline', '-1')).toContain('init');
+  });
+
+  it('ensureBranch also starts a new branch from the fetched origin base', () => {
+    new GitService().ensureBranch(local, 'feature/chat', 'main');
+
+    expect(git(local, 'log', '--oneline', '-1')).toContain('landed later');
+    expect(git(local, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feature/chat');
+  });
+});
+
 describe('GitService.updateRef', () => {
   let repo: string;
 

@@ -17,6 +17,9 @@ const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
  * misdiagnosed as a dead host.
  */
 const LONG_RUNNING_TIMEOUT_MS = 300_000;
+// Fetching the base before a new branch is best-effort: an unreachable remote
+// (VPN off, offline) must not hold a card's start for minutes.
+const BASE_FETCH_TIMEOUT_MS = 60_000;
 
 export interface SyncWorktreeIntoMainResult {
   /** Branch the main checkout is on (e.g. "master") that now points at the task branch tip. */
@@ -145,7 +148,7 @@ function worktreeAddArgv(
 ): string[] {
   return reuseBranch
     ? gitArgv(repoPath, 'worktree', 'add', worktreePath, branch)
-    : gitArgv(repoPath, 'worktree', 'add', '-b', branch, worktreePath, baseBranch);
+    : gitArgv(repoPath, 'worktree', 'add', '--no-track', '-b', branch, worktreePath, baseBranch);
 }
 
 function describeError(error: unknown): string {
@@ -317,7 +320,9 @@ export class GitService {
 
   createBranch(repoPath: string, branch: string, base: string): void {
     this.requireLocal('createBranch');
-    this.runSync(gitArgv(repoPath, 'checkout', '-b', branch, base), repoPath);
+    // --no-track: a branch started from origin/<base> would otherwise track it,
+    // so a bare `git push` fails and `git pull` pulls the base into it.
+    this.runSync(gitArgv(repoPath, 'checkout', '--no-track', '-b', branch, base), repoPath);
   }
 
   async createBranchAsync(repoPath: string, branch: string, base: string): Promise<void> {
@@ -337,7 +342,7 @@ export class GitService {
     if (this.branchExists(repoPath, branch)) {
       this.checkoutBranch(repoPath, branch);
     } else {
-      this.createBranch(repoPath, branch, baseBranch);
+      this.createBranch(repoPath, branch, this.freshBaseRef(repoPath, baseBranch));
     }
   }
 
@@ -349,11 +354,71 @@ export class GitService {
     await this.createBranchAsync(repoPath, branch, baseBranch);
   }
 
+  /**
+   * The ref a new branch should start from: `origin/<base>`, fetched first.
+   *
+   * The local base branch only moves when the user pulls it in their main
+   * checkout, so branching from it started cards hundreds of commits behind
+   * and the gap only showed up when the PR was opened. The remote-tracking ref
+   * is used rather than fast-forwarding the local branch, which may be checked
+   * out with someone's work in it. A failed fetch falls back to the last
+   * fetched `origin/<base>`, then to the local base — a card must still start
+   * when the remote is unreachable.
+   */
+  private freshBaseRef(repoPath: string, baseBranch: string): string {
+    this.requireLocal('freshBaseRef');
+    try {
+      execFileSync('git', ['-C', repoPath, 'fetch', '--quiet', 'origin', baseBranch], {
+        cwd: repoPath,
+        stdio: 'ignore',
+        timeout: BASE_FETCH_TIMEOUT_MS,
+      });
+    } catch {
+      // Best-effort; fall through to whatever origin/<base> already is.
+    }
+    try {
+      this.runSync(
+        gitArgv(repoPath, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${baseBranch}`),
+        repoPath,
+      );
+      return `origin/${baseBranch}`;
+    } catch {
+      return baseBranch;
+    }
+  }
+
+  private async freshBaseRefAsync(repoPath: string, baseBranch: string): Promise<string> {
+    try {
+      await this.run(
+        gitArgv(repoPath, 'fetch', '--quiet', 'origin', baseBranch),
+        repoPath,
+        BASE_FETCH_TIMEOUT_MS,
+      );
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+    }
+    try {
+      await this.run(
+        gitArgv(repoPath, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${baseBranch}`),
+        repoPath,
+      );
+      return `origin/${baseBranch}`;
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      return baseBranch;
+    }
+  }
+
   createWorktree(repoPath: string, worktreePath: string, branch: string, baseBranch: string): void {
     this.requireLocal('createWorktree');
     const reuseBranch = this.branchExists(repoPath, branch);
+    const base = reuseBranch ? baseBranch : this.freshBaseRef(repoPath, baseBranch);
     this.runSync(
-      worktreeAddArgv(repoPath, worktreePath, branch, baseBranch, reuseBranch),
+      worktreeAddArgv(repoPath, worktreePath, branch, base, reuseBranch),
       repoPath,
     );
   }
@@ -380,8 +445,9 @@ export class GitService {
       return;
     }
 
+    const base = reuseBranch ? baseBranch : await this.freshBaseRefAsync(repoPath, baseBranch);
     await this.run(
-      worktreeAddArgv(repoPath, worktreePath, branch, baseBranch, reuseBranch),
+      worktreeAddArgv(repoPath, worktreePath, branch, base, reuseBranch),
       repoPath,
       LONG_RUNNING_TIMEOUT_MS,
     );
