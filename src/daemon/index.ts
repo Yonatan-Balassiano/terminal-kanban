@@ -511,6 +511,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   const { GitService } = await import('../services/git.js');
   const { GitHubService } = await import('../services/github.js');
   const { SyncService } = await import('../services/sync.js');
+  const { BaseBranchSyncService } = await import('../services/base-branch-sync.js');
   const { EventLogService } = await import('../services/events.js');
   const { DoctorService } = await import('../services/doctor.js');
   const { TerminalBufferService } = await import('../services/terminal-buffer.js');
@@ -662,6 +663,10 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   });
 
   sync.start(pollIntervalMs);
+  const baseBranchSync = new BaseBranchSyncService(db, git, (message) =>
+    appendLog(opts.logFile, message),
+  );
+  baseBranchSync.start();
   artifacts?.start();
   release?.start();
 
@@ -794,6 +799,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
       void (async () => {
         try {
           sync.stop();
+          baseBranchSync.stop();
         } catch {
           // Ignore stop errors.
         }

@@ -17,9 +17,14 @@ const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
  * misdiagnosed as a dead host.
  */
 const LONG_RUNNING_TIMEOUT_MS = 300_000;
-// Fetching the base before a new branch is best-effort: an unreachable remote
-// (VPN off, offline) must not hold a card's start for minutes.
+// Fetching a base branch is best-effort: an unreachable remote
+// (VPN off, offline) must not hold a card's start, or a sync pass, for minutes.
 const BASE_FETCH_TIMEOUT_MS = 60_000;
+
+export type FastForwardOutcome =
+  | { status: 'updated'; from: string; to: string }
+  | { status: 'up-to-date' }
+  | { status: 'skipped'; reason: string };
 
 export interface SyncWorktreeIntoMainResult {
   /** Branch the main checkout is on (e.g. "master") that now points at the task branch tip. */
@@ -161,6 +166,13 @@ function describeError(error: unknown): string {
     return detail.trim();
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The part of a git failure worth a log line: the command echo is dropped. */
+function firstLine(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const lines = message.split('\n').map((line) => line.trim()).filter(Boolean);
+  return lines[1] ?? lines[0] ?? 'unknown error';
 }
 
 function isExecTransport(value: unknown): value is ExecTransport {
@@ -553,6 +565,100 @@ export class GitService {
    * commit safe from garbage collection, does not show up in `git branch`, and
    * is recoverable with ordinary git — no bespoke restore path to maintain.
    */
+  /**
+   * Moves the local `branch` up to `origin/<branch>`, but only when that is a
+   * pure fast-forward and nothing can be lost.
+   *
+   * Never rebases, merges or stashes: this runs unattended, and a checkout it
+   * touches may have a session working in it. Anything that is not trivially
+   * safe — local commits not on origin, uncommitted changes where the branch
+   * is checked out — is skipped with the reason, and the branch stays put.
+   */
+  async fastForwardLocalBranchAsync(repoPath: string, branch: string): Promise<FastForwardOutcome> {
+    try {
+      await this.run(
+        gitArgv(repoPath, 'fetch', '--quiet', 'origin', branch),
+        repoPath,
+        BASE_FETCH_TIMEOUT_MS,
+      );
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      return { status: 'skipped', reason: `fetch failed: ${firstLine(error)}` };
+    }
+
+    const local = await this.tryRevParse(repoPath, `refs/heads/${branch}`);
+    if (!local) {
+      return { status: 'skipped', reason: `no local ${branch}` };
+    }
+    const remote = await this.tryRevParse(repoPath, `refs/remotes/origin/${branch}`);
+    if (!remote) {
+      return { status: 'skipped', reason: `no origin/${branch}` };
+    }
+    if (local === remote) {
+      return { status: 'up-to-date' };
+    }
+    if (!(await this.isAncestorAsync(repoPath, local, remote))) {
+      return { status: 'skipped', reason: `local ${branch} has commits that are not on origin` };
+    }
+
+    const checkout = await this.findBranchCheckoutAsync(repoPath, branch);
+    if (!checkout) {
+      // Not checked out anywhere: move the ref alone. Passing the old value
+      // makes it a compare-and-swap, so a concurrent change wins over us.
+      await this.run(
+        gitArgv(repoPath, 'update-ref', `refs/heads/${branch}`, remote, local),
+        repoPath,
+      );
+      return { status: 'updated', from: local, to: remote };
+    }
+
+    const dirty = await this.run(
+      gitArgv(checkout, 'status', '--porcelain', '--untracked-files=no'),
+      checkout,
+    );
+    if (dirty.length > 0) {
+      return { status: 'skipped', reason: `uncommitted changes in ${checkout}` };
+    }
+    try {
+      await this.run(
+        gitArgv(checkout, 'merge', '--ff-only', '--quiet', `refs/remotes/origin/${branch}`),
+        checkout,
+        LONG_RUNNING_TIMEOUT_MS,
+      );
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      return { status: 'skipped', reason: `fast-forward failed: ${firstLine(error)}` };
+    }
+    return { status: 'updated', from: local, to: remote };
+  }
+
+  private async tryRevParse(repoPath: string, ref: string): Promise<string | null> {
+    try {
+      return await this.run(gitArgv(repoPath, 'rev-parse', '--verify', '--quiet', ref), repoPath);
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      return null;
+    }
+  }
+
+  private async isAncestorAsync(repoPath: string, ancestor: string, descendant: string): Promise<boolean> {
+    try {
+      await this.run(gitArgv(repoPath, 'merge-base', '--is-ancestor', ancestor, descendant), repoPath);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof TransportUnreachableError) {
+        throw error;
+      }
+      return false;
+    }
+  }
+
   async updateRef(repoPath: string, ref: string, sha: string): Promise<void> {
     await this.run(gitArgv(repoPath, 'update-ref', ref, sha), repoPath);
   }
