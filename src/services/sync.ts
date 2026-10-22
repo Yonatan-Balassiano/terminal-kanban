@@ -33,6 +33,16 @@ const DELAYED_REMOTE_BRANCH_RETRY_INTERVAL_MS = 5000;
  */
 const GITHUB_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 const RATE_LIMIT_PATTERN = /rate limit/i;
+/**
+ * How often one card's sibling-PR search runs on its own. GitHub's search API
+ * allows 30 requests a minute *per user*, shared with every `gh search` the
+ * user's own agent sessions make; searching on every 15s active poll ran it
+ * dry within seconds of each reset (27 cards ≈ 135 searches a minute). A
+ * session now reports the PRs it opens (`agentboard task report-pr`, called by
+ * the hook `session-bootstrap` installs), so this is only the safety net for a
+ * PR opened outside any session. A manual sync still searches immediately.
+ */
+const DISCOVERY_INTERVAL_MS = 10 * 60_000;
 
 type SyncCause = 'startup' | 'periodic' | 'manual' | 'push' | 'ensure_pr' | 'merge';
 
@@ -131,6 +141,10 @@ export class SyncService {
   private remoteGit: GitService | null = null;
   /** Pull-request lookups are skipped until this time; see GITHUB_RATE_LIMIT_BACKOFF_MS. */
   private githubPausedUntil = 0;
+  /** Sibling-PR searches are skipped until this time, after the search API rate-limits one. */
+  private searchPausedUntil = 0;
+  /** When each card last ran its sibling-PR search; see DISCOVERY_INTERVAL_MS. */
+  private readonly lastDiscoveryAtByTaskId = new Map<string, number>();
   readonly syncEvent = new EventEmitter();
 
   /**
@@ -195,6 +209,14 @@ export class SyncService {
 
   async trigger(): Promise<SyncResult> {
     return this.enqueueAll({ cause: 'manual', waitForRemoteBranch: true });
+  }
+
+  /**
+   * Re-reads one card without the org-wide searches a manual sync runs — for a
+   * branch the caller has just put on the card, whose PR a plain lookup finds.
+   */
+  async syncTask(taskId: string): Promise<SyncResult> {
+    return this.enqueueTask(taskId, { cause: 'push' });
   }
 
   schedulePostPushSync(taskId: string): { scheduled: true } {
@@ -475,7 +497,7 @@ export class SyncService {
       return result;
     }
 
-    await this.discoverSiblingBranches(task, branches);
+    await this.discoverSiblingBranches(task, branches, opts.cause);
 
     for (const branch of this.board.getTaskBranches(taskId)) {
       const branchResult = await this.reconcileBranch(task, branch, opts);
@@ -544,12 +566,22 @@ export class SyncService {
   private async discoverSiblingBranches(
     task: TaskRecord,
     branches: readonly TaskBranchRecord[],
+    cause: SyncCause,
   ): Promise<void> {
     // Only a card actively being worked is worth searching for; the search API
     // is rate-limited far more tightly than the rest of GitHub.
     if (task.trackId === 'done' || !task.branchName) {
       return;
     }
+    const now = Date.now();
+    if (now < this.searchPausedUntil) {
+      return;
+    }
+    const lastRun = this.lastDiscoveryAtByTaskId.get(task.id);
+    if (cause !== 'manual' && lastRun !== undefined && now - lastRun < DISCOVERY_INTERVAL_MS) {
+      return;
+    }
+    this.lastDiscoveryAtByTaskId.set(task.id, now);
 
     try {
       const known = new Set(branches.map((branch) => `${branch.repoId}#${branch.branchName}`));
@@ -580,9 +612,14 @@ export class SyncService {
       }
 
       await this.discoverReferencingBranches(task, branches, reposBySlug, org, repoPath, known);
-    } catch {
+    } catch (err) {
       // Discovery is an enhancement. A rate limit or an unreachable search must
-      // never stop the branches we already know about from syncing.
+      // never stop the branches we already know about from syncing — but a
+      // rate limit pauses every card's search, or the rest of this pass keeps
+      // the limit tripped for the user's own sessions too.
+      if (RATE_LIMIT_PATTERN.test(err instanceof Error ? err.message : String(err))) {
+        this.searchPausedUntil = Date.now() + GITHUB_RATE_LIMIT_BACKOFF_MS;
+      }
     }
   }
 
@@ -631,8 +668,12 @@ export class SyncService {
           org,
           `${repoName}#${branch.prNumber}`,
         );
-      } catch {
-        // One reference search failing must not stop the others.
+      } catch (err) {
+        // One reference search failing must not stop the others — unless it
+        // was the rate limit, which every other search would hit too.
+        if (RATE_LIMIT_PATTERN.test(err instanceof Error ? err.message : String(err))) {
+          throw err;
+        }
         continue;
       }
 

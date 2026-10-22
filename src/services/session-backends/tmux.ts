@@ -13,7 +13,11 @@ import type {
 } from '../../types/index.js';
 import { existsSync } from 'fs';
 import { generateId } from '../../db/index.js';
-import { buildSessionBootstrapCommand, buildSessionBootstrapEnv } from '../session-bootstrap.js';
+import {
+  buildSessionBootstrapCommand,
+  buildSessionBootstrapEnv,
+  currentAgentboardCommand,
+} from '../session-bootstrap.js';
 import {
   writeLocalBootstrapEnv,
   writeLocalBrief,
@@ -239,6 +243,7 @@ export class TmuxBackend implements SessionBackend {
           agentPermissionMode: opts.agentPermissionMode,
           agentArgs: opts.agentArgs,
           agentSessionId: opts.agentSessionId,
+          agentboardCommand: currentAgentboardCommand(),
           // Only the file's path travels to the script; the script deletes it
           // itself when this turns out to be a resume (see
           // session-bootstrap.sh). The daemon, not argv, delivers the contents.

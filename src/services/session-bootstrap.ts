@@ -59,6 +59,12 @@ export interface SessionBootstrapEnvOptions {
    * second file rather than a flag on the first.
    */
   resumeNoticeFile?: string;
+  /**
+   * How a hook running inside this session invokes the agentboard CLI — see
+   * {@link prReportHookArgs}. Omitted where the CLI is not on the session's
+   * host (ssh), which simply leaves the session without the hook.
+   */
+  agentboardCommand?: string;
 }
 
 /**
@@ -111,6 +117,58 @@ export function resolveAgentArgs(
   return [...permissionArgs, ...nameArgs, ...(agentArgs[agentCli] ?? [])];
 }
 
+/** Agent CLIs whose `--settings` hooks have been verified. */
+const SETTINGS_FLAG_CLIS: ReadonlySet<AgentCLI> = new Set(['claude']);
+
+/**
+ * `--settings` carrying a PostToolUse hook that reports each pull request the
+ * session opens back to its own card.
+ *
+ * The board used to find those itself, with an org-wide GitHub search per card
+ * on every poll — the search API's 30-a-minute budget is the user's, shared
+ * with their own sessions, and the board alone spent it several times over.
+ * The session is where a PR is opened, so it is the one place that knows for
+ * certain, the moment it happens. Sync keeps a slow search as the safety net
+ * for PRs opened anywhere else.
+ *
+ * The filter runs in the hook's own shell, so the CLI only starts for the rare
+ * Bash call that ran `gh pr create`, not for every command the agent runs. The
+ * card id is baked in: the bootstrap script unsets its own settings before it
+ * execs the agent. Always exits 0 — reporting must never fail a tool call.
+ */
+export function prReportHookArgs(
+  agentCli: AgentCLI,
+  taskId: string | undefined,
+  agentboardCommand: string | undefined,
+): string[] {
+  if (!taskId || !agentboardCommand || !SETTINGS_FLAG_CLIS.has(agentCli)) {
+    return [];
+  }
+  const report = `${agentboardCommand} task report-pr ${shellQuote(taskId)}`;
+  const command = `input=$(cat); case "$input" in *'gh pr create'*) printf '%s' "$input" | ${report} >/dev/null 2>&1 ;; esac; exit 0`;
+  const settings = {
+    hooks: {
+      PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 30 }] }],
+    },
+  };
+  return ['--settings', JSON.stringify(settings)];
+}
+
+/**
+ * The command that runs this same agentboard CLI: the node binary and entry
+ * script the daemon itself was started with, so a hook never depends on
+ * `agentboard` being on the session's PATH or on it being the same install.
+ * Falls back to the PATH lookup under `npm run dev`, whose `.ts` entry plain
+ * node cannot run.
+ */
+export function currentAgentboardCommand(): string {
+  const entry = process.argv[1];
+  if (!entry || entry.endsWith('.ts')) {
+    return 'agentboard';
+  }
+  return `${shellQuote(process.execPath)} ${shellQuote(entry)}`;
+}
+
 /**
  * The session's settings, as a file for session-bootstrap.sh to source.
  *
@@ -141,8 +199,13 @@ export function buildSessionBootstrapEnv({
   agentSessionId,
   initialPromptFile,
   resumeNoticeFile,
+  agentboardCommand,
 }: SessionBootstrapEnvOptions): string {
-  const resolvedAgentArgs = resolveAgentArgs(agentCli, agentPermissionMode, agentArgs, sessionName);
+  const resolvedAgentArgs = [
+    ...resolveAgentArgs(agentCli, agentPermissionMode, agentArgs, sessionName),
+    // A general card has no repo, so a pull request has nowhere to land.
+    ...(taskKind === 'general' ? [] : prReportHookArgs(agentCli, taskId, agentboardCommand)),
+  ];
   const envVars: Array<[string, string]> = [
     ['AGENTBOARD_TASK_ID', taskId ?? ''],
     ['AGENTBOARD_TASK_KIND', taskKind],

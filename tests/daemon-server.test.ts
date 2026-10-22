@@ -574,7 +574,7 @@ describe('daemon addTaskBranch dispatch', () => {
     // Arrange
     const addTaskBranch = vi.fn().mockReturnValue(makeBranch({ id: 'branch-2', repoId: 'repo-2' }));
     const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
-    const trigger = vi.fn().mockResolvedValue(undefined);
+    const syncTask = vi.fn().mockResolvedValue(undefined);
 
     // Act
     const response = await dispatch(
@@ -587,7 +587,7 @@ describe('daemon addTaskBranch dispatch', () => {
         board: { getTask: vi.fn().mockReturnValue(makeTask()), addTaskBranch },
         workspace: { getRepo: vi.fn().mockReturnValue(makeRepo({ id: 'repo-2' })) },
         view: { getBoardSnapshot },
-        sync: { trigger },
+        sync: { syncTask },
       } as never,
       '/tmp/agentboard.sock',
     );
@@ -599,7 +599,8 @@ describe('daemon addTaskBranch dispatch', () => {
       branchName: 'ab/task-1',
     });
     expect(response).toEqual({ id: 'req-add-branch', result: { tasks: [] } });
-    expect(trigger).toHaveBeenCalledTimes(1);
+    // Just this card: a full sync would search the org for every card.
+    expect(syncTask).toHaveBeenCalledWith('task-1');
   });
 
   it('refuses a repo the workspace does not know', async () => {
@@ -632,7 +633,7 @@ describe('daemon addTaskBranch dispatch', () => {
     // silently fall through to it (caught live: it originally did).
     const addTaskBranch = vi.fn().mockReturnValue(makeBranch({ id: 'branch-2', repoId: 'repo-2' }));
     const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
-    const trigger = vi.fn().mockResolvedValue(undefined);
+    const syncTask = vi.fn().mockResolvedValue(undefined);
     const getPRHeadBranch = vi.fn().mockResolvedValue('feature/sibling-work');
 
     // Act
@@ -651,7 +652,7 @@ describe('daemon addTaskBranch dispatch', () => {
         },
         github: { getPRHeadBranch },
         view: { getBoardSnapshot },
-        sync: { trigger },
+        sync: { syncTask },
       } as never,
       '/tmp/agentboard.sock',
     );

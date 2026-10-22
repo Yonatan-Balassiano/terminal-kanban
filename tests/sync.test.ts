@@ -1481,6 +1481,178 @@ describe('SyncService', () => {
       expect.objectContaining({ prNumber: 42, githubSyncStatus: 'ok' }),
     );
   });
+  it('searches for sibling pull requests at most once every ten minutes per card on its own', async () => {
+    // Arrange — the search API allows 30 requests a minute for the whole user,
+    // shared with their own sessions; searching on every poll ran it dry.
+    vi.useFakeTimers();
+    const { board } = makeBoard({ trackId: 'pr' });
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo()),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+      findPRsReferencing: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([{ id: 'repo-1', github_owner: 'org', github_repo: 'proj' }]),
+        run: vi.fn(),
+      }),
+    };
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    try {
+      // Act
+      sync.start(60_000, 15_000);
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      const searchesInFirstNineMinutes = github.findPRsByHeadBranch.mock.calls.length;
+      const lookupsInFirstNineMinutes = github.findBranchPR.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+
+      // Assert — the card's own PR is still read on every poll.
+      expect(searchesInFirstNineMinutes).toBe(1);
+      expect(lookupsInFirstNineMinutes).toBeGreaterThan(9);
+      expect(github.findPRsByHeadBranch).toHaveBeenCalledTimes(2);
+    } finally {
+      sync.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('still searches straight away when the user asks for a sync', async () => {
+    // Arrange
+    const { board } = makeBoard({ trackId: 'pr' });
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue(null),
+      getPR: vi.fn(),
+      createPR: vi.fn().mockResolvedValue(null),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([{ id: 'repo-1', github_owner: 'org', github_repo: 'proj' }]),
+        run: vi.fn(),
+      }),
+    };
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+    await sync.trigger();
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(github.findPRsByHeadBranch).toHaveBeenCalledTimes(2);
+  });
+
+  it('pauses every search after the search API rate-limits one', async () => {
+    // Arrange — searching on regardless keeps the limit tripped for the
+    // user's own sessions, which share it.
+    const { board } = makeBoard({ trackId: 'pr' });
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo()),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockRejectedValue(new Error('API rate limit exceeded for user ID 1.')),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([{ id: 'repo-1', github_owner: 'org', github_repo: 'proj' }]),
+        run: vi.fn(),
+      }),
+    };
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+    await sync.trigger();
+
+    // Act — even a manual sync waits out the pause.
+    await sync.trigger();
+
+    // Assert
+    expect(github.findPRsByHeadBranch).toHaveBeenCalledTimes(1);
+    expect(github.findBranchPR.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('re-reads one card without searching when a branch is reported to it', async () => {
+    // Arrange — a session reporting its PR must not cost an org-wide search.
+    const { board } = makeBoard({ trackId: 'pr' });
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo()),
+      createPR: vi.fn(),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([{ id: 'repo-1', github_owner: 'org', github_repo: 'proj' }]),
+        run: vi.fn(),
+      }),
+    };
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+    await sync.trigger();
+
+    // Act
+    await sync.syncTask('task-1');
+
+    // Assert
+    expect(github.findPRsByHeadBranch).toHaveBeenCalledTimes(1);
+    expect(github.findBranchPR.mock.calls.length).toBeGreaterThan(1);
+  });
+
   it('pauses pull-request lookups after GitHub rate-limits one, and keeps reading git state', async () => {
     // Arrange — every branch is looked up every cycle; once GitHub's limit
     // trips, carrying on only keeps it tripped, and each cycle rewrote every
