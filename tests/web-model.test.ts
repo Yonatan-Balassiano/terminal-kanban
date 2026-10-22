@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   buildCardTree,
   cardState,
+  cardTone,
+  familyColours,
+  ORCHESTRATOR_PALETTE,
   prStage,
   type BoardSnapshot,
   type FleetSessionStatus,
@@ -245,5 +248,39 @@ describe('buildCardTree', () => {
       { ...noFilter, query: 'needle' },
     );
     expect(tree.map((n) => n.task.id)).toEqual(['parent']);
+  });
+});
+describe('cardTone', () => {
+  it('follows the TUI border precedence', () => {
+    expect(cardTone(task('a', { sessionAttentionNeeded: true, prState: 'merged' }))).toBe('attention');
+    expect(cardTone(task('a', { prState: 'merged', ciState: 'failed' }))).toBe('merged');
+    expect(cardTone(task('a', { prState: 'open', ciState: 'failed' }))).toBe('blocked');
+    expect(cardTone(task('a', { prState: 'open', reviewState: 'changes_requested', ciState: 'passed' }))).toBe('blocked');
+    expect(cardTone(task('a', { prState: 'closed' }))).toBe('blocked');
+    expect(cardTone(task('a', { prState: 'open', ciState: 'passed' }))).toBe('ready');
+    expect(cardTone(task('a', { prState: 'open', ciState: 'pending' }))).toBe('in-flight');
+    expect(cardTone(task('a', { prState: 'none', ciState: 'none', reviewState: 'none' }))).toBe('plain');
+  });
+});
+
+describe('familyColours', () => {
+  it('gives orchestrators palette colours in creation order and passes them down the family', () => {
+    const colours = familyColours([
+      task('late', { isOrchestrator: true, createdAt: 20 }),
+      task('early', { isOrchestrator: true, createdAt: 10 }),
+      task('child', { parentTaskId: 'late' }),
+      task('grandchild', { parentTaskId: 'child' }),
+      task('loner'),
+    ]);
+    expect(colours.get('early')).toBe(ORCHESTRATOR_PALETTE[0]);
+    expect(colours.get('late')).toBe(ORCHESTRATOR_PALETTE[1]);
+    expect(colours.get('child')).toBe(ORCHESTRATOR_PALETTE[1]);
+    expect(colours.get('grandchild')).toBe(ORCHESTRATOR_PALETTE[1]);
+    expect(colours.has('loner')).toBe(false);
+  });
+
+  it('survives a parent cycle', () => {
+    const colours = familyColours([task('a', { parentTaskId: 'b' }), task('b', { parentTaskId: 'a' })]);
+    expect(colours.size).toBe(0);
   });
 });

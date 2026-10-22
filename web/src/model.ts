@@ -227,3 +227,75 @@ export function relativeTime(epochMs: number, now = Date.now()): string {
   if (hours < 48) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
 }
+
+/**
+ * The colour a card's border carries, by the same precedence as the TUI's
+ * `taskCardBorderColor` (`internal/tui/view.go`): a session waiting on you
+ * beats everything, then merged, then anything blocking, then green, then a
+ * PR still in flight.
+ */
+export type CardTone = 'attention' | 'merged' | 'blocked' | 'ready' | 'in-flight' | 'plain';
+
+export function cardTone(task: TaskRecord): CardTone {
+  if (task.sessionAttentionNeeded) return 'attention';
+  if (task.prState === 'merged') return 'merged';
+  if (task.ciState === 'failed' || task.reviewState === 'changes_requested' || task.prState === 'closed') {
+    return 'blocked';
+  }
+  if (task.ciState === 'passed' || task.reviewState === 'approved') return 'ready';
+  if (task.prState === 'open' || task.prState === 'draft' || task.ciState === 'pending') return 'in-flight';
+  return 'plain';
+}
+
+/**
+ * One orchestrator's colour, shared with the TUI's `orchestratorPalette`
+ * (`internal/tui/orchestrator.go`): `solid` fills the orchestrator's own
+ * card, `border` outlines it, `tint` marks every card below it.
+ */
+export interface FamilyColour {
+  solid: string;
+  border: string;
+  tint: string;
+}
+
+export const ORCHESTRATOR_PALETTE: readonly FamilyColour[] = [
+  { solid: '#5b3fc4', border: '#a78bfa', tint: '#4a35a0' }, // indigo
+  { solid: '#0f7a6e', border: '#2dd4bf', tint: '#0b5049' }, // teal
+  { solid: '#a15c07', border: '#fbbf24', tint: '#6b3d05' }, // amber
+  { solid: '#b0245f', border: '#f472b6', tint: '#8a1d4b' }, // rose
+  { solid: '#1d5fd1', border: '#60a5fa', tint: '#143f8a' }, // blue
+  { solid: '#3d7a1a', border: '#a3e635', tint: '#285012' }, // green
+];
+
+/** Bounds the walk up a card's parents, so a parent cycle cannot hang. */
+const MAX_PARENT_DEPTH = 32;
+
+/**
+ * Each card's family colour: its own if it is an orchestrator, otherwise that
+ * of the nearest orchestrator above it. Orchestrators take palette entries in
+ * creation order, as in the TUI, so a family keeps its colour across redraws
+ * and between the two boards. Cards with no orchestrator above are absent.
+ */
+export function familyColours(tasks: readonly TaskRecord[]): Map<string, FamilyColour> {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const orchestrators = tasks
+    .filter((task) => task.isOrchestrator)
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  const colourOf = new Map(
+    orchestrators.map((task, index) => [task.id, ORCHESTRATOR_PALETTE[index % ORCHESTRATOR_PALETTE.length]]),
+  );
+
+  const result = new Map<string, FamilyColour>();
+  for (const task of tasks) {
+    let current: TaskRecord | undefined = task;
+    for (let depth = 0; current && depth < MAX_PARENT_DEPTH; depth++) {
+      const colour = colourOf.get(current.id);
+      if (colour) {
+        result.set(task.id, colour);
+        break;
+      }
+      current = current.parentTaskId ? byId.get(current.parentTaskId) : undefined;
+    }
+  }
+  return result;
+}
