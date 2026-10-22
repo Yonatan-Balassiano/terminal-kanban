@@ -16,6 +16,7 @@ import {
 } from '../config/index.js';
 import { ensureRunning, isDaemonRunning, stopDaemon } from '../daemon/index.js';
 import { createRPCClient } from './rpc.js';
+import { parsePrReportHookInput } from '../services/pr-report.js';
 import { launchWebLayout, openInBrowser, runWebHome, webBoardUrlWithToken } from './web.js';
 import { webBoardUrl } from '../daemon/web-token.js';
 import { DEFAULT_DELIVERY_BUDGET_MS } from '../services/session-backends/pane-idle.js';
@@ -1193,6 +1194,53 @@ export function buildCli(): Command {
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);
         process.exit(1);
+      }
+    });
+
+  task
+    .command('report-pr <task>')
+    .description(
+      "Internal: attach the PRs a `gh pr create` opened, read from a Claude Code PostToolUse hook payload on stdin. Each card's session runs it via the hook AgentBoard installs; use attach-pr by hand",
+    )
+    .action(async (taskId: string) => {
+      // A hook: silent, and never a failure the agent's tool call would see.
+      try {
+        const reported = parsePrReportHookInput(fs.readFileSync(0, 'utf8'));
+        if (reported.length === 0) {
+          return;
+        }
+        const paths = configPaths();
+        if (!(await isDaemonRunning(paths.socketPath))) {
+          return;
+        }
+        const rpc = await createRPCClient(paths.socketPath);
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          const card = board.tasks.find((t) => t.id === taskId);
+          if (!card || card.kind === 'general') {
+            return;
+          }
+          for (const pr of reported) {
+            const repo = board.repos.find(
+              (r) =>
+                r.githubOwner?.toLowerCase() === pr.owner.toLowerCase() &&
+                r.githubRepo?.toLowerCase() === pr.repo.toLowerCase(),
+            );
+            // A repo nobody registered has no checkout or sync to attach to.
+            if (!repo || card.branches.some((b) => b.repoId === repo.id && b.prNumber === pr.number)) {
+              continue;
+            }
+            try {
+              await rpc.call('addTaskBranch', { taskId, repoId: repo.id, prNumber: pr.number });
+            } catch {
+              // One PR failing to resolve must not stop the others.
+            }
+          }
+        } finally {
+          rpc.disconnect();
+        }
+      } catch {
+        // Reporting is best-effort; the sync loop's own search is the backstop.
       }
     });
 

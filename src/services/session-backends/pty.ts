@@ -9,7 +9,11 @@ import type {
   SessionSlot,
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
-import { buildSessionBootstrapCommand, buildSessionBootstrapEnv } from '../session-bootstrap.js';
+import {
+  buildSessionBootstrapCommand,
+  buildSessionBootstrapEnv,
+  currentAgentboardCommand,
+} from '../session-bootstrap.js';
 import {
   writeLocalBootstrapEnv,
   writeLocalBrief,
@@ -88,6 +92,7 @@ export class PtyBackend implements SessionBackend {
         agentPermissionMode: opts.agentPermissionMode,
         agentArgs: opts.agentArgs,
         agentSessionId: opts.agentSessionId,
+        agentboardCommand: currentAgentboardCommand(),
         initialPromptFile: opts.initialPrompt
           ? writeLocalBrief(opts.taskId, opts.slot, opts.initialPrompt)
           : undefined,

@@ -969,8 +969,10 @@ export async function dispatch(
 
         const snapshot = services.view.getBoardSnapshot();
         serverEvents.emit('event', { type: 'board_patch', payload: snapshot });
-        // The new branch has no GitHub state yet; let sync discover its PR.
-        void services.sync.trigger().catch(() => {});
+        // The new branch has no GitHub state yet; a lookup on this card finds
+        // its PR. Not a full manual sync: that searches the org for every card,
+        // and a session's hook calls this each time it opens a pull request.
+        void services.sync.syncTask(params.taskId).catch(() => {});
         return { id: req.id, result: snapshot };
       }
 
