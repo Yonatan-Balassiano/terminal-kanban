@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { rpc } from './api';
 import {
   buildCardTree,
   CARD_STATE_LABEL,
   cardState,
+  cardTone,
   countFamily,
+  familyColours,
   findPRRelease,
   prBranches,
   prStage,
@@ -15,6 +17,7 @@ import {
   type CardNode,
   type CardState,
   type DoctorCheck,
+  type FamilyColour,
   type FleetSessionStatus,
   type PRReleaseStatus,
   type TaskBranchRecord,
@@ -109,6 +112,7 @@ export function App() {
     () => (board ? buildCardTree(board, fleet, releases, filter) : []),
     [board, fleet, releases, filter],
   );
+  const families = useMemo(() => familyColours(board?.tasks ?? []), [board]);
   const hiddenShipped = useMemo(() => {
     if (!board || filter.showShipped) return 0;
     const all = buildCardTree(board, fleet, releases, { ...filter, showShipped: true });
@@ -509,6 +513,7 @@ export function App() {
                 depth={0}
                 board={board as BoardSnapshot}
                 releases={releases}
+                families={families}
                 selectedId={selectedId}
                 collapsed={collapsed}
                 focus={focus}
@@ -670,6 +675,7 @@ interface CardBranchProps {
   depth: number;
   board: BoardSnapshot;
   releases: ReadonlyMap<string, PRReleaseStatus[]>;
+  families: ReadonlyMap<string, FamilyColour>;
   selectedId: string | null;
   collapsed: ReadonlySet<string>;
   focus: FocusStatus | null;
@@ -680,7 +686,7 @@ interface CardBranchProps {
 }
 
 function CardBranch(props: CardBranchProps) {
-  const { node, depth, board, releases, selectedId, collapsed, focus, onSelect, onToggle, onTeleport, onPin } = props;
+  const { node, depth, board, releases, families, selectedId, collapsed, focus, onSelect, onToggle, onTeleport, onPin } = props;
   const { task } = node;
   const isCollapsed = collapsed.has(task.id);
   const hasChildren = node.children.length > 0;
@@ -688,6 +694,10 @@ function CardBranch(props: CardBranchProps) {
   const prs = prBranches(task);
   const taskReleases = releases.get(task.id);
   const pending = focus?.taskId === task.id && focus.kind === 'pending';
+  const family = families.get(task.id);
+  const familyStyle = family
+    ? ({ '--fam-solid': family.solid, '--fam-border': family.border, '--fam-tint': family.tint } as CSSProperties)
+    : undefined;
 
   return (
     <li id={`card-${task.id}`} role="treeitem" aria-expanded={hasChildren ? !isCollapsed : undefined} aria-selected={selectedId === task.id}>
@@ -695,6 +705,8 @@ function CardBranch(props: CardBranchProps) {
         className={[
           'card',
           `state-${node.state}`,
+          `tone-${cardTone(task)}`,
+          family ? 'family' : '',
           selectedId === task.id ? 'selected' : '',
           task.isOrchestrator ? 'orchestrator' : '',
           task.pinnedAt ? 'pinned' : '',
@@ -702,6 +714,7 @@ function CardBranch(props: CardBranchProps) {
           node.shipped ? 'shipped' : '',
           depth === 0 ? 'root' : 'child',
         ].join(' ')}
+        style={familyStyle}
       >
         {hasChildren ? (
           <button
