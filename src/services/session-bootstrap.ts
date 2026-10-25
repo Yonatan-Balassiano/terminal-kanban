@@ -61,10 +61,22 @@ export interface SessionBootstrapEnvOptions {
   resumeNoticeFile?: string;
   /**
    * How a hook running inside this session invokes the agentboard CLI — see
-   * {@link prReportHookArgs}. Omitted where the CLI is not on the session's
-   * host (ssh), which simply leaves the session without the hook.
+   * {@link prReportHookArgs}. Omitted where no CLI can reach the daemon from
+   * the session's host, which simply leaves the session without the hook.
    */
   agentboardCommand?: string;
+  /**
+   * Remote (ssh) sessions only: what the mirrored agentboard CLI needs to
+   * reach the daemon through the forwarded socket — see `remote-rpc.ts`.
+   */
+  remoteCli?: {
+    /** This card's token: the only identity the remote socket accepts. */
+    token: string;
+    /** The forwarded daemon socket, on the remote host. */
+    socketPath: string;
+    /** Prepended to PATH, so a bare `agentboard` is the mirrored CLI. */
+    binDir: string;
+  };
 }
 
 /**
@@ -200,6 +212,7 @@ export function buildSessionBootstrapEnv({
   initialPromptFile,
   resumeNoticeFile,
   agentboardCommand,
+  remoteCli,
 }: SessionBootstrapEnvOptions): string {
   const resolvedAgentArgs = [
     ...resolveAgentArgs(agentCli, agentPermissionMode, agentArgs, sessionName),
@@ -223,6 +236,15 @@ export function buildSessionBootstrapEnv({
     // is a fresh start that should read it.
     ['AGENTBOARD_INITIAL_PROMPT_FILE', initialPromptFile ?? ''],
     ['AGENTBOARD_RESUME_PROMPT_FILE', resumeNoticeFile ?? ''],
+    // Left on in the agent's environment on purpose: they are how its
+    // `agentboard` calls reach the daemon. Remote cards only.
+    ...(remoteCli
+      ? ([
+          ['AGENTBOARD_RPC_TOKEN', remoteCli.token],
+          ['AGENTBOARD_REMOTE_SOCKET', remoteCli.socketPath],
+          ['AGENTBOARD_EXTRA_PATH', remoteCli.binDir],
+        ] as Array<[string, string]>)
+      : []),
   ];
 
   return envVars.map(([key, value]) => `export ${key}=${shellQuote(value)}\n`).join('');

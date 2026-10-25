@@ -81,6 +81,7 @@ export class DoctorService {
     ];
 
     checks.push(await this.checkRemoteTools(transport));
+    checks.push(await this.checkRemoteDaemonSocket(transport));
     checks.push(...(await this.checkRemoteRepos(transport)));
     return checks;
   }
@@ -158,6 +159,73 @@ export class DoctorService {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return { name: 'remote:tools', status: 'fail', message: `Tool probe failed: ${message}` };
+    }
+  }
+
+  /**
+   * Whether a remote card's agentboard CLI can reach this daemon: the mirrored
+   * CLI pings it through the forwarded socket, so a pass means the whole path
+   * works, not just that an ssh process is running. The forward is only up
+   * while a remote card has a session, so its absence alone is a warning.
+   */
+  private async checkRemoteDaemonSocket(transport: SshTransport): Promise<DoctorCheck> {
+    const name = 'remote:daemon-socket';
+    const probe = [
+      'cli="$HOME/.agentboard/bin/agentboard"',
+      'sock="$HOME/.agentboard/run/daemon.sock"',
+      'command -v python3 >/dev/null 2>&1 || { echo no-python; exit 0; }',
+      '[ -x "$cli" ] || { echo no-cli; exit 0; }',
+      '[ -S "$sock" ] || { echo no-socket; exit 0; }',
+      '"$cli" ping 2>&1 || true',
+    ].join('; ');
+    let stdout: string;
+    try {
+      ({ stdout } = await transport.exec(['sh', '-c', probe]));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { name, status: 'fail', message: `Probe failed: ${message}` };
+    }
+    const answer = stdout.trim().split('\n').pop() ?? '';
+
+    switch (answer) {
+      case 'no-python':
+        return {
+          name,
+          status: 'fail',
+          message: 'python3 is not on the remote host, so remote cards cannot run agentboard',
+          remediation: `Install python3 on ${transport.host}`,
+        };
+      case 'no-cli':
+        return {
+          name,
+          status: 'warn',
+          message: 'The agentboard CLI has not been mirrored to the remote host yet',
+          remediation: 'It is set up when the next remote card opens (needs a daemon with this version)',
+        };
+      case 'no-socket':
+        return {
+          name,
+          status: 'warn',
+          message: 'The daemon socket is not forwarded (normal while no remote card is open)',
+          remediation:
+            'Open or reconnect a remote card; the daemon log shows the forward as [remote-cli] lines',
+        };
+      default: {
+        const pid = /^ok pid=(\d+)/.exec(answer)?.[1];
+        if (pid) {
+          return {
+            name,
+            status: 'pass',
+            message: `Remote cards reach the daemon (pid ${pid}) over the forwarded socket`,
+          };
+        }
+        return {
+          name,
+          status: 'fail',
+          message: `The forwarded socket is there but does not answer: ${answer || 'no output'}`,
+          remediation: 'Reconnect a remote card to rebuild the forward, or restart the daemon',
+        };
+      }
     }
   }
 

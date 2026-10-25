@@ -1,9 +1,11 @@
 import { LocalTransport } from './local.js';
 import { SshTransport } from './ssh.js';
+import { SocketForward } from './socket-forward.js';
 import type { ExecTransport } from './types.js';
 
 export { LocalTransport } from './local.js';
 export { SshTransport, buildControlPath } from './ssh.js';
+export { SocketForward, type SocketForwardStatus } from './socket-forward.js';
 export * from './types.js';
 
 export interface RemoteHostConfig {
@@ -22,6 +24,8 @@ export class TransportRegistry {
   private readonly local = new LocalTransport();
   private readonly remoteConfig: RemoteHostConfig | undefined;
   private remote: SshTransport | null = null;
+  private forwardSource: { localSocket: string; log?: (message: string) => void } | null = null;
+  private forward: SocketForward | null = null;
 
   constructor(remoteConfig?: RemoteHostConfig) {
     this.remoteConfig = remoteConfig;
@@ -57,6 +61,36 @@ export class TransportRegistry {
     return this.remote;
   }
 
+  /**
+   * Let remote sessions reach the daemon: from now on {@link getSocketForward}
+   * hands out a forward of `localSocket` (the daemon's remote-RPC socket) to the
+   * remote host. Only the daemon calls this; without it there is no forward.
+   */
+  enableSocketForward(localSocket: string, log?: (message: string) => void): void {
+    this.forwardSource = { localSocket, log };
+  }
+
+  /**
+   * The forward of the daemon's socket to the remote host, or null when none
+   * was enabled. Tied to the current remote transport: a reset stops it, and
+   * the next call builds a fresh one over the fresh transport.
+   */
+  getSocketForward(): SocketForward | null {
+    if (!this.forwardSource || !this.remoteConfig) {
+      return null;
+    }
+    if (!this.forward) {
+      const transport = this.getRemote();
+      this.forward = new SocketForward({
+        host: transport.host,
+        localSocket: this.forwardSource.localSocket,
+        remoteExec: (argv) => transport.exec(argv),
+        log: this.forwardSource.log,
+      });
+    }
+    return this.forward;
+  }
+
   /** Resolve the transport a task should run on. */
   forLocation(location: 'local' | 'remote'): ExecTransport {
     return location === 'remote' ? this.getRemote() : this.local;
@@ -72,6 +106,8 @@ export class TransportRegistry {
    * reconnect see the host that is actually there now.
    */
   async resetRemote(): Promise<void> {
+    this.forward?.stop();
+    this.forward = null;
     const remote = this.remote;
     if (!remote) {
       return;
@@ -80,7 +116,19 @@ export class TransportRegistry {
     await remote.disconnect();
   }
 
+  /**
+   * Stop the forward without touching the ControlMaster. Daemon shutdown uses
+   * this, not {@link shutdown}: the master is shared with every remote card's
+   * attach loop (remote-attach.sh), and `ssh -O exit` would cut them all.
+   * The forward's ssh is a child of the daemon, and a child outlives its
+   * parent unless something kills it.
+   */
+  stopSocketForward(): void {
+    this.forward?.stop();
+  }
+
   async shutdown(): Promise<void> {
+    this.forward?.stop();
     if (this.remote) {
       await this.remote.disconnect();
     }

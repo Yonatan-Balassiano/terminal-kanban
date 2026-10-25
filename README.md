@@ -207,6 +207,8 @@ agentboard task orchestrator [<id>] [--off]                                  # p
 agentboard task delete <id> [--force] [--purge]                              # delete a card; archives uncommitted work unless --purge
 ```
 
+From inside a **remote** card, `agentboard` is a mirrored client (`~/.agentboard/bin/agentboard`, python3) that talks to the Mac daemon over a forwarded socket. It offers `ls`, `fleet`, `repos ls`, `task create`, `task notify`, `task attach-pr`, `task report-pr` and `ping`; the rest runs on the Mac.
+
 ### Repository commands
 
 ```bash

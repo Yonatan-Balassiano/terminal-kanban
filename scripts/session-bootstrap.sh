@@ -33,6 +33,19 @@ workspaces="${AGENTBOARD_WORKSPACES:-}"
 agent_session_id="${AGENTBOARD_AGENT_SESSION_ID:-}"
 initial_prompt_file="${AGENTBOARD_INITIAL_PROMPT_FILE:-}"
 resume_prompt_file="${AGENTBOARD_RESUME_PROMPT_FILE:-}"
+rpc_token="${AGENTBOARD_RPC_TOKEN:-}"
+
+# A remote card's agentboard CLI is a mirrored copy under ~/.agentboard/bin,
+# not an install on PATH — put it first so the agent's own `agentboard` calls
+# reach the Mac daemon through the forwarded socket. The settings file quotes
+# every value, so the PATH join happens here rather than in it.
+if [[ -n "${AGENTBOARD_EXTRA_PATH:-}" ]]; then
+  export PATH="$AGENTBOARD_EXTRA_PATH:$PATH"
+fi
+unset AGENTBOARD_EXTRA_PATH
+# Empty on local cards: nothing to hand on, and an empty value would only
+# confuse the remote CLI's lookup.
+[[ -n "$rpc_token" ]] || unset AGENTBOARD_RPC_TOKEN AGENTBOARD_REMOTE_SOCKET
 
 # The card's checkouts, one "label<TAB>branch<TAB>path" row per line.
 #
@@ -82,6 +95,12 @@ if [[ "$task_kind" != "general" && -n "$task_id" && -d "$session_cwd" ]]; then
     # by default — only the main checkout's .git/info/ is guaranteed to exist.
     mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || true
     grep -qxF '.agentboard/' "$exclude_file" 2>/dev/null || printf '.agentboard/\n' >> "$exclude_file" 2>/dev/null || true
+  fi
+  # The remote CLI's card token, for the same sandboxed-Bash reason as the id
+  # above. Owner-only: it is what lets a call act as this card.
+  if [[ -n "$rpc_token" ]]; then
+    (umask 077 && printf '%s' "$rpc_token" > "$session_cwd/.agentboard/rpc-token" &&
+      chmod 600 "$session_cwd/.agentboard/rpc-token") 2>/dev/null || true
   fi
 fi
 
