@@ -28,6 +28,22 @@ Add `--json` to any of them when you need to parse the result.
 
 Your own task id is in `AGENTBOARD_TASK_ID`, or in `.agentboard/task-id` in your worktree if a sandboxed shell dropped the env var.
 
+## On a remote card
+
+If your card runs on the remote host (`☁ remote` on the board; `AGENTBOARD_RPC_TOKEN` is set), the `agentboard` on your PATH is not an install — it is a small client (`~/.agentboard/bin/agentboard`) that reaches the one board on the Mac through a socket the daemon forwards over SSH. There is no daemon on the remote host; never try to start one.
+
+| Works from a remote card | Runs only on the Mac |
+|---|---|
+| `ls`, `fleet`, `repos ls` (each with `--json`) | `attention`, `doctor`, `web`, `sync` |
+| `task create` (defaults to `--location remote`; `--location local` puts the subtask on the Mac) | `task restart`, `task delete`, `task redeliver-prompt` |
+| `task notify`, `task attach-pr`, `task report-pr` | `task orchestrator`, `set-branch`, `repos add/rm` |
+| `ping` — is the forwarded socket answering? | |
+
+The daemon decides who a call is from, by your card's token — not by anything you pass. So: a subtask you create is always yours (`--parent` may only name your card or one of its subtasks), you can only `--start`/`attach-pr` your own card or its subtasks, and every message you send is from you.
+
+- `Cannot reach the AgentBoard daemon` means the forward is down (laptop asleep, VPN, daemon stopped). Do not retry in a loop; tell the human to run `agentboard doctor` on the Mac (`remote:daemon-socket` line) or reconnect the card.
+- `No AgentBoard card token` means a shell with no `AGENTBOARD_RPC_TOKEN` outside your worktree, or a card started before this existed — `cd` into your worktree, or ask for `agentboard task restart <id>` on the Mac.
+
 ## Spinning off follow-up work
 
 Only create a card for **well-defined, ready-to-start** work. Don't fan out speculative subtasks, and don't create a card for your own internal housekeeping (a verification pass, a quick search) — those are subagents, not board cards.
@@ -81,7 +97,7 @@ You rarely need to run this: a top-level card is marked automatically the moment
 - **Auto-linking.** A card created from inside a running session is linked as a subtask of your card automatically — no flag. Use `--parent <id>` to link elsewhere. If a card comes out unlinked, run `task create` from inside your worktree (the fallback marker file is found by walking up from the cwd).
 - **Session naming.** The subtask's session is named `<your session name>/<its title>`, so `ListAgents` shows the hierarchy with no lookup. Override with `--session-name`.
 - **PR notification, two ways.** When the subtask's PR opens, your card is flagged on the board (durable, always correct) *and* the subtask is told to `SendMessage` you directly (prompt, but skippable). Trust the board flag; treat the message as a courtesy.
-- **PRs you open are put on your card.** Your session runs a hook (installed at launch, claude only) that reports every pull request a `gh pr create` opens straight to your card — in any registered repo, under any branch name. If you opened one some other way (the GitHub web UI, an MCP tool, `gh api`), or you are on codex, attach it yourself: `agentboard task attach-pr <your-task-id> <pr-number> --repo <ref>`. The board only searches GitHub for PRs it was not told about every ten minutes, so don't wait for it.
+- **PRs you open are put on your card.** Your session runs a hook (installed at launch, claude only — local and remote cards alike) that reports every pull request a `gh pr create` opens straight to your card — in any registered repo, under any branch name. If you opened one some other way (the GitHub web UI, an MCP tool, `gh api`), or you are on codex, attach it yourself: `agentboard task attach-pr <your-task-id> <pr-number> --repo <ref>`. The board only searches GitHub for PRs it was not told about every ten minutes, so don't wait for it.
 - **Your card stays in `shipping` until every subtask is done.** Even once your own branches have shipped, the board holds your card in `shipping` — not `done` — while any subtask you spun off is still open. Nothing to do here — it resolves itself the moment the last subtask reaches `done`. Your session is not affected either way: reaching `done` does not close it.
 
 ## Talking to other sessions

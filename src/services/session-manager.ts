@@ -232,6 +232,12 @@ export class SessionManager {
    * existed.
    */
   logLifecycle?: (message: string) => void;
+  /**
+   * Mints a remote card's token for the daemon's remote-RPC socket. Set by the
+   * daemon alongside `TransportRegistry.enableSocketForward`; while either is
+   * missing, remote cards get no agentboard CLI.
+   */
+  mintRemoteCliToken?: (taskId: string) => string;
 
   constructor(
     private db: Db,
@@ -273,7 +279,15 @@ export class SessionManager {
 
     if (backendType === 'ssh') {
       const transport = this.transports.getRemote();
-      return new SshTmuxBackend({ transport, host: transport.host });
+      const forward = this.transports.getSocketForward();
+      return new SshTmuxBackend({
+        transport,
+        host: transport.host,
+        remoteCli:
+          forward && this.mintRemoteCliToken
+            ? { forward, mintToken: this.mintRemoteCliToken }
+            : undefined,
+      });
     }
 
     return new PtyBackend((taskId, slot, data) => {

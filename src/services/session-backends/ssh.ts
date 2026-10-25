@@ -13,7 +13,11 @@ import type {
   SessionSlot,
 } from '../../types/index.js';
 import { generateId } from '../../db/index.js';
-import { buildSessionBootstrapCommand, buildSessionBootstrapEnv } from '../session-bootstrap.js';
+import {
+  buildSessionBootstrapCommand,
+  buildSessionBootstrapEnv,
+  type SessionBootstrapEnvOptions,
+} from '../session-bootstrap.js';
 import {
   BRIEF_FILE_MODE,
   bootstrapEnvRelativePath,
@@ -21,7 +25,7 @@ import {
   resumeNoticeRelativePath,
 } from '../session-brief.js';
 import { buildBackendSessionName } from '../session-name.js';
-import { shellJoin } from '../shell-quote.js';
+import { shellJoin, shellQuote } from '../shell-quote.js';
 import { buildControlPath, TransportUnreachableError, type SshTransport } from '../transport/index.js';
 import { DeliveryGuard } from './delivery-guard.js';
 import {
@@ -68,6 +72,25 @@ const INSPECT_CACHE_MS = 1_500;
 /** Where the bootstrap script is mirrored on the remote host, relative to $HOME. */
 const REMOTE_BOOTSTRAP_RELATIVE_PATH = '.agentboard/session-bootstrap.sh';
 const REMOTE_BOOTSTRAP_MODE = 0o755;
+/** The mirrored agentboard CLI, relative to $HOME — see scripts/agentboard-remote.py. */
+const REMOTE_CLI_BIN_DIR = '.agentboard/bin';
+const REMOTE_CLI_RELATIVE_PATH = `${REMOTE_CLI_BIN_DIR}/agentboard`;
+/** Where the daemon's socket is forwarded to, relative to $HOME. Its dir is 0700. */
+const REMOTE_DAEMON_SOCKET_RELATIVE_PATH = '.agentboard/run/daemon.sock';
+
+/**
+ * What a remote card needs to run the agentboard CLI against this daemon.
+ * Absent in tests and anywhere the daemon did not enable it, which leaves the
+ * card exactly as it was: no CLI, no PR-report hook.
+ */
+export interface RemoteCliAccess {
+  /** Keeps the daemon socket forwarded to the host; cheap when it already is. */
+  forward: { ensure(remoteSocket: string): void; stop(): void };
+  /** This card's token for the remote socket — see `RemoteCallerTokens`. */
+  mintToken(taskId: string): string;
+  /** Local path to `scripts/agentboard-remote.py`; defaults to the bundled copy. */
+  cliScript?: string;
+}
 
 export interface SshTmuxBackendOptions {
   /** Transport for the remote host; also supplies the ControlMaster socket. */
@@ -83,16 +106,19 @@ export interface SshTmuxBackendOptions {
   now?: () => number;
   /** Overridable so tests don't sit through real polling intervals. */
   paneIdleOptions?: PaneIdleWaitOptions;
+  remoteCli?: RemoteCliAccess;
 }
+
+type SessionBootstrapRemoteCli = NonNullable<SessionBootstrapEnvOptions['remoteCli']>;
 
 interface InspectCacheEntry {
   value: BackendSessionInfo | null;
   expiresAt: number;
 }
 
-function bundledRemoteAttachScriptPath(): string {
+function bundledScriptPath(name: string): string {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(moduleDir, '../../../scripts/remote-attach.sh');
+  return path.resolve(moduleDir, '../../../scripts', name);
 }
 
 function errorMessage(error: unknown): string {
@@ -122,6 +148,7 @@ export class SshTmuxBackend implements SessionBackend {
   private readonly idGenerator: () => string;
   private readonly now: () => number;
   private readonly paneIdleOptions?: PaneIdleWaitOptions;
+  private readonly remoteCli?: RemoteCliAccess;
 
   /** One brief delivery per pane at a time — see {@link DeliveryGuard}. */
   private readonly deliveries = new DeliveryGuard();
@@ -129,6 +156,7 @@ export class SshTmuxBackend implements SessionBackend {
   private readonly inspectCache = new Map<string, InspectCacheEntry>();
   private remoteHome: string | null = null;
   private remoteBootstrapScript: string | null = null;
+  private remoteCliMirrored = false;
 
   constructor(options: SshTmuxBackendOptions) {
     this.transport = options.transport;
@@ -136,10 +164,11 @@ export class SshTmuxBackend implements SessionBackend {
     this.controlPath = buildControlPath(options.host, process.getuid?.() ?? 0);
     this.remoteRunner = options.remoteRunner ?? this.createTransportRunner();
     this.localRunner = options.localRunner ?? localTmuxRunner;
-    this.remoteAttachScript = options.remoteAttachScript ?? bundledRemoteAttachScriptPath();
+    this.remoteAttachScript = options.remoteAttachScript ?? bundledScriptPath('remote-attach.sh');
     this.idGenerator = options.idGenerator ?? generateId;
     this.now = options.now ?? Date.now;
     this.paneIdleOptions = options.paneIdleOptions;
+    this.remoteCli = options.remoteCli;
   }
 
   private createTransportRunner(): TmuxCommandRunner {
@@ -170,6 +199,50 @@ export class SshTmuxBackend implements SessionBackend {
     await this.transport.writeFileIfChanged(remotePath, content, REMOTE_BOOTSTRAP_MODE);
     this.remoteBootstrapScript = remotePath;
     return remotePath;
+  }
+
+  /**
+   * Mirror the agentboard CLI to the remote host and make sure the daemon's
+   * socket is forwarded there. Returns what the card's environment needs, or
+   * null when remote CLI access is not enabled.
+   *
+   * A mirrored script rather than an install: there is nothing to keep in step
+   * by hand, it carries no dependencies the host may lack (python3's standard
+   * library only), and it is a client for *this* board — a second agentboard
+   * install there would be one `daemon start` away from a second board.
+   * Memoised like the bootstrap script, with the same daemon-restart caveat.
+   */
+  private async ensureRemoteCli(): Promise<Omit<SessionBootstrapRemoteCli, 'token'> | null> {
+    if (!this.remoteCli) {
+      return null;
+    }
+    const home = await this.resolveRemoteHome();
+    if (!this.remoteCliMirrored) {
+      // scp, not writeFileIfChanged: that one carries the file inside the ssh
+      // command line, and a file this size overflows the ControlMaster's mux
+      // message ("mm_send_fd: Message too long", seen live).
+      const remotePath = `${home}/${REMOTE_CLI_RELATIVE_PATH}`;
+      await this.transport.copyFileTo(
+        this.remoteCli.cliScript ?? bundledScriptPath('agentboard-remote.py'),
+        remotePath,
+      );
+      await this.transport.exec(['chmod', REMOTE_BOOTSTRAP_MODE.toString(8), remotePath]);
+      this.remoteCliMirrored = true;
+    }
+    const socketPath = `${home}/${REMOTE_DAEMON_SOCKET_RELATIVE_PATH}`;
+    this.remoteCli.forward.ensure(socketPath);
+    return { socketPath, binDir: `${home}/${REMOTE_CLI_BIN_DIR}` };
+  }
+
+  /**
+   * Keep the forward up for sessions that already exist — a daemon restart, or
+   * a forward that dropped — without the round trips a create pays. Needs
+   * $HOME, so it waits for the first create or reconnect to have resolved it.
+   */
+  private touchForward(): void {
+    if (this.remoteCli && this.remoteHome) {
+      this.remoteCli.forward.ensure(`${this.remoteHome}/${REMOTE_DAEMON_SOCKET_RELATIVE_PATH}`);
+    }
   }
 
   /**
@@ -335,6 +408,9 @@ export class SshTmuxBackend implements SessionBackend {
     const cwd = opts.cwd ?? opts.repoPath;
     const backendSessionId = buildBackendSessionName(opts.taskTitle, opts.taskId, opts.slot);
     const existing = await this.inspect(backendSessionId);
+    // Before the branch, not inside it: a reconnect reopens a session that is
+    // still alive, and the forward it reset has to come back for that one too.
+    const remoteCli = await this.ensureRemoteCli();
 
     if (!existing) {
       const remoteBootstrapScript = await this.ensureRemoteBootstrapScript(
@@ -375,6 +451,14 @@ export class SshTmuxBackend implements SessionBackend {
           // pane is no longer involved in getting a brief to an agent.
           initialPromptFile: remoteBriefFile,
           resumeNoticeFile: remoteResumeNoticeFile,
+          // The PR-report hook needs a CLI on this host that can reach the
+          // daemon, which is exactly what remoteCli is.
+          ...(remoteCli
+            ? {
+                remoteCli: { ...remoteCli, token: this.remoteCli!.mintToken(opts.taskId) },
+                agentboardCommand: shellQuote(`${remoteCli.binDir}/agentboard`),
+              }
+            : {}),
         }),
       );
       await this.sendInput(
@@ -418,6 +502,11 @@ export class SshTmuxBackend implements SessionBackend {
    * the TUI, so it is where a wrapper lost to a network blip gets rebuilt.
    */
   async attachMetadata(backendSessionId: string): Promise<AttachMetadata> {
+    if (this.remoteCli) {
+      // Also how a reconnect brings the forward back: the reset dropped it
+      // along with the transport, and every reopen comes through here.
+      await this.ensureRemoteCli();
+    }
     await this.ensureWrapper(backendSessionId);
     return { command: buildTmuxAttachCommand(backendSessionId) };
   }
@@ -652,6 +741,9 @@ export class SshTmuxBackend implements SessionBackend {
     }
 
     this.rememberInspect(backendSessionId, info);
+    if (info) {
+      this.touchForward();
+    }
     return info;
   }
 
@@ -688,6 +780,27 @@ export class SshTmuxBackend implements SessionBackend {
         throw error;
       }
       // Remote session may already be gone.
+    }
+
+    await this.stopForwardIfIdle();
+  }
+
+  /**
+   * The forward is an open SSH connection, and Coder counts one as activity:
+   * left up with no card to serve, it would keep the workspace from ever
+   * auto-stopping. So the last remote session to go takes it down; the next
+   * create or attach brings it back.
+   */
+  private async stopForwardIfIdle(): Promise<void> {
+    if (!this.remoteCli) {
+      return;
+    }
+    try {
+      if ((await this.list()).length === 0) {
+        this.remoteCli.forward.stop();
+      }
+    } catch {
+      // Unreachable: the forward is down anyway, and stops retrying on its own.
     }
   }
 

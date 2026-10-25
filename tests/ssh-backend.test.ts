@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SshTmuxBackend } from '../src/services/session-backends/ssh.js';
+import { SshTmuxBackend, type RemoteCliAccess } from '../src/services/session-backends/ssh.js';
 import type { TmuxCommandResult } from '../src/services/session-backends/tmux.js';
 import { TransportUnreachableError } from '../src/services/transport/types.js';
 import type { CreateSessionOpts } from '../src/types/index.js';
@@ -10,6 +10,10 @@ interface Harness {
   backend: SshTmuxBackend;
   remoteCalls: string[][];
   localCalls: string[][];
+  /** Every remote file written, by path. */
+  remoteFiles: Map<string, { content: string; mode?: number }>;
+  /** Commands run on the remote host outside tmux. */
+  execCalls: string[][];
 }
 
 interface HarnessOptions {
@@ -17,6 +21,7 @@ interface HarnessOptions {
   remote?: (args: string[]) => TmuxCommandResult;
   local?: (args: string[]) => TmuxCommandResult;
   writeFileIfChanged?: () => Promise<boolean>;
+  remoteCli?: RemoteCliAccess;
 }
 
 function fail(message = 'no such session'): never {
@@ -30,17 +35,32 @@ function ok(stdout = ''): TmuxCommandResult {
 function makeHarness(options: HarnessOptions = {}): Harness {
   const remoteCalls: string[][] = [];
   const localCalls: string[][] = [];
+  const remoteFiles = new Map<string, { content: string; mode?: number }>();
+  const execCalls: string[][] = [];
 
   const transport = {
     host: 'test.host',
     id: 'ssh:test.host',
     isRemote: true,
-    exec: vi.fn(async () => ({ stdout: '/home/coder', stderr: '', exitCode: 0 })),
+    exec: vi.fn(async (argv: string[]) => {
+      execCalls.push(argv);
+      return { stdout: '/home/coder', stderr: '', exitCode: 0 };
+    }),
     exists: vi.fn(async () => true),
     mkdirp: vi.fn(async () => undefined),
     removeDir: vi.fn(async () => undefined),
-    writeFileIfChanged: vi.fn(options.writeFileIfChanged ?? (async () => true)),
+    writeFileIfChanged: vi.fn(
+      options.writeFileIfChanged ??
+        (async (path: string, content: string, mode?: number) => {
+          remoteFiles.set(path, { content, mode });
+          return true;
+        }),
+    ),
     reachability: vi.fn(async () => 'ok' as const),
+    copyFileTo: vi.fn(async (localPath: string, remotePath: string) => {
+      const { readFile } = await import('fs/promises');
+      remoteFiles.set(remotePath, { content: await readFile(localPath, 'utf8') });
+    }),
   };
 
   const backend = new SshTmuxBackend({
@@ -56,9 +76,17 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     },
     idGenerator: () => 'session-id',
     now: () => 1_000,
+    remoteCli: options.remoteCli,
   });
 
-  return { backend, remoteCalls, localCalls };
+  return { backend, remoteCalls, localCalls, remoteFiles, execCalls };
+}
+
+function fakeRemoteCli(): RemoteCliAccess & { forward: { ensure: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> } } {
+  return {
+    forward: { ensure: vi.fn(), stop: vi.fn() },
+    mintToken: (taskId) => `${taskId}.sig`,
+  };
 }
 
 function createOpts(): CreateSessionOpts {
@@ -168,6 +196,115 @@ describe('SshTmuxBackend.create', () => {
 
     // Assert
     expect(localCalls.some((c) => c[0] === 'new-session')).toBe(true);
+  });
+});
+
+describe('SshTmuxBackend remote CLI', () => {
+  const coldStart = {
+    remote: (args: string[]) => (args[0] === 'has-session' ? fail() : ok()),
+    local: (args: string[]) => (args[0] === 'has-session' ? fail() : ok()),
+  };
+
+  it('mirrors the CLI, forwards the socket and hands the card its token and hook', async () => {
+    // Arrange
+    const remoteCli = fakeRemoteCli();
+    const { backend, remoteFiles, execCalls } = makeHarness({ ...coldStart, remoteCli });
+
+    // Act
+    await backend.create(createOpts());
+
+    // Assert — the CLI is executable, and the forward lands where it looks.
+    const cli = remoteFiles.get('/home/coder/.agentboard/bin/agentboard');
+    expect(cli?.content).toMatch(/^#!\/usr\/bin\/env python3/);
+    expect(execCalls).toContainEqual(['chmod', '755', '/home/coder/.agentboard/bin/agentboard']);
+    expect(remoteCli.forward.ensure).toHaveBeenCalledWith('/home/coder/.agentboard/run/daemon.sock');
+
+    const env = [...remoteFiles.entries()].find(([path]) => path.endsWith('-env.sh'))?.[1].content ?? '';
+    expect(env).toContain("export AGENTBOARD_RPC_TOKEN=1234abcd.sig");
+    expect(env).toContain('export AGENTBOARD_REMOTE_SOCKET=/home/coder/.agentboard/run/daemon.sock');
+    expect(env).toContain('export AGENTBOARD_EXTRA_PATH=/home/coder/.agentboard/bin');
+    // The PR-report hook, through the mirrored CLI — ssh cards used to get none.
+    expect(env).toContain('/home/coder/.agentboard/bin/agentboard task report-pr 1234abcd');
+  });
+
+  it('leaves a card without remote CLI access exactly as before: no token, no hook', async () => {
+    // Arrange
+    const { backend, remoteFiles } = makeHarness(coldStart);
+
+    // Act
+    await backend.create(createOpts());
+
+    // Assert
+    expect(remoteFiles.has('/home/coder/.agentboard/bin/agentboard')).toBe(false);
+    const env = [...remoteFiles.entries()].find(([path]) => path.endsWith('-env.sh'))?.[1].content ?? '';
+    expect(env).not.toContain('AGENTBOARD_RPC_TOKEN');
+    expect(env).not.toContain('report-pr');
+  });
+
+  it('brings the forward back when a reconnect adopts a live remote session', async () => {
+    // Arrange — the remote session survived; the reset took the forward down.
+    const remoteCli = fakeRemoteCli();
+    const { backend } = makeHarness({ remote: () => ok('4242 claude\n'), remoteCli });
+
+    // Act
+    await backend.create(createOpts());
+
+    // Assert
+    expect(remoteCli.forward.ensure).toHaveBeenCalledWith('/home/coder/.agentboard/run/daemon.sock');
+  });
+
+  it('brings the forward back on attach — the reconnect path', async () => {
+    // Arrange — a reconnect resets the transport, which stops the forward;
+    // every reopen comes through attachMetadata.
+    const remoteCli = fakeRemoteCli();
+    const { backend } = makeHarness({ remoteCli });
+
+    // Act
+    await backend.attachMetadata(SESSION_NAME);
+
+    // Assert
+    expect(remoteCli.forward.ensure).toHaveBeenCalledWith('/home/coder/.agentboard/run/daemon.sock');
+  });
+
+  it('keeps the forward up from inspect once $HOME is known', async () => {
+    // Arrange
+    const remoteCli = fakeRemoteCli();
+    const { backend } = makeHarness({ remote: () => ok('4242 claude\n'), remoteCli });
+    await backend.attachMetadata(SESSION_NAME);
+    remoteCli.forward.ensure.mockClear();
+
+    // Act
+    await backend.inspect('ab_other_session_p');
+
+    // Assert
+    expect(remoteCli.forward.ensure).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the forward with the last remote session, so the workspace can auto-stop', async () => {
+    // Arrange
+    const remoteCli = fakeRemoteCli();
+    const { backend } = makeHarness({ remote: (args) => (args[0] === 'list-sessions' ? ok('') : ok()), remoteCli });
+
+    // Act
+    await backend.terminate(SESSION_NAME);
+
+    // Assert
+    expect(remoteCli.forward.stop).toHaveBeenCalled();
+  });
+
+  it('keeps the forward while another remote session lives', async () => {
+    // Arrange
+    const remoteCli = fakeRemoteCli();
+    const { backend } = makeHarness({
+      remote: (args) => (args[0] === 'list-sessions' ? ok('ab_other_task_9999_p\n') : ok()),
+      remoteCli,
+    });
+
+    // Act
+    await backend.terminate(SESSION_NAME);
+
+    // Assert
+    expect(remoteCli.forward.stop).not.toHaveBeenCalled();
   });
 });
 

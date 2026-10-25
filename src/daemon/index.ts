@@ -775,6 +775,7 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   };
 
   const server = startServer(opts.socketPath, services);
+  const remoteRpcServer = await startRemoteCliAccess(opts, services, transports);
   const webServer = startWebServer({
     services,
     socketPath: opts.socketPath,
@@ -795,6 +796,9 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
 
     webServer.close();
     webServer.closeAllConnections();
+    remoteRpcServer?.close();
+    // A child ssh outlives the daemon unless it is stopped.
+    transports.stopSocketForward();
     server.close(() => {
       void (async () => {
         try {
@@ -842,6 +846,45 @@ export async function runDaemon(opts: DaemonOpts): Promise<void> {
   await new Promise<void>((resolve) => {
     server.on('close', resolve);
   });
+}
+
+/**
+ * The remote-RPC socket, its forward to the remote host and the card tokens —
+ * everything a remote card's agentboard CLI needs (see remote-rpc.ts). Only
+ * with a remote host configured; a failure here costs remote cards their CLI,
+ * never the daemon.
+ */
+async function startRemoteCliAccess(
+  opts: DaemonOpts,
+  services: ServiceContainer,
+  transports: import('../services/transport/index.js').TransportRegistry,
+): Promise<net.Server | null> {
+  if (!transports.hasRemote) {
+    return null;
+  }
+  try {
+    // Loaded lazily like the rest of the daemon: it pulls in dispatch.
+    const { RemoteCallerTokens, remoteRpcSocketPath, startRemoteRpcServer } = await import(
+      './remote-rpc.js'
+    );
+    const tokens = RemoteCallerTokens.loadOrCreate(opts.stateDir);
+    const socketPath = remoteRpcSocketPath();
+    const server = startRemoteRpcServer({
+      socketPath,
+      mainSocketPath: opts.socketPath,
+      services,
+      tokens,
+    });
+    transports.enableSocketForward(socketPath, (message) =>
+      appendLog(opts.logFile, `[remote-cli] ${message}`),
+    );
+    services.session.mintRemoteCliToken = (taskId) => tokens.mint(taskId);
+    appendLog(opts.logFile, `[remote-cli] listening on ${socketPath}`);
+    return server;
+  } catch (error) {
+    appendLog(opts.logFile, `[remote-cli] disabled: ${(error as Error).message}`);
+    return null;
+  }
 }
 
 // --------------- ensureRunning ------------------------------

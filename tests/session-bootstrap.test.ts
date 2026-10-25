@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'fs';
 import { join } from 'path';
@@ -226,6 +227,48 @@ describe('session-bootstrap.sh settings file', () => {
     // Assert — subtask auto-linking reads this from the agent's environment.
     try {
       expect(stdout).toContain('TASK<aca5e792>');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('gives a remote card its CLI: token, socket, PATH, and a token file in the worktree', async () => {
+    // Act
+    const { stdout, dir } = await run(
+      {
+        taskId: 'aca5e792',
+        remoteCli: { token: 'aca5e792.sig', socketPath: '/home/coder/.agentboard/run/daemon.sock', binDir: '/opt/ab-bin' },
+      },
+      '#!/bin/bash\necho "TOKEN<$AGENTBOARD_RPC_TOKEN>"\necho "SOCK<$AGENTBOARD_REMOTE_SOCKET>"\n' +
+        'echo "PATH<${PATH%%:*}>"\necho "EXTRA<${AGENTBOARD_EXTRA_PATH:-}>"\n',
+    );
+
+    // Assert — the file is the fallback for a sandboxed Bash call that drops
+    // the environment, and it is what lets a call act as this card: owner-only.
+    try {
+      expect(stdout).toContain('TOKEN<aca5e792.sig>');
+      expect(stdout).toContain('SOCK</home/coder/.agentboard/run/daemon.sock>');
+      expect(stdout).toContain('PATH</opt/ab-bin>');
+      expect(stdout).toContain('EXTRA<>');
+      const tokenFile = join(dir, '.agentboard', 'rpc-token');
+      expect(readFileSync(tokenFile, 'utf8')).toBe('aca5e792.sig');
+      expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a local card without any remote-CLI settings', async () => {
+    // Act
+    const { stdout, dir } = await run(
+      { taskId: 'aca5e792' },
+      '#!/bin/bash\necho "TOKEN<${AGENTBOARD_RPC_TOKEN-unset}>"\n',
+    );
+
+    // Assert
+    try {
+      expect(stdout).toContain('TOKEN<unset>');
+      expect(existsSync(join(dir, '.agentboard', 'rpc-token'))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
