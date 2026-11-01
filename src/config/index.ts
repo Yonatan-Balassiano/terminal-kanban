@@ -230,9 +230,11 @@ export function defaultConfig(): AppConfig {
       { id: 'backlog', label: 'Backlog', sortOrder: 0 },
       { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
       { id: 'pr', label: 'PR', sortOrder: 2 },
+      // Being tested; moved in and out by hand (`agentboard task move`, /move-to-qa).
+      { id: 'qa', label: 'QA', sortOrder: 3 },
       // Everything merged, nothing shipped yet.
-      { id: 'shipping', label: 'Shipping', sortOrder: 3 },
-      { id: 'done', label: 'Done', sortOrder: 4 },
+      { id: 'shipping', label: 'Shipping', sortOrder: 4 },
+      { id: 'done', label: 'Done', sortOrder: 5 },
     ],
     pillars: [],
     repos: [],

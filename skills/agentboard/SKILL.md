@@ -36,10 +36,10 @@ If your card runs on the remote host (`☁ remote` on the board; `AGENTBOARD_RPC
 |---|---|
 | `ls`, `fleet`, `repos ls` (each with `--json`) | `attention`, `doctor`, `web`, `sync` |
 | `task create` (defaults to `--location remote`; `--location local` puts the subtask on the Mac) | `task restart`, `task delete`, `task redeliver-prompt` |
-| `task notify`, `task attach-pr`, `task report-pr` | `task orchestrator`, `set-branch`, `repos add/rm` |
+| `task notify`, `task attach-pr`, `task report-pr`, `task move` | `task orchestrator`, `set-branch`, `repos add/rm` |
 | `ping` — is the forwarded socket answering? | |
 
-The daemon decides who a call is from, by your card's token — not by anything you pass. So: a subtask you create is always yours (`--parent` may only name your card or one of its subtasks), you can only `--start`/`attach-pr` your own card or its subtasks, and every message you send is from you.
+The daemon decides who a call is from, by your card's token — not by anything you pass. So: a subtask you create is always yours (`--parent` may only name your card or one of its subtasks), you can only `--start`/`attach-pr`/`move` your own card or its subtasks, and every message you send is from you.
 
 - `Cannot reach the AgentBoard daemon` means the forward is down (laptop asleep, VPN, daemon stopped). Do not retry in a loop; tell the human to run `agentboard doctor` on the Mac (`remote:daemon-socket` line) or reconnect the card.
 - `No AgentBoard card token` means a shell with no `AGENTBOARD_RPC_TOKEN` outside your worktree, or a card started before this existed — `cd` into your worktree, or ask for `agentboard task restart <id>` on the Mac.
@@ -99,6 +99,7 @@ You rarely need to run this: a top-level card is marked automatically the moment
 - **PR notification, two ways.** When the subtask's PR opens, your card is flagged on the board (durable, always correct) *and* the subtask is told to `SendMessage` you directly (prompt, but skippable). Trust the board flag; treat the message as a courtesy.
 - **PRs you open are put on your card.** Your session runs a hook (installed at launch, claude only — local and remote cards alike) that reports every pull request a `gh pr create` opens straight to your card — in any registered repo, under any branch name. If you opened one some other way (the GitHub web UI, an MCP tool, `gh api`), or you are on codex, attach it yourself: `agentboard task attach-pr <your-task-id> <pr-number> --repo <ref>`. The board only searches GitHub for PRs it was not told about every ten minutes, so don't wait for it.
 - **Your card stays in `shipping` until every subtask is done.** Even once your own branches have shipped, the board holds your card in `shipping` — not `done` — while any subtask you spun off is still open. Nothing to do here — it resolves itself the moment the last subtask reaches `done`. Your session is not affected either way: reaching `done` does not close it.
+- **Columns move themselves, except QA.** Sync moves your card between `pr`, `shipping` and `done` as its PRs open, merge and ship. `qa` is the exception: a card there stays put, open PR or not, until someone moves it on. To move a card yourself, use `agentboard task move <task-id> <track>` (`backlog`, `in-progress`, `pr`, `qa`, `shipping`, `done`). To send a card and its Jira ticket to QA together, use the `/move-to-qa` skill.
 
 ## Talking to other sessions
 

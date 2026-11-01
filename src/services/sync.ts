@@ -773,6 +773,12 @@ export class SyncService {
     if (branches.length === 0 || task.trackId === 'done') {
       return 0;
     }
+    // QA is a person's call, not GitHub's: a card being tested routinely still
+    // has its PR open, and the rule below would pull it back to review on the
+    // very next poll. It leaves QA only when someone moves it on.
+    if (task.trackId === 'qa') {
+      return 0;
+    }
 
     // Any open pull request means the card is back in review — including one
     // that had reached shipping, since a newly opened branch makes "everything

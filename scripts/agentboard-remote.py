@@ -328,6 +328,19 @@ def cmd_task_attach_pr(args):
     print(f"Attached PR #{pr_number} from {repo['label']} to task {args.task}. Sync will fill in its state shortly.")
 
 
+def cmd_task_move(args):
+    board = authed_call("getBoard")
+    task = next((t for t in board["tasks"] if t["id"] == args.task), None)
+    if not task:
+        raise CliError(f'Unknown task "{args.task}". No card with that id exists.')
+    track = resolve_ref(board["tracks"], args.track, "track")
+    if task["trackId"] == track["id"]:
+        print(f"Task {args.task} is already in {track['label']}.")
+        return
+    authed_call("moveTask", {"id": args.task, "trackId": track["id"]})
+    print(f"Moved task {args.task} to {track['label']}.")
+
+
 def reported_prs(raw):
     """parsePrReportHookInput (pr-report.ts), line for line: only URLs the call printed."""
     try:
@@ -444,6 +457,11 @@ def build_parser():
     attach.add_argument("--repo")
     attach.add_argument("--base")
     attach.set_defaults(handler=cmd_task_attach_pr)
+
+    move = task.add_parser("move", help="Move this card or one of its subtasks to another column (backlog, in-progress, pr, qa, shipping, done)")
+    move.add_argument("task")
+    move.add_argument("track")
+    move.set_defaults(handler=cmd_task_move)
 
     report = task.add_parser("report-pr", help="Internal: the PostToolUse hook's PR report")
     report.add_argument("task")

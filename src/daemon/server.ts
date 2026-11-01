@@ -419,6 +419,18 @@ export async function dispatch(
 
       case 'moveTask': {
         const moveParams = p as unknown as MoveTaskParams;
+        // This is a public surface (CLI, remote cards), not just the TUI's own
+        // drag: an unknown id would silently do nothing, and an unknown track
+        // would park the card in a column no view renders.
+        if (!services.board.getTask(moveParams.id)) {
+          throw new Error(`Unknown task "${moveParams.id}". No card with that id exists.`);
+        }
+        const trackIds = services.view.getBoardSnapshot().tracks.map((t) => t.id);
+        if (!trackIds.includes(moveParams.trackId)) {
+          throw new Error(
+            `Unknown track "${moveParams.trackId}". Known tracks: ${trackIds.join(', ')}`,
+          );
+        }
         // Done is a column like any other: moving a card there leaves its
         // sessions and worktrees alone.
         services.board.moveTask(moveParams);

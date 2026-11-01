@@ -32,6 +32,7 @@ function makeServices() {
     dbPath: '/db',
     board: {
       getTask: (id: string) => created[id] ?? board.getTask(id),
+      moveTask: vi.fn(),
       createTask: vi.fn((params: Record<string, unknown>) => {
         const task = {
           id: 'new1',
@@ -52,7 +53,11 @@ function makeServices() {
           { id: 'other', title: 'Other', trackId: 'backlog', prState: 'none', ciState: 'none', kind: 'repo', repoId: 'r1', branches: [] },
         ],
         repos: [{ id: 'r1', label: 'kanban', remotePath: '/home/coder/kanban', githubOwner: 'acme', githubRepo: 'kanban' }],
-        tracks: [{ id: 'backlog' }, { id: 'in-progress' }],
+        tracks: [
+          { id: 'backlog', label: 'Backlog' },
+          { id: 'in-progress', label: 'In Progress' },
+          { id: 'qa', label: 'QA' },
+        ],
         pillars: [],
       }),
     },
@@ -126,6 +131,15 @@ describe('restrictRemoteRequest', () => {
     expect(() =>
       restrictRemoteRequest({ id: '1', method: 'addTaskBranch', params: { taskId: 'other', prNumber: 1 } }, 'parent', board),
     ).toThrow();
+  });
+
+  it('moves only the caller and its subtasks', () => {
+    expect(() =>
+      restrictRemoteRequest({ id: '1', method: 'moveTask', params: { id: 'child', trackId: 'qa' } }, 'parent', board),
+    ).not.toThrow();
+    expect(() =>
+      restrictRemoteRequest({ id: '1', method: 'moveTask', params: { id: 'other', trackId: 'qa' } }, 'parent', board),
+    ).toThrow(/only move itself or its own subtasks/);
   });
 });
 
@@ -237,6 +251,19 @@ describe('the remote CLI against a real remote socket', () => {
     expect(services.session.notifyTaskSession).toHaveBeenCalledWith('other', 'hello', undefined, {
       fromTaskId: 'parent',
     });
+  });
+
+  it('moves its own card to QA by the column label', async () => {
+    const { stdout } = await cli(['task', 'move', 'parent', 'QA'], { AGENTBOARD_RPC_TOKEN: tokens.mint('parent') });
+    expect(services.board.moveTask).toHaveBeenCalledWith({ id: 'parent', trackId: 'qa' });
+    expect(stdout).toContain('Moved task parent to QA.');
+  });
+
+  it('cannot move another card', async () => {
+    await expect(
+      cli(['task', 'move', 'other', 'qa'], { AGENTBOARD_RPC_TOKEN: tokens.mint('parent') }),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining('only move itself or its own subtasks') });
+    expect(services.board.moveTask).not.toHaveBeenCalled();
   });
 
   it('fails clearly with no token', async () => {

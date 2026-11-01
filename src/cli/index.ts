@@ -1245,6 +1245,40 @@ export function buildCli(): Command {
     });
 
   task
+    .command('move <task> <track>')
+    .description(
+      "Move a card to another column (backlog, in-progress, pr, qa, shipping, done). Sync moves cards between pr, shipping and done on its own; qa is the one it never moves a card into or out of",
+    )
+    .action(async (taskId: string, trackArg: string) => {
+      try {
+        const paths = configPaths();
+        await ensureRunning(daemonOpts(paths));
+        const rpc = await createRPCClient(paths.socketPath);
+
+        try {
+          const board = await rpc.call<import('../types/index.js').BoardSnapshot>('getBoard');
+          const card = board.tasks.find((t) => t.id === taskId);
+          if (!card) {
+            throw new Error(`Unknown task "${taskId}". No card with that id exists.`);
+          }
+          const track = resolveRef(board.tracks, trackArg, 'track');
+          if (card.trackId === track.id) {
+            console.log(`Task ${taskId} is already in ${track.label}.`);
+            return;
+          }
+
+          await rpc.call('moveTask', { id: taskId, trackId: track.id });
+          console.log(`Moved task ${taskId} to ${track.label}.`);
+        } finally {
+          rpc.disconnect();
+        }
+      } catch (err) {
+        console.error(`Error: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
+
+  task
     .command('restart <task>')
     .description(
       "Restart a card's session in place — keeps the card id, its branch, its worktree and its conversation",

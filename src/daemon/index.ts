@@ -289,13 +289,17 @@ export function warmOllamaOnStartup(
  * whose pull requests have all landed but whose artifacts have not reached
  * production is neither in review nor finished, and its worktrees must survive
  * until they are.
+ *
+ * `qa` is the one column only a person moves a card into or out of — the work
+ * is being tested, which nothing on GitHub can tell — see `evaluateTrackTransition`.
  */
 const BOARD_TRACKS = [
   { id: 'backlog', label: 'Backlog', sortOrder: 0 },
   { id: 'in-progress', label: 'In Progress', sortOrder: 1 },
   { id: 'pr', label: 'PR', sortOrder: 2 },
-  { id: 'shipping', label: 'Shipping', sortOrder: 3 },
-  { id: 'done', label: 'Done', sortOrder: 4 },
+  { id: 'qa', label: 'QA', sortOrder: 3 },
+  { id: 'shipping', label: 'Shipping', sortOrder: 4 },
+  { id: 'done', label: 'Done', sortOrder: 5 },
 ] as const;
 
 function normalizeBoardTracks(

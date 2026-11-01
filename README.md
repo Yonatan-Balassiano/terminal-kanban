@@ -203,11 +203,12 @@ agentboard task restart <id>                                                 # r
 agentboard task redeliver-prompt <id>                                        # re-send a card's opening brief (rarely needed)
 agentboard task attach-pr <id> <pr-number> [--repo <ref>] [--base <branch>]  # attach a PR auto-discovery missed
 agentboard task report-pr <id>                                               # internal: run by each session's hook when `gh pr create` opens a PR
+agentboard task move <id> <track>                                            # move a card to a column (backlog, in-progress, pr, qa, shipping, done)
 agentboard task orchestrator [<id>] [--off]                                  # pin a card to the top of its column in its own colour; its subtasks share it (automatic on a top-level card's first subtask)
 agentboard task delete <id> [--force] [--purge]                              # delete a card; archives uncommitted work unless --purge
 ```
 
-From inside a **remote** card, `agentboard` is a mirrored client (`~/.agentboard/bin/agentboard`, python3) that talks to the Mac daemon over a forwarded socket. It offers `ls`, `fleet`, `repos ls`, `task create`, `task notify`, `task attach-pr`, `task report-pr` and `ping`; the rest runs on the Mac.
+From inside a **remote** card, `agentboard` is a mirrored client (`~/.agentboard/bin/agentboard`, python3) that talks to the Mac daemon over a forwarded socket. It offers `ls`, `fleet`, `repos ls`, `task create`, `task notify`, `task attach-pr`, `task report-pr`, `task move` (its own card or subtasks) and `ping`; the rest runs on the Mac.
 
 ### Repository commands
 
