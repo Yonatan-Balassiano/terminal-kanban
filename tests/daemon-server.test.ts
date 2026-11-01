@@ -195,11 +195,51 @@ describe('daemon createTask dispatch', () => {
 });
 
 
+const MOVE_TRACKS = ['backlog', 'in-progress', 'pr', 'qa', 'shipping', 'done'].map((id) => ({ id }));
+
 describe('daemon moveTask dispatch', () => {
+  it('moves a card into QA', async () => {
+    const moveTask = vi.fn();
+    const response = await dispatch(
+      { id: 'req-move-qa', method: 'moveTask', params: { id: 'task-1', trackId: 'qa' } },
+      {
+        board: { moveTask, getTask: () => ({ id: 'task-1' }) },
+        view: { getBoardSnapshot: () => ({ tasks: [], tracks: MOVE_TRACKS }) },
+      } as never,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'qa' });
+    expect(response).toEqual({ id: 'req-move-qa', result: null });
+  });
+
+  it('refuses an unknown card or column instead of silently doing nothing', async () => {
+    const moveTask = vi.fn();
+    const services = {
+      board: { moveTask, getTask: (id: string) => (id === 'task-1' ? { id } : null) },
+      view: { getBoardSnapshot: () => ({ tasks: [], tracks: MOVE_TRACKS }) },
+    } as never;
+
+    const unknownCard = await dispatch(
+      { id: 'a', method: 'moveTask', params: { id: 'nope', trackId: 'qa' } },
+      services,
+      '/tmp/agentboard.sock',
+    );
+    const unknownTrack = await dispatch(
+      { id: 'b', method: 'moveTask', params: { id: 'task-1', trackId: 'testing' } },
+      services,
+      '/tmp/agentboard.sock',
+    );
+
+    expect(unknownCard.error?.message).toMatch(/Unknown task "nope"/);
+    expect(unknownTrack.error?.message).toMatch(/Unknown track "testing"/);
+    expect(moveTask).not.toHaveBeenCalled();
+  });
+
   it('leaves sessions and worktrees alone when a card is moved to the done track', async () => {
     const moveTask = vi.fn();
     const cleanupTaskResources = vi.fn().mockResolvedValue(undefined);
-    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [], tracks: MOVE_TRACKS });
 
     const response = await dispatch(
       {
@@ -208,7 +248,7 @@ describe('daemon moveTask dispatch', () => {
         params: { id: 'task-1', trackId: 'done' },
       },
       {
-        board: { moveTask },
+        board: { moveTask, getTask: () => ({ id: 'task-1' }) },
         taskLifecycle: { cleanupTaskResources },
         view: { getBoardSnapshot },
       } as never,
@@ -223,7 +263,7 @@ describe('daemon moveTask dispatch', () => {
   it('does not clean up the worktree when moving to a non-done track', async () => {
     const moveTask = vi.fn();
     const cleanupTaskResources = vi.fn().mockResolvedValue(undefined);
-    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [] });
+    const getBoardSnapshot = vi.fn().mockReturnValue({ tasks: [], tracks: MOVE_TRACKS });
 
     const response = await dispatch(
       {
@@ -232,7 +272,7 @@ describe('daemon moveTask dispatch', () => {
         params: { id: 'task-1', trackId: 'pr' },
       },
       {
-        board: { moveTask },
+        board: { moveTask, getTask: () => ({ id: 'task-1' }) },
         taskLifecycle: { cleanupTaskResources },
         view: { getBoardSnapshot },
       } as never,

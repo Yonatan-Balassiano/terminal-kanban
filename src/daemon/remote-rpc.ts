@@ -36,6 +36,7 @@ export const REMOTE_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
   'openSession',
   'notifyTaskSession',
   'addTaskBranch',
+  'moveTask',
 ]);
 
 /** Answered without a token, so `agentboard doctor` can test the path end to end. */
@@ -154,6 +155,9 @@ export function restrictRemoteRequest(
       break;
     case 'addTaskBranch':
       requireFamily(params['taskId'], 'attach pull requests to');
+      break;
+    case 'moveTask':
+      requireFamily(params['id'], 'move');
       break;
     default:
       break;

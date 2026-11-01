@@ -1743,6 +1743,84 @@ describe('SyncService', () => {
     expect(board.moveTask).toHaveBeenCalledWith({ id: 'task-1', trackId: 'pr' });
   });
 
+  it('keeps a card in QA while its pull request is still open', async () => {
+    // Arrange — a card being tested routinely still has its PR open, and the open-PR rule would pull it back to review on the next poll.
+    const { board } = makeBoard({ trackId: 'qa' });
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo({ prState: 'open' })),
+      createPR: vi.fn(),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+      getMergeInfo: vi.fn().mockResolvedValue(null),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(board.moveTask).not.toHaveBeenCalled();
+  });
+
+  it('keeps a card in QA after its pull request merges', async () => {
+    // Arrange — only a person knows testing is finished; merging does not say so.
+    const { board } = makeBoard({ trackId: 'qa' });
+    const github = {
+      findBranchPR: vi.fn().mockResolvedValue({ number: 42 }),
+      getPR: vi.fn().mockResolvedValue(makePrInfo({ prState: 'merged' })),
+      createPR: vi.fn(),
+      findPRsByHeadBranch: vi.fn().mockResolvedValue([]),
+      getMergeInfo: vi.fn().mockResolvedValue({ sha: 'abc123', mergedAt: '2026-10-20T10:00:00Z' }),
+    };
+    const git = {
+      defaultBranch: vi.fn().mockResolvedValue('main'),
+      remoteBranchExists: vi.fn().mockResolvedValue(true),
+      getWorkspaceStatus: vi.fn().mockResolvedValue({
+        branch: 'ab/task-1',
+        gitState: 'clean',
+        aheadCount: 0,
+        behindCount: 0,
+        hasUntracked: false,
+        hasConflicts: false,
+      }),
+    };
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(makeRepoRow()),
+        all: vi.fn().mockReturnValue([]),
+        run: vi.fn(),
+      }),
+    };
+
+    const sync = new SyncService(board as never, github as never, git as never, db as never);
+
+    // Act
+    await sync.trigger();
+
+    // Assert
+    expect(board.moveTask).not.toHaveBeenCalled();
+  });
+
   it('leaves a card that is already done alone', async () => {
     // Arrange — done is a decision, and re-syncing must never undo it.
     const { board } = makeBoard({ trackId: 'done' });
