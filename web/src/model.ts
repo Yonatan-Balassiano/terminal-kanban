@@ -120,12 +120,22 @@ export interface CardNode {
   state: CardState;
   shipped: boolean;
   children: CardNode[];
+  /** How many cards are under this one, counted before the status filter prunes any. */
+  subtaskCount: number;
+  /** Kept only to place a matching subtask in its family; is not itself in a selected column. */
+  context?: boolean;
 }
 
 export interface BoardFilter {
   query: string;
   repoId: string;
   showShipped: boolean;
+  /**
+   * Board columns (track ids) to show; empty or missing means every column.
+   * Picking columns is explicit, so it also overrides hiding shipped cards —
+   * selecting Done has to show what is in Done.
+   */
+  trackIds?: string[];
 }
 
 /**
@@ -187,6 +197,7 @@ export function buildCardTree(
       state,
       shipped: isShipped(task, state, releases.get(task.id)),
       children: [],
+      subtaskCount: 0,
     });
   }
 
@@ -208,10 +219,31 @@ export function buildCardTree(
   // Shipped families go last, so "Show shipped" adds history below the live work — unless pinned.
   roots.sort((a, b) => comparePinned(a, b) || Number(!familyActive(a)) - Number(!familyActive(b)));
 
+  const countUnder = (node: CardNode): number =>
+    (node.subtaskCount = node.children.reduce((sum, child) => sum + 1 + countUnder(child), 0));
+  roots.forEach(countUnder);
+
+  const trackIds = filter.trackIds ?? [];
+  const byColumn = trackIds.length > 0;
+  const pruned = byColumn ? roots.flatMap((root) => pruneByTrack(root, new Set(trackIds))) : roots;
+
   const anyMatches = (node: CardNode): boolean =>
     nodeMatches(node, filter, repoLabel) || node.children.some(anyMatches);
 
-  return roots.filter((root) => (filter.showShipped || familyActive(root)) && anyMatches(root));
+  return pruned.filter((root) => (byColumn || filter.showShipped || familyActive(root)) && anyMatches(root));
+}
+
+/**
+ * Unlike the repo and search filters, which keep a family whole, the column
+ * filter cuts it down: an orchestrator in Shipping with one subtask in QA
+ * shows that one under QA. A parent in another column is kept, marked
+ * `context`, only so the match still sits under it.
+ */
+function pruneByTrack(node: CardNode, trackIds: ReadonlySet<string>): CardNode[] {
+  const children = node.children.flatMap((child) => pruneByTrack(child, trackIds));
+  const matches = trackIds.has(node.task.trackId);
+  if (!matches && children.length === 0) return [];
+  return [{ ...node, children, context: !matches }];
 }
 
 export function countFamily(node: CardNode): number {

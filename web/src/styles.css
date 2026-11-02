@@ -161,6 +161,8 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
   padding: 0 6px; border-radius: 4px;
 }
 .card.shipped { opacity: .62; }
+/* A parent shown only so a matching subtask keeps its place under it. */
+.card.context { opacity: .5; }
 
 .twisty, .twisty-spacer { flex: none; width: 24px; }
 .twisty { border: none; background: none; cursor: pointer; color: var(--muted); padding: 0; font-size: 15px; line-height: 1; }
@@ -222,6 +224,18 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 }
 .chip-idle { color: var(--s-idle); background: var(--s-idle-soft); }
 .chip-stopped { color: var(--s-stopped); }
+
+/* ---------- column filter: one toggle per board track */
+.track-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.track-toggle {
+  height: 26px; padding: 0 9px; border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+}
+.track-toggle:hover { color: var(--fg); }
+.track-toggle.on { color: var(--fg); border-color: var(--accent); background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent); }
+.track-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.track-toggle .count { opacity: .6; font-variant-numeric: tabular-nums; }
+.link-button { border: none; background: none; padding: 0 4px; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline; }
 
 .chip-pr { color: var(--surface); }
 .pr-no-pr { color: var(--muted); background: var(--surface-2); }

@@ -284,3 +284,57 @@ describe('familyColours', () => {
     expect(colours.size).toBe(0);
   });
 });
+
+describe('buildCardTree column filter', () => {
+  it('shows every column when none is selected', () => {
+    const tree = buildCardTree(
+      board([task('a', { trackId: 'pr' }), task('b', { trackId: 'qa' })]),
+      [],
+      new Map(),
+      { ...noFilter, trackIds: [] },
+    );
+    expect(tree.map((node) => node.task.id).sort()).toEqual(['a', 'b']);
+  });
+
+  it('keeps only cards in a selected column', () => {
+    const tree = buildCardTree(
+      board([task('pr', { trackId: 'pr' }), task('qa', { trackId: 'qa' }), task('backlog', { trackId: 'backlog' })]),
+      [],
+      new Map(),
+      { ...noFilter, trackIds: ['qa', 'backlog'] },
+    );
+    expect(tree.map((node) => node.task.id).sort()).toEqual(['backlog', 'qa']);
+  });
+
+  it('shows shipped cards in a selected column even with Show shipped off', () => {
+    const done = task('done', {
+      trackId: 'done',
+      sessionId: 's1',
+      branches: [branch({ prNumber: 9, prState: 'closed' })],
+    });
+    const hidden = buildCardTree(board([done]), [], new Map(), noFilter);
+    expect(hidden).toHaveLength(0);
+    const shown = buildCardTree(board([done]), [], new Map(), { ...noFilter, trackIds: ['done'] });
+    expect(shown.map((node) => node.task.id)).toEqual(['done']);
+  });
+
+  it('cuts a family down to the matching subtask and keeps its parent as context', () => {
+    const tree = buildCardTree(
+      board([
+        task('p', { trackId: 'shipping' }),
+        task('a', { parentTaskId: 'p', trackId: 'qa' }),
+        task('b', { parentTaskId: 'p', trackId: 'done' }),
+      ]),
+      [],
+      new Map(),
+      { ...noFilter, trackIds: ['qa'] },
+    );
+    expect(tree).toHaveLength(1);
+    expect(tree[0].task.id).toBe('p');
+    expect(tree[0].context).toBe(true);
+    expect(tree[0].children.map((node) => node.task.id)).toEqual(['a']);
+    expect(tree[0].children[0].context).toBe(false);
+    // The subtask count still describes the whole family, not what is left of it.
+    expect(tree[0].subtaskCount).toBe(2);
+  });
+});
