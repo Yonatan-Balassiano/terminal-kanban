@@ -74,9 +74,13 @@ function writeStored(key: string, value: unknown): void {
 
 export function App() {
   const { board, fleet, releases, connection, signedIn, error } = useBoard();
-  const [filter, setFilter] = useState<BoardFilter>(() =>
-    readStored('agentboard.filter', { query: '', repoId: '', showShipped: false }),
-  );
+  const [filter, setFilter] = useState<BoardFilter>(() => ({
+    query: '',
+    repoId: '',
+    showShipped: false,
+    trackIds: [],
+    ...readStored<Partial<BoardFilter>>('agentboard.filter', {}),
+  }));
   // A #card/<id> link wins over the remembered selection: it is where the user asked to go.
   const [selectedId, setSelectedId] = useState<string | null>(
     () => cardFromHash(location.hash) ?? readStored('agentboard.selected', null),
@@ -114,10 +118,28 @@ export function App() {
   );
   const families = useMemo(() => familyColours(board?.tasks ?? []), [board]);
   const hiddenShipped = useMemo(() => {
-    if (!board || filter.showShipped) return 0;
+    if (!board || filter.showShipped || (filter.trackIds?.length ?? 0) > 0) return 0;
     const all = buildCardTree(board, fleet, releases, { ...filter, showShipped: true });
     return all.reduce((sum, node) => sum + countFamily(node), 0) - tree.reduce((sum, node) => sum + countFamily(node), 0);
   }, [board, fleet, releases, filter, tree]);
+
+  const tracks = useMemo(() => [...(board?.tracks ?? [])].sort((a, b) => a.sortOrder - b.sortOrder), [board]);
+  // Cards per column under the repo and search filters, shipped included — what selecting a column would show.
+  const trackCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    if (!board) return counts;
+    const all = buildCardTree(board, fleet, releases, { ...filter, trackIds: [], showShipped: true });
+    for (const { node } of visibleCards(all, new Set())) {
+      counts.set(node.task.trackId, (counts.get(node.task.trackId) ?? 0) + 1);
+    }
+    return counts;
+  }, [board, fleet, releases, filter]);
+  const selectedTracks = filter.trackIds ?? [];
+  const toggleTrack = (trackId: string) =>
+    setFilter((f) => {
+      const current = f.trackIds ?? [];
+      return { ...f, trackIds: current.includes(trackId) ? current.filter((id) => id !== trackId) : [...current, trackId] };
+    });
 
   const selected = board?.tasks.find((task) => task.id === selectedId) ?? null;
 
@@ -359,7 +381,10 @@ export function App() {
           return;
         case 'needs-you': {
           if (!board) return;
-          const all = visibleCards(buildCardTree(board, fleet, releases, { ...filter, showShipped: true }), new Set());
+          const all = visibleCards(
+            buildCardTree(board, fleet, releases, { ...filter, showShipped: true, trackIds: [] }),
+            new Set(),
+          );
           const target = all.find((card) => card.node.state === 'needs-you');
           if (!target) {
             setToast({ kind: 'ok', text: 'No card needs you right now' });
@@ -477,14 +502,39 @@ export function App() {
               </option>
             ))}
           </select>
+          <div className="track-filter" role="group" aria-label="Show cards by column">
+            {tracks.map((track) => {
+              const on = selectedTracks.includes(track.id);
+              return (
+                <button
+                  key={track.id}
+                  className={`track-toggle${on ? ' on' : ''}`}
+                  aria-pressed={on}
+                  title={on ? `Stop filtering on ${track.label}` : `Show only ${track.label} (with any others selected)`}
+                  onClick={() => toggleTrack(track.id)}
+                >
+                  {track.label} <span className="count">{trackCounts.get(track.id) ?? 0}</span>
+                </button>
+              );
+            })}
+            {selectedTracks.length > 0 && (
+              <button className="link-button" onClick={() => setFilter((f) => ({ ...f, trackIds: [] }))}>
+                All
+              </button>
+            )}
+          </div>
           <label className="toggle">
             <input
               id="show-shipped"
               type="checkbox"
-              checked={filter.showShipped}
+              checked={filter.showShipped || selectedTracks.length > 0}
+              disabled={selectedTracks.length > 0}
               onChange={(event) => setFilter({ ...filter, showShipped: event.target.checked })}
             />
-            Show shipped{hiddenShipped > 0 ? ` (${hiddenShipped})` : ''}
+            <span title={selectedTracks.length > 0 ? 'Picking columns shows their shipped cards too' : undefined}>
+              Show shipped
+            </span>
+            {hiddenShipped > 0 ? ` (${hiddenShipped})` : ''}
           </label>
           <button className="primary" onClick={() => setDialog({ kind: 'new' })} title="New card (n)">
             + New card
@@ -502,7 +552,7 @@ export function App() {
           {!board && <p className="muted pad">Loading board…</p>}
           {board && tree.length === 0 && (
             <p className="muted pad">
-              {filter.query || filter.repoId ? 'No cards match these filters.' : 'No active cards.'}
+              {filter.query || filter.repoId || selectedTracks.length > 0 ? 'No cards match these filters.' : 'No active cards.'}
             </p>
           )}
           <ul className="tree-list" role="tree">
@@ -712,6 +762,7 @@ function CardBranch(props: CardBranchProps) {
           task.pinnedAt ? 'pinned' : '',
           task.location === 'remote' ? 'remote' : '',
           node.shipped ? 'shipped' : '',
+          node.context ? 'context' : '',
           depth === 0 ? 'root' : 'child',
         ].join(' ')}
         style={familyStyle}
@@ -744,7 +795,7 @@ function CardBranch(props: CardBranchProps) {
             ))}
             {hasChildren && (
               <span className="muted">
-                {countFamily(node) - 1} subtask{countFamily(node) - 1 === 1 ? '' : 's'}
+                {node.subtaskCount} subtask{node.subtaskCount === 1 ? '' : 's'}
               </span>
             )}
             <span className="muted push">{relativeTime(task.updatedAt)}</span>
