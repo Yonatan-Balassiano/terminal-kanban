@@ -43,6 +43,7 @@ export const WEB_RPC_METHODS: ReadonlySet<RPCMethod> = new Set<RPCMethod>([
   'getAttentionItems',
   'getReleaseStatus',
   'getConversation',
+  'getTaskArtifacts',
   // sessions
   'focusTask',
   'notifyTaskSession',

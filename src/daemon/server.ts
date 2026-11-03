@@ -53,6 +53,7 @@ import type {
   TaskRecord,
   FocusTaskParams,
   GetConversationParams,
+  GetTaskArtifactsParams,
   FocusTaskResult,
 } from '../types/index.js';
 import type { ServiceContainer } from './index.js';
@@ -1083,6 +1084,14 @@ export async function dispatch(
         const params = p as unknown as GetConversationParams;
         const limit = Math.min(Math.max(Number(params.limit) || 30, 1), 200);
         return { id: req.id, result: services.session.getConversation(params.taskId, limit) };
+      }
+
+      case 'getTaskArtifacts': {
+        const params = p as unknown as GetTaskArtifactsParams;
+        return {
+          id: req.id,
+          result: services.session.getTaskArtifacts(params.taskId, params.includeSubtasks !== false),
+        };
       }
 
       case 'subscribe':

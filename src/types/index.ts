@@ -646,6 +646,7 @@ export type RPCMethod =
   | 'commentTaskBranchPR'
   | 'focusTask'
   | 'getConversation'
+  | 'getTaskArtifacts'
   | 'subscribe';
 
 // --------------- RPC param/result types ---------------------
@@ -1105,6 +1106,33 @@ export interface GetConversationResult {
   updatedAt?: number;
   /** Why there is nothing to show, when there is nothing. */
   unavailable?: 'no-session' | 'no-transcript' | 'remote';
+}
+
+export interface GetTaskArtifactsParams {
+  taskId: string;
+  /** Also every card below it, at any depth. Defaults to true. */
+  includeSubtasks?: boolean;
+}
+
+/** A claude.ai Artifact a card's session published, read from its transcripts. */
+export interface TaskArtifact {
+  url: string;
+  title?: string;
+  icon?: string;
+  description?: string;
+  /** Its latest version number seen. */
+  versions: number;
+  firstPublishedAt?: number;
+  lastPublishedAt?: number;
+  /** The card whose session published it — the asked-for card or one of its subtasks. */
+  taskId: string;
+}
+
+export interface GetTaskArtifactsResult {
+  /** Newest publish first. */
+  artifacts: TaskArtifact[];
+  /** Cards in scope whose transcripts live on a remote host, so are not read. */
+  remoteTaskIds: string[];
 }
 
 export interface FocusTaskParams {

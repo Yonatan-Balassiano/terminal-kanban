@@ -951,6 +951,10 @@ func renderTaskCardWithWidth(m *Model, task TaskRecord, isSelected, isActiveSess
 			lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(taskBranchGlyphStrip(task), contentWidth)),
 		)
 	}
+	// Mirrored in taskCardHeightForWidth: a parent's summary of its subtasks' PRs.
+	if rollup := m.subtaskPRRollupLine(task); rollup != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(rollup, contentWidth)))
+	}
 	for _, dl := range descriptionLines {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(dl))
 	}
@@ -1253,29 +1257,123 @@ func detailPaneLines(m *Model, task TaskRecord, contentHeight, contentWidth int)
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(toneColor(releaseStageTone(task.Release)))).
 		Render(truncateText(releaseNote, contentWidth)))
 
-	if len(branches) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
-			Render(truncateText("This card has no tracked branch yet.", contentWidth)))
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted))
+	rows := m.detailRows(task)
+	artifactsNote := claudeArtifactsNote(m, task)
+	if len(task.Branches) == 0 {
+		lines = append(lines, muted.Render(truncateText("This card has no tracked branch yet.", contentWidth)))
+	}
+	if len(rows) == 0 {
+		if artifactsNote != "" {
+			lines = append(lines, muted.Render(truncateText(artifactsNote, contentWidth)))
+		}
 		return lines
 	}
 
-	// Two header lines, a footer hint, and two rows per branch.
-	visibleRows := max(1, (contentHeight-3)/2)
-	selected := clamp(m.detailBranchIndex, 0, len(branches)-1)
-	windowStart := commandWindowStart(selected, len(branches), visibleRows)
-	for offset := windowStart; offset < min(len(branches), windowStart+visibleRows); offset++ {
-		lines = append(lines, detailBranchRowLines(m, task, branches[offset], offset == selected, contentWidth)...)
+	// Header lines, a footer hint, the Claude artifacts heading (and its note)
+	// when there is one, and two lines per row.
+	firstArtifact := len(rows)
+	for index, row := range rows {
+		if row.Kind == detailRowClaudeArtifact {
+			firstArtifact = index
+			break
+		}
+	}
+	reserved := len(lines) + 1
+	if firstArtifact < len(rows) {
+		reserved++
+	}
+	if artifactsNote != "" {
+		reserved++
+	}
+	visibleRows := max(1, (contentHeight-reserved)/2)
+	selected := clamp(m.detailBranchIndex, 0, len(rows)-1)
+	windowStart := commandWindowStart(selected, len(rows), visibleRows)
+	for offset := windowStart; offset < min(len(rows), windowStart+visibleRows); offset++ {
+		if offset == firstArtifact {
+			lines = append(lines, badge(fmt.Sprintf("CLAUDE ARTIFACTS %d", len(rows)-firstArtifact), "accent", "", false))
+		}
+		row := rows[offset]
+		if row.Kind == detailRowClaudeArtifact {
+			lines = append(lines, detailClaudeArtifactRowLines(m, task, row.Artifact, offset == selected, contentWidth)...)
+		} else {
+			lines = append(lines, detailBranchRowLines(m, task, row.Branch, offset == selected, contentWidth)...)
+		}
+	}
+	if artifactsNote != "" {
+		lines = append(lines, muted.Render(truncateText(artifactsNote, contentWidth)))
 	}
 
 	lines = append(lines, joinSpaceBetween(
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(fmt.Sprintf("%d/%d", selected+1, len(branches))),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render("↑↓ branch  E actions  Esc close"),
+		muted.Render(fmt.Sprintf("%d/%d", selected+1, len(rows))),
+		muted.Render("↑↓ select  o open  E actions  Esc close"),
 		contentWidth,
 	))
 	return lines
 }
 
+// claudeArtifactsNote says why the Claude artifacts list may be incomplete:
+// still loading, failed, or covering cards whose transcripts are on a remote
+// host. Empty when there is nothing to qualify.
+func claudeArtifactsNote(m *Model, task TaskRecord) string {
+	state := m.claudeArtifactsFor(task.ID)
+	switch {
+	case state.Err != nil:
+		return "Claude artifacts: " + state.Err.Error()
+	case state.LoadedAt.IsZero() && state.Loading:
+		return "Loading Claude artifacts…"
+	case len(state.Result.RemoteTaskIDs) > 0:
+		return fmt.Sprintf("%d card(s) run remotely; their Claude artifacts are not listed.", len(state.Result.RemoteTaskIDs))
+	}
+	return ""
+}
+
+// detailClaudeArtifactRowLines is one Claude artifact: its title (and version
+// once republished), then when it was published and by which subtask.
+func detailClaudeArtifactRowLines(m *Model, task TaskRecord, artifact ClaudeArtifact, selected bool, contentWidth int) []string {
+	marker := " "
+	titleColor := uiChrome.Text
+	if selected {
+		marker = "▸"
+		titleColor = uiChrome.Accent
+	}
+	title := artifact.Title
+	if title == "" {
+		title = artifact.URL
+	}
+	version := ""
+	if artifact.Versions > 1 {
+		version = fmt.Sprintf("v%d", artifact.Versions)
+	}
+	head := joinSpaceBetween(
+		lipgloss.NewStyle().Foreground(lipgloss.Color(titleColor)).Render(truncateText(marker+" ◆ "+title, max(1, contentWidth-6))),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(version),
+		contentWidth,
+	)
+	parts := []string{}
+	if artifact.LastPublishedAt > 0 {
+		parts = append(parts, formatRelativeAge(artifact.LastPublishedAt))
+	}
+	if artifact.TaskID != "" && artifact.TaskID != task.ID {
+		if owner := m.taskByID(artifact.TaskID); owner != nil {
+			parts = append(parts, "↳ "+owner.Title)
+		}
+	} else if artifact.Description != "" {
+		parts = append(parts, artifact.Description)
+	}
+	detail := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).
+		Render(truncateText("   "+strings.Join(parts, " · "), contentWidth))
+	return []string{head, detail}
+}
+
 func detailBranchRowLines(m *Model, task TaskRecord, branch TaskBranchRecord, selected bool, contentWidth int) []string {
+	// A subtask's PR is described by its own card: its release, its title.
+	owner := task
+	if branch.TaskID != "" && branch.TaskID != task.ID {
+		if found := m.taskByID(branch.TaskID); found != nil {
+			owner = *found
+		}
+	}
 	marker := " "
 	titleColor := uiChrome.Text
 	if selected {
@@ -1287,12 +1385,14 @@ func detailBranchRowLines(m *Model, task TaskRecord, branch TaskBranchRecord, se
 		lipgloss.NewStyle().Foreground(lipgloss.Color(titleColor)).Render(
 			truncateText(marker+" "+m.taskBranchRepoLabel(branch)+" ⎇ "+compactBranchLabel(branch.BranchName), max(1, contentWidth-16)),
 		),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(taskBranchGlyph(branch, task.Release)),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(taskBranchGlyph(branch, owner.Release)),
 		contentWidth,
 	)
-	detail := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(
-		truncateText("   "+taskBranchPRLabel(branch)+"  "+taskBranchChecksLabel(branch), contentWidth),
-	)
+	detailText := "   " + taskBranchPRLabel(branch) + "  " + taskBranchChecksLabel(branch)
+	if owner.ID != task.ID {
+		detailText += "  ↳ " + owner.Title
+	}
+	detail := lipgloss.NewStyle().Foreground(lipgloss.Color(uiChrome.Muted)).Render(truncateText(detailText, contentWidth))
 	return []string{head, detail}
 }
 
@@ -1764,6 +1864,9 @@ func taskCardHeightForWidth(m *Model, task TaskRecord, contentWidth int, compact
 	// visibleWindow's scrolling silently, so the two must change together.
 	if hasMultipleBranches(task) {
 		height += 2
+	}
+	if m.subtaskPRRollupLine(task) != "" {
+		height++
 	}
 	// Counted, not tested for emptiness: a description wraps to two lines at this
 	// width, and assuming one silently desynchronised the scroll window.
@@ -2696,7 +2799,7 @@ func kbdHints(focus AppFocus) string {
 		// pane and picker are the only way to act on a card with several PRs.
 		return "e PRs pane  E PR actions  ↑↓←→ move  Enter shell  n new  m merge  c PR  C retry PR  j comment  a/A ai chat  B dual shell  f filter  O overview  ; artifact  G roll out  T track  1-9 repo  ? help"
 	case FocusDetail:
-		return "↑↓ branch  ←→ card  E PR actions  e/Esc close"
+		return "↑↓ PR/Claude artifact  o open  v checks  ←→ card  E PR actions  e/Esc close"
 	case FocusTerminal:
 		return "Shift+Tab pane  Shift+←/→ resize  Tab+h/j/k/l switch shell  PgUp/PgDn scroll  Ctrl+H board  Esc board"
 	case FocusModal:

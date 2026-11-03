@@ -1180,9 +1180,11 @@ func (m *Model) branchPRListBranches() []TaskBranchRecord {
 	return m.branchPRListBranchesFor(m.taskByID(m.branchPRListModal.TaskID))
 }
 
-// branchPRListBranchesFor is every PR-bearing branch the picker shows for task:
-// its own, followed by every direct subtask's — so reviewing a card's PRs
-// surfaces the work it spawned without having to open each subtask separately.
+// branchPRListBranchesFor is every branch the picker (and the PR pane) shows for
+// task: all of its own, followed by every PR its subtasks opened, at any depth
+// — so reviewing a card's PRs surfaces the work it spawned without having to
+// open each subtask separately. A subtask's bare branches are left out: they
+// are its own business until they carry a PR.
 // A row's owning task is read off Branch.TaskID, not assumed to be task.ID, so
 // mergeTaskBranchPRCmd/commentTaskBranchPRCmd/openBranchPRCmd keep working
 // unchanged on a subtask's row.
@@ -1191,12 +1193,7 @@ func (m *Model) branchPRListBranchesFor(task *TaskRecord) []TaskBranchRecord {
 		return nil
 	}
 	branches := append([]TaskBranchRecord{}, task.Branches...)
-	for _, other := range m.tasks {
-		if other.ParentTaskID == task.ID {
-			branches = append(branches, other.Branches...)
-		}
-	}
-	return branches
+	return append(branches, m.subtaskPRBranches(*task)...)
 }
 
 func (m *Model) taskBranchByID(taskID, branchID string) *TaskBranchRecord {

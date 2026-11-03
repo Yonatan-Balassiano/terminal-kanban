@@ -364,6 +364,202 @@ export function readTranscriptTail(
   return { messages: messages.slice(-limit), updatedAt };
 }
 
+/** A page a session published with Claude Code's Artifact tool. */
+export interface TranscriptArtifact {
+  /** The page's claude.ai link — the same link for every version. */
+  url: string;
+  title?: string;
+  icon?: string;
+  /** The one-line description passed on publish, when there was one. */
+  description?: string;
+  /** Its latest version number seen (1 when published once). */
+  versions: number;
+  /** Epoch ms of the first and latest publish seen. */
+  firstPublishedAt?: number;
+  lastPublishedAt?: number;
+}
+
+/**
+ * What one conversation file has yielded so far. A transcript only ever grows,
+ * so a scan picks up from `offset` instead of re-reading tens of MB on every
+ * poll; a file that shrank was replaced and is read again from the start.
+ */
+interface ArtifactScan {
+  offset: number;
+  artifacts: Map<string, TranscriptArtifact>;
+  /** Publish inputs not yet matched to a result, by tool_use id. */
+  pending: Map<string, Record<string, unknown>>;
+  /** Forks this conversation continued in (`continued-in` records). */
+  continuedIn: Set<string>;
+}
+
+const artifactScans = new Map<string, ArtifactScan>();
+const ARTIFACT_SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function scanArtifactLine(line: string, scan: ArtifactScan): void {
+  // Cheap filters first: almost no line in a transcript is one of these.
+  const isUse = line.includes('"name":"Artifact"') && line.includes('"type":"tool_use"');
+  const isResult = line.includes('"artifact_id"');
+  const isFork = line.includes(CONTINUED_IN_MARKER);
+  if (!isUse && !isResult && !isFork) return;
+  let record: {
+    timestamp?: unknown;
+    message?: { content?: unknown };
+    toolUseResult?: unknown;
+    continuedInSessionId?: unknown;
+  };
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (typeof record?.continuedInSessionId === 'string' && record.continuedInSessionId) {
+    scan.continuedIn.add(record.continuedInSessionId);
+  }
+  const content = Array.isArray(record?.message?.content) ? (record.message.content as unknown[]) : [];
+  let useId: string | undefined;
+  for (const raw of content) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const block = raw as { type?: unknown; id?: unknown; name?: unknown; input?: unknown; tool_use_id?: unknown };
+    if (block.type === 'tool_use' && block.name === 'Artifact' && typeof block.id === 'string') {
+      if (typeof block.input === 'object' && block.input !== null) {
+        scan.pending.set(block.id, block.input as Record<string, unknown>);
+      }
+    } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+      useId = block.tool_use_id;
+    }
+  }
+  // Only a publish's structured result carries both the link and the artifact's id;
+  // reads, listings and asset uploads do not, and Claude Code repeats some
+  // results in records with no structured result at all.
+  const result = record?.toolUseResult;
+  if (typeof result !== 'object' || result === null) return;
+  const fields = result as Record<string, unknown>;
+  const url = stringField(fields, 'url');
+  if (!url || !stringField(fields, 'artifact_id') || !/^https:\/\/claude\.ai\//.test(url)) return;
+  const input = useId ? scan.pending.get(useId) : undefined;
+  if (useId) scan.pending.delete(useId);
+  const at = typeof record.timestamp === 'string' ? Date.parse(record.timestamp) || undefined : undefined;
+  const existing = scan.artifacts.get(url);
+  // The artifact's own version number, not a count of publishes seen: a fork
+  // or a subagent's file can repeat a publish the main file already holds.
+  const seq = typeof fields['seq'] === 'number' ? fields['seq'] : (existing?.versions ?? 0) + 1;
+  scan.artifacts.set(url, {
+    url,
+    title: stringField(fields, 'title') ?? existing?.title,
+    icon: stringField(fields, 'icon') ?? existing?.icon,
+    description: (input && stringField(input, 'description')) ?? existing?.description,
+    versions: Math.max(seq, existing?.versions ?? 0),
+    firstPublishedAt: existing?.firstPublishedAt ?? at,
+    lastPublishedAt: at ?? existing?.lastPublishedAt,
+  });
+}
+
+/** Brings one file's scan up to date, reading only what was appended since the last call. */
+function scanArtifactFile(path: string): ArtifactScan | null {
+  let fd: number | undefined;
+  try {
+    const size = statSync(path).size;
+    let scan = artifactScans.get(path);
+    if (!scan || size < scan.offset) {
+      scan = { offset: 0, artifacts: new Map(), pending: new Map(), continuedIn: new Set() };
+      artifactScans.set(path, scan);
+    }
+    if (size === scan.offset) return scan;
+    fd = openSync(path, 'r');
+    let carry = '';
+    let position = scan.offset;
+    while (position < size) {
+      const buffer = Buffer.allocUnsafe(Math.min(ARTIFACT_SCAN_CHUNK_BYTES, size - position));
+      const read = readSync(fd, buffer, 0, buffer.length, position);
+      if (read <= 0) break;
+      position += read;
+      const text = carry + buffer.subarray(0, read).toString('utf8');
+      const lastNewline = text.lastIndexOf('\n');
+      if (lastNewline === -1) {
+        carry = text;
+        continue;
+      }
+      for (const line of text.slice(0, lastNewline).split('\n')) {
+        if (line) scanArtifactLine(line, scan);
+      }
+      carry = text.slice(lastNewline + 1);
+    }
+    // A record still being written stays unread until its newline lands.
+    scan.offset = position - Buffer.byteLength(carry, 'utf8');
+    return scan;
+  } catch {
+    artifactScans.delete(path);
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Nothing useful to do about a failed close.
+      }
+    }
+  }
+}
+
+/**
+ * Every page these conversations published with the Artifact tool, newest
+ * first, one entry per link however many times it was republished. Covers
+ * each conversation's own subagents (`<id>/subagents/*.jsonl`) and any fork
+ * Claude Code continued it in — unlike resuming, nothing published in an
+ * older part of the conversation should drop off the list.
+ */
+export function readTranscriptArtifacts(
+  agentSessionIds: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): TranscriptArtifact[] {
+  const merged = new Map<string, TranscriptArtifact>();
+  const queue = [...agentSessionIds];
+  const seen = new Set<string>();
+  while (queue.length > 0 && seen.size < agentSessionIds.length + MAX_CONTINUATION_HOPS) {
+    const id = queue.shift()!;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const path = findTranscriptPath(id, env);
+    if (!path) continue;
+    let files = [path];
+    try {
+      files = files.concat(globSync(join(path.slice(0, -'.jsonl'.length), 'subagents', '*.jsonl')));
+    } catch {
+      // No subagents directory is the usual case.
+    }
+    for (const file of files) {
+      const scan = scanArtifactFile(file);
+      if (!scan) continue;
+      scan.continuedIn.forEach((next) => queue.push(next));
+      for (const artifact of scan.artifacts.values()) {
+        const existing = merged.get(artifact.url);
+        merged.set(artifact.url, existing ? mergeArtifacts(existing, artifact) : { ...artifact });
+      }
+    }
+  }
+  return [...merged.values()].sort((a, b) => (b.lastPublishedAt ?? 0) - (a.lastPublishedAt ?? 0));
+}
+
+function mergeArtifacts(a: TranscriptArtifact, b: TranscriptArtifact): TranscriptArtifact {
+  const [older, newer] = (a.lastPublishedAt ?? 0) <= (b.lastPublishedAt ?? 0) ? [a, b] : [b, a];
+  const firsts = [a.firstPublishedAt, b.firstPublishedAt].filter((at): at is number => at !== undefined);
+  return {
+    url: a.url,
+    title: newer.title ?? older.title,
+    icon: newer.icon ?? older.icon,
+    description: newer.description ?? older.description,
+    versions: Math.max(a.versions, b.versions),
+    firstPublishedAt: firsts.length > 0 ? Math.min(...firsts) : undefined,
+    lastPublishedAt: newer.lastPublishedAt ?? older.lastPublishedAt,
+  };
+}
+
 /** The record Claude Code appends to a conversation when it forks it. */
 const CONTINUED_IN_MARKER = '"type":"continued-in"';
 

@@ -7,6 +7,8 @@ import type {
   BackendSessionInfo,
   FleetSessionStatus,
   GetConversationResult,
+  GetTaskArtifactsResult,
+  TaskArtifact,
   SessionRecord,
   SessionBackend,
   SessionBackendType,
@@ -38,6 +40,7 @@ import type { TaskWorkspaceInfo, WorktreeService } from './worktree.js';
 import type { SessionWorkspaceEntry } from './session-bootstrap.js';
 import {
   readTranscriptActivity,
+  readTranscriptArtifacts,
   readTranscriptTail,
   resolveContinuedSessionId,
   transcriptHasUserMessage,
@@ -1712,6 +1715,51 @@ export class SessionManager {
       return { messages: [], unavailable: 'no-transcript' };
     }
     return tail;
+  }
+
+  /**
+   * The claude.ai Artifacts a card's sessions published — every conversation
+   * the card has had in any slot, live or not — and, by default, those of
+   * every card below it, each attributed to the card that published it.
+   * Remote (ssh) cards keep their transcripts on the far host and are listed
+   * as such rather than silently reported empty.
+   */
+  getTaskArtifacts(taskId: string, includeSubtasks = true): GetTaskArtifactsResult {
+    const taskIds = [taskId];
+    if (includeSubtasks) {
+      const children = this.db.prepare<[string], { id: string }>('SELECT id FROM tasks WHERE parent_task_id = ?');
+      const seen = new Set(taskIds);
+      for (let index = 0; index < taskIds.length; index++) {
+        for (const child of children.all(taskIds[index]!)) {
+          if (!seen.has(child.id)) {
+            seen.add(child.id);
+            taskIds.push(child.id);
+          }
+        }
+      }
+    }
+    const sessionsOf = this.db.prepare<[string], { agent_session_id: string; backend_type: string }>(
+      `SELECT DISTINCT agent_session_id, backend_type FROM sessions
+        WHERE task_id = ? AND agent_session_id IS NOT NULL`
+    );
+    const artifacts: TaskArtifact[] = [];
+    const remoteTaskIds: string[] = [];
+    const claimed = new Set<string>();
+    for (const id of taskIds) {
+      const rows = sessionsOf.all(id);
+      if (rows.some((row) => row.backend_type === 'ssh')) {
+        remoteTaskIds.push(id);
+      }
+      const local = rows.filter((row) => row.backend_type !== 'ssh').map((row) => row.agent_session_id);
+      for (const artifact of readTranscriptArtifacts(local)) {
+        // A card's own publish wins over a subtask that republished the same link.
+        if (claimed.has(artifact.url)) continue;
+        claimed.add(artifact.url);
+        artifacts.push({ ...artifact, taskId: id });
+      }
+    }
+    artifacts.sort((a, b) => (b.lastPublishedAt ?? 0) - (a.lastPublishedAt ?? 0));
+    return { artifacts, remoteTaskIds };
   }
 
   /**
