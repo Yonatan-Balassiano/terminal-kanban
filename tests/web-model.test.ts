@@ -3,6 +3,8 @@ import {
   buildCardTree,
   cardState,
   cardTone,
+  descendantTasks,
+  familyBranches,
   familyColours,
   ORCHESTRATOR_PALETTE,
   prStage,
@@ -336,5 +338,36 @@ describe('buildCardTree column filter', () => {
     expect(tree[0].children[0].context).toBe(false);
     // The subtask count still describes the whole family, not what is left of it.
     expect(tree[0].subtaskCount).toBe(2);
+  });
+});
+
+describe('familyBranches', () => {
+  it("lists the card's own branches, then every PR opened below it at any depth", () => {
+    const parent = task('p', {
+      branches: [branch({ id: 'p-bare', taskId: 'p', prNumber: undefined, prState: 'none' })],
+    });
+    const child = task('c', {
+      parentTaskId: 'p',
+      branches: [
+        branch({ id: 'c-pr', taskId: 'c', prNumber: 11 }),
+        branch({ id: 'c-bare', taskId: 'c', prNumber: undefined, prState: 'none' }),
+      ],
+    });
+    const grandchild = task('g', { parentTaskId: 'c', branches: [branch({ id: 'g-pr', taskId: 'g', prNumber: 12 })] });
+    const stranger = task('s', { branches: [branch({ id: 's-pr', taskId: 's', prNumber: 13 })] });
+
+    const rows = familyBranches(parent, [grandchild, stranger, child, parent]);
+
+    expect(rows.map((row) => [row.branch.id, row.task.id])).toEqual([
+      ['p-bare', 'p'],
+      ['c-pr', 'c'],
+      ['g-pr', 'g'],
+    ]);
+  });
+
+  it('survives a parent cycle', () => {
+    const a = task('a', { parentTaskId: 'b' });
+    const b = task('b', { parentTaskId: 'a' });
+    expect(descendantTasks('a', [a, b]).map((t) => t.id)).toEqual(['b']);
   });
 });

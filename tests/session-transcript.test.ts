@@ -1,11 +1,12 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   findTranscriptPath,
   forgetTranscriptPath,
   readTranscriptActivity,
+  readTranscriptArtifacts,
   readTranscriptTail,
   resolveContinuedSessionId,
   transcriptHasUserMessage,
@@ -273,6 +274,96 @@ describe('session transcript', () => {
 
       // Act + Assert — either end is acceptable; terminating is the point.
       expect([SESSION_ID, FORK_ID]).toContain(resolveContinuedSessionId(SESSION_ID, env));
+    });
+  });
+
+  describe('readTranscriptArtifacts', () => {
+    function publish(id: string, url: string, seq: number, at: string, extra: Record<string, unknown> = {}): unknown[] {
+      return [
+        {
+          type: 'assistant',
+          timestamp: at,
+          message: {
+            content: [{ type: 'tool_use', id, name: 'Artifact', input: { file_path: '/x.html', description: `about ${url}` } }],
+          },
+        },
+        {
+          type: 'user',
+          timestamp: at,
+          message: { content: [{ type: 'tool_result', tool_use_id: id, content: `Published at ${url}` }] },
+          toolUseResult: { url, artifact_id: `id-${url}`, title: `Title ${seq}`, seq, ...extra },
+        },
+        // Claude Code repeats some results without the structured part; these must not count.
+        { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: `Published at ${url}` }] } },
+      ];
+    }
+
+    it('lists each published link once, at its latest version, newest first', () => {
+      writeTranscript([
+        ...publish('t1', 'https://claude.ai/artifact/A', 1, '2026-10-15T08:00:00Z', { icon: 'plan' }),
+        ...publish('t2', 'https://claude.ai/artifact/B', 1, '2026-10-15T09:00:00Z'),
+        ...publish('t3', 'https://claude.ai/artifact/A', 2, '2026-10-15T10:00:00Z'),
+        // A read is not a publish.
+        {
+          type: 'user',
+          message: { content: [{ type: 'tool_result', tool_use_id: 't4' }] },
+          toolUseResult: { url: 'https://claude.ai/artifact/C', content: '<html>' },
+        },
+      ]);
+
+      const artifacts = readTranscriptArtifacts([SESSION_ID], env);
+
+      expect(artifacts).toEqual([
+        {
+          url: 'https://claude.ai/artifact/A',
+          title: 'Title 2',
+          icon: 'plan',
+          description: 'about https://claude.ai/artifact/A',
+          versions: 2,
+          firstPublishedAt: Date.parse('2026-10-15T08:00:00Z'),
+          lastPublishedAt: Date.parse('2026-10-15T10:00:00Z'),
+        },
+        expect.objectContaining({ url: 'https://claude.ai/artifact/B', versions: 1 }),
+      ]);
+    });
+
+    it('picks up what was appended since the last read', () => {
+      const path = writeTranscript(publish('t1', 'https://claude.ai/artifact/A', 1, '2026-10-15T08:00:00Z'));
+      expect(readTranscriptArtifacts([SESSION_ID], env)).toHaveLength(1);
+
+      appendFileSync(
+        path,
+        publish('t2', 'https://claude.ai/artifact/B', 1, '2026-10-15T09:00:00Z')
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      expect(readTranscriptArtifacts([SESSION_ID], env).map((a) => a.url)).toEqual([
+        'https://claude.ai/artifact/B',
+        'https://claude.ai/artifact/A',
+      ]);
+    });
+
+    it("includes the conversation's subagents and the fork it continued in", () => {
+      const FORK_ID = '0b7e2c41-5d93-4f6a-8e21-7c9d3a4b5e60';
+      writeTranscript([{ type: 'continued-in', continuedInSessionId: FORK_ID }]);
+      mkdirSync(join(projectDir, SESSION_ID, 'subagents'), { recursive: true });
+      writeFileSync(
+        join(projectDir, SESSION_ID, 'subagents', 'agent-1.jsonl'),
+        publish('s1', 'https://claude.ai/artifact/SUB', 1, '2026-10-15T08:00:00Z')
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+      writeTranscript(publish('f1', 'https://claude.ai/artifact/FORK', 1, '2026-10-15T09:00:00Z'), FORK_ID);
+
+      expect(readTranscriptArtifacts([SESSION_ID], env).map((a) => a.url)).toEqual([
+        'https://claude.ai/artifact/FORK',
+        'https://claude.ai/artifact/SUB',
+      ]);
+    });
+
+    it('is empty when there is no conversation', () => {
+      expect(readTranscriptArtifacts([SESSION_ID], env)).toEqual([]);
     });
   });
 });

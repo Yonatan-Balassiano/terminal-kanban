@@ -236,7 +236,9 @@ type Model struct {
 	terminalBoardNavConsumed      bool
 	terminalBoardNavVersion       int
 	detailPaneVisible             bool
-	detailBranchIndex             int
+	// detailBranchIndex selects a row of detailRows: branches first, then Claude artifacts.
+	detailBranchIndex int
+	claudeArtifacts   *claudeArtifactsState
 
 	createTaskModal          *createTaskModalState
 	renameTaskModal          *renameTaskModalState
@@ -340,10 +342,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionPollTickMsg:
 		targets := m.sessionTargets()
 		if len(targets) == 0 || m.focus == FocusTerminal {
-			return m, sessionPollTickCmd()
+			return m, tea.Batch(sessionPollTickCmd(), m.maybeFetchClaudeArtifactsCmd())
 		}
 
-		commands := []tea.Cmd{sessionPollTickCmd()}
+		commands := []tea.Cmd{sessionPollTickCmd(), m.maybeFetchClaudeArtifactsCmd()}
 		for _, target := range targets {
 			commands = append(commands, m.inspectSessionCmd(target.TaskID, target.Slot))
 		}
@@ -354,6 +356,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case artifactsLoadedMsg:
 		m.applyArtifacts(msg)
+		return m, nil
+
+	case claudeArtifactsLoadedMsg:
+		m.applyClaudeArtifacts(msg)
 		return m, nil
 
 	case artifactRolloutMsg:
@@ -587,7 +593,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modal != ModalNone {
 			return m, m.handleModalKey(msg)
 		}
-		return m, m.handleKey(msg)
+		// Opening the PR pane, or moving to another card under it, loads that
+		// card's Claude artifacts straight away rather than on the next poll.
+		cmd := m.handleKey(msg)
+		return m, tea.Batch(cmd, m.maybeFetchClaudeArtifactsCmd())
 	}
 
 	return m, nil
@@ -949,6 +958,28 @@ func (m *Model) handleDetailPaneKey(key tea.KeyMsg) (tea.Cmd, bool) {
 		return nil, true
 	case "esc", "e":
 		m.toggleDetailPane()
+		return nil, true
+	case "o", "v":
+		// Only rows the board's own o/v cannot reach: a subtask's PR or a Claude
+		// artifact. On the card's own branches they keep their board meaning
+		// (o prefers the dev portal once merged and built).
+		if row, ok := m.selectedDetailRow(); ok && !m.isOwnBranchRow(row) {
+			return m.openSelectedDetailRowCmd(key.String() == "v"), true
+		}
+	case "E":
+		// Carry the pane's selection into the picker, so E acts on the PR the
+		// user is looking at — including a subtask's.
+		task := m.selectedTask()
+		row, ok := m.selectedDetailRow()
+		m.openBranchPRListModal(task)
+		if ok && row.Kind == detailRowBranch && m.branchPRListModal != nil {
+			for index, branch := range m.branchPRListBranches() {
+				if branch.ID == row.Branch.ID {
+					m.branchPRListModal.Index = index
+					break
+				}
+			}
+		}
 		return nil, true
 	}
 	return nil, false
@@ -2803,15 +2834,21 @@ func (m *Model) toggleDetailPane() {
 	m.focus = FocusDetail
 }
 
-// moveDetailBranchSelection walks the selected card's branches. It clamps rather
-// than wraps so the ends of a five-repo feature stay findable by feel.
+// moveDetailBranchSelection walks the pane's rows: the card's branches, its
+// subtasks' PRs, then its Claude artifacts. It clamps rather than wraps so the
+// ends of a five-repo feature stay findable by feel.
 func (m *Model) moveDetailBranchSelection(delta int) {
 	task := m.selectedTask()
-	if task == nil || len(task.Branches) == 0 {
+	if task == nil {
 		m.detailBranchIndex = 0
 		return
 	}
-	m.detailBranchIndex = clamp(m.detailBranchIndex+delta, 0, len(task.Branches)-1)
+	rows := m.detailRows(*task)
+	if len(rows) == 0 {
+		m.detailBranchIndex = 0
+		return
+	}
+	m.detailBranchIndex = clamp(m.detailBranchIndex+delta, 0, len(rows)-1)
 }
 
 // taskBranchRepoLabel names the repo a branch lives in, falling back to the raw

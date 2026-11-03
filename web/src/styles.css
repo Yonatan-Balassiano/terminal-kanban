@@ -433,3 +433,9 @@ kbd {
 .composer-warn { color: var(--s-needs); }
 .composer-error { color: var(--pr-closed); }
 .composer-pending { color: var(--muted); }
+
+/* Artifacts a card's sessions (and its subtasks') published */
+.artifact-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.artifact-list li { line-height: 1.4; }
+.artifact-source, .pr-subtask { display: inline-flex; margin-left: 8px; padding: 0; color: inherit; opacity: 0.75; }
+.pr-subtask { display: flex; margin-left: 0; }

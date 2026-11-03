@@ -102,6 +102,46 @@ export function prBranches(task: TaskRecord): TaskBranchRecord[] {
   return task.branches.filter((branch) => branch.prNumber !== undefined && branch.prState !== 'none');
 }
 
+/**
+ * Every card below this one, at any depth, parents before their subtasks.
+ * Bounded by the board's own size, so a parent cycle cannot hang it.
+ */
+export function descendantTasks(taskId: string, tasks: readonly TaskRecord[]): TaskRecord[] {
+  const out: TaskRecord[] = [];
+  const seen = new Set([taskId]);
+  for (let index = -1; index < out.length; index++) {
+    const parentId = index < 0 ? taskId : out[index]!.id;
+    for (const task of tasks) {
+      if (task.parentTaskId === parentId && !seen.has(task.id)) {
+        seen.add(task.id);
+        out.push(task);
+      }
+    }
+  }
+  return out;
+}
+
+export interface FamilyBranch {
+  branch: TaskBranchRecord;
+  /** The card the branch belongs to: the card itself or one of its subtasks. */
+  task: TaskRecord;
+}
+
+/**
+ * A card's branches followed by every pull request opened under it. The
+ * card's own branches are all listed, PR or not, as before; a subtask's only
+ * once it has a PR, since its bare branches are its own business.
+ */
+export function familyBranches(task: TaskRecord, tasks: readonly TaskRecord[]): FamilyBranch[] {
+  const own = [...task.branches].sort((a, b) => a.sortKey - b.sortKey).map((branch) => ({ branch, task }));
+  const below = descendantTasks(task.id, tasks).flatMap((child) =>
+    prBranches(child)
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .map((branch) => ({ branch, task: child })),
+  );
+  return [...own, ...below];
+}
+
 /** A card with nothing left to do: no live session, and every PR finished. */
 export function isShipped(
   task: TaskRecord,

@@ -6,6 +6,8 @@ import {
   cardState,
   cardTone,
   countFamily,
+  descendantTasks,
+  familyBranches,
   familyColours,
   findPRRelease,
   prBranches,
@@ -24,6 +26,7 @@ import {
   type TaskRecord,
 } from './model';
 import { useBoard } from './useBoard';
+import { Artifacts } from './Artifacts';
 import { Conversation, MarkdownText } from './Conversation';
 import { ConfirmDialog, HelpDialog, NewCardDialog, TeleportDialog, TextDialog, type NewCardInput } from './Dialogs';
 import { commandForKey, navigate, primaryPR, visibleCards, type Command } from './keys';
@@ -583,7 +586,7 @@ export function App() {
                 task={selected}
                 board={board}
                 fleet={fleet}
-                releases={releases.get(selected.id)}
+                releases={releases}
                 focus={focus?.taskId === selected.id ? focus : null}
                 onSelect={(task) => visitCard(task, false)}
                 onCommand={runCommand}
@@ -743,6 +746,9 @@ function CardBranch(props: CardBranchProps) {
   const repo = board.repos.find((r) => r.id === task.repoId);
   const prs = prBranches(task);
   const taskReleases = releases.get(task.id);
+  // Folded away, a parent's row is the only place its subtasks' PRs could show.
+  const hiddenSubtaskPRs =
+    hasChildren && isCollapsed ? descendantTasks(task.id, board.tasks).flatMap(prBranches).length : 0;
   const pending = focus?.taskId === task.id && focus.kind === 'pending';
   const family = families.get(task.id);
   const familyStyle = family
@@ -796,6 +802,11 @@ function CardBranch(props: CardBranchProps) {
             {hasChildren && (
               <span className="muted">
                 {node.subtaskCount} subtask{node.subtaskCount === 1 ? '' : 's'}
+              </span>
+            )}
+            {hiddenSubtaskPRs > 0 && (
+              <span className="chip chip-pr" title="Pull requests opened by its subtasks">
+                +{hiddenSubtaskPRs} subtask PR{hiddenSubtaskPRs === 1 ? '' : 's'}
               </span>
             )}
             <span className="muted push">{relativeTime(task.updatedAt)}</span>
@@ -867,7 +878,7 @@ interface CardDetailProps {
   task: TaskRecord;
   board: BoardSnapshot;
   fleet: FleetSessionStatus[];
-  releases?: PRReleaseStatus[];
+  releases: ReadonlyMap<string, PRReleaseStatus[]>;
   focus: FocusStatus | null;
   onSelect: (task: TaskRecord) => void;
   onCommand: (command: Command) => void;
@@ -882,7 +893,9 @@ function CardDetail({ task, board, fleet, releases, focus, onSelect, onCommand }
   const labels = task.labels
     .map((id) => board.labels.find((label) => label.id === id)?.label)
     .filter((label): label is string => Boolean(label));
-  const branches = [...task.branches].sort((a, b) => a.sortKey - b.sortKey);
+  // The card's own branches, then every PR its subtasks opened, at any depth.
+  const branches = familyBranches(task, board.tasks);
+  const fromSubtasks = branches.some((entry) => entry.task.id !== task.id);
 
   return (
     <article className="detail-body">
@@ -955,7 +968,10 @@ function CardDetail({ task, board, fleet, releases, focus, onSelect, onCommand }
       </dl>
 
       <section>
-        <h2>Pull requests</h2>
+        <h2>
+          Pull requests
+          {fromSubtasks && <span className="h2-note">including subtasks</span>}
+        </h2>
         {branches.length === 0 ? (
           <p className="muted">No branches yet.</p>
         ) : (
@@ -971,14 +987,23 @@ function CardDetail({ task, board, fleet, releases, focus, onSelect, onCommand }
                 </tr>
               </thead>
               <tbody>
-                {branches.map((branch) => (
-                  <PRRow key={branch.id} branch={branch} board={board} release={findPRRelease(branch, releases)} />
+                {branches.map(({ branch, task: owner }) => (
+                  <PRRow
+                    key={branch.id}
+                    branch={branch}
+                    board={board}
+                    release={findPRRelease(branch, releases.get(owner.id))}
+                    subtask={fromSubtasks && owner.id !== task.id ? owner : undefined}
+                    onSelect={onSelect}
+                  />
                 ))}
               </tbody>
             </table>
           </div>
         )}
       </section>
+
+      <Artifacts task={task} tasks={board.tasks} onSelect={onSelect} />
 
       {children.length > 0 && (
         <section>
@@ -1018,7 +1043,16 @@ function ToolButton(props: { label: string; shortcut: string; onClick: () => voi
   );
 }
 
-function PRRow({ branch, board, release }: { branch: TaskBranchRecord; board: BoardSnapshot; release?: PRReleaseStatus }) {
+interface PRRowProps {
+  branch: TaskBranchRecord;
+  board: BoardSnapshot;
+  release?: PRReleaseStatus;
+  /** Set when the PR belongs to a subtask of the card being shown. */
+  subtask?: TaskRecord;
+  onSelect: (task: TaskRecord) => void;
+}
+
+function PRRow({ branch, board, release, subtask, onSelect }: PRRowProps) {
   const stage = prStage(branch, release);
   const repo = board.repos.find((r) => r.id === branch.repoId);
   return (
@@ -1035,6 +1069,11 @@ function PRRow({ branch, board, release }: { branch: TaskBranchRecord; board: Bo
           {repo?.label ? `${repo.label} · ` : ''}
           {branch.branchName}
         </div>
+        {subtask && (
+          <button className="link small pr-subtask" onClick={() => onSelect(subtask)} title="Open the subtask">
+            ↳ {subtask.title}
+          </button>
+        )}
         {branch.githubSyncError && <div className="error small">{branch.githubSyncError}</div>}
       </td>
       <td>
